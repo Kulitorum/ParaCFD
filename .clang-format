@@ -1,0 +1,58 @@
+﻿BasedOnStyle: LLVM
+Language: Cpp
+
+# --- BRACES (Allman + indented braces) ---
+BreakBeforeBraces: Allman
+BraceWrapping:
+  IndentBraces: true        # <-- valid in v19 under BraceWrapping
+  AfterClass: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+
+# --- NEVER WRAP LINES ---
+ColumnLimit: 0
+
+# --- INDENTATION ---
+UseTab: ForIndentation
+TabWidth: 4
+ContinuationIndentWidth: 4
+
+# --- KEEP THINGS ON ONE LINE, AGGRESSIVELY ---
+BinPackParameters: true
+BinPackArguments: true
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AlwaysBreakAfterDefinitionReturnType: None
+AlwaysBreakAfterReturnType: None
+BreakBeforeBinaryOperators: None
+AlwaysBreakBeforeMultilineStrings: false
+
+# Constructor initializer lists & braced lists: avoid vertical breaking
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+Cpp11BracedListStyle: false
+
+# Includes unchanged
+IncludeBlocks: Preserve
+
+# --- DISABLE COMMENT REFLOW ---
+ReflowComments: false
+
+# --- HUGE PENALTIES TO AVOID ANY BREAKS ---
+PenaltyBreakAssignment: 2000000
+PenaltyBreakBeforeFirstCallParameter: 2000000
+PenaltyBreakComment: 2000000
+PenaltyBreakFirstLessLess: 2000000
+PenaltyBreakString: 2000000
+PenaltyBreakTemplateDeclaration: 2000000
+PenaltyExcessCharacter: 2000000
+PenaltyReturnTypeOnItsOwnLine: 2000000

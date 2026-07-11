@@ -1,0 +1,40 @@
+# Build output
+build/
+build-*/
+out/
+
+# User geometry experiments (STEP/STL inputs kept out of the repo)
+Experiments/
+
+# Simulation output artifacts
+*.vti
+*.vtr
+*.pvd
+*.csv
+!configs/**/*.csv
+
+# Saved scenes / checkpoints (large binary sim snapshots — see src/gui/scene_io)
+*.scn
+Scenes/
+
+# CMake / IDE
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+.vs/
+.vscode/
+.idea/
+*.user
+compile_commands.json
+
+# Gate / build verification logs
+*.log
+
+# Installer output (compiled setup .exe — built via installer/build_installer.ps1)
+installer/Output/
+
+# OS / editor cruft
+Thumbs.db
+Desktop.ini
+*.swp
+*~

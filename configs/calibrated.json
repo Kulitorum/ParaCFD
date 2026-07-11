@@ -1,0 +1,18 @@
+{
+	"name": "calibrated",
+	"_STATUS": "PROVISIONAL / UNCALIBRATED — NOT a frozen calibration.",
+	"_doc": "PLAN M6 asks for the calibrated constants to be frozen here after the V7 gate passes. It has NOT passed: the uncalibrated pile-scour equilibrium is S/D ≈ 0.13, ~10× below Roulund's 1.25, and the sweeps prove the sanctioned ±30% sediment knobs (van Rijn α, Winterwerp erosion_coeff) cannot close the gap — the deficit is the semi-Lagrangian solver's horseshoe-vortex under-resolution (RESEARCH §11 #1). See M6_REPORT.md. Freezing a constant here is the orchestrator's + MH's decision, NOT an agent's (CLAUDE.md M6 / HANDOVER). The values below are the NOMINAL (spec-default) constants, provided ONLY so the comparative M8 shape-ranking (whose authority is relative, not absolute — RESEARCH §11 #2) has a config to consume. Treat every absolute number produced with these as INDICATIVE until MH resolves the M6_REPORT.md decision (accept comparative-only / refine grid to D/20 / freeze an HSV multiplier / LBM plan-B).",
+	"_calibration_decision_pending": true,
+	"rho": 1027.0,
+	"rho_s": 2650.0,
+	"nu": 1.36e-6,
+	"Cs": 0.11,
+	"alpha": 0.00033,
+	"erosion_coeff": 0.018,
+	"sigma_s": 0.7,
+	"bedload_formula": 1,
+	"hsv_mult": 1.0,
+	"_hsv_mult_note": "1.0 = no HSV crutch. M6_REPORT.md §4 quantifies the multiplier that would reach S/D=1.25; MH decides whether to adopt it and at what value.",
+	"phi_repose_deg": 32.0,
+	"c_pack": 0.64
+}

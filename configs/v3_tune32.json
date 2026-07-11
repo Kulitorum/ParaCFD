@@ -1,0 +1,13 @@
+{
+	"name": "v3_tune32",
+	"_doc": "D=32 Re=100 only, reduced spin-up/record — Cd/St tuning (NOT the gate).",
+	"D": 32,
+	"nx_D": 24,
+	"ny_D": 12,
+	"nz": 4,
+	"xc_D": 8.0,
+	"skip_re200": 1,
+	"skip_empty": 1,
+	"re100": { "Re": 100, "spinup_flowthroughs": 6, "record_samples": 4096, "cfl": 1.0, "v_blip": 0.05 },
+	"gates": { "St_lo": 0.1558, "St_hi": 0.1764, "Cd_lo": 1.197, "Cd_hi": 1.54, "mass_tol": 1e-3, "profile_tol": 0.05 }
+}

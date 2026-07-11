@@ -1,0 +1,15 @@
+{
+	"name": "m0_smoke",
+	"domain_x": 10.0,
+	"domain_y": 10.0,
+	"domain_z": 5.0,
+	"voxel_h": 0.05,
+	"rho": 1027.0,
+	"nu": 1.36e-6,
+	"U": 1.0,
+	"rho_s": 2650.0,
+	"d50": 0.35e-3,
+	"porosity": 0.36,
+	"phi_repose_deg": 32.0,
+	"out_dir": "out"
+}

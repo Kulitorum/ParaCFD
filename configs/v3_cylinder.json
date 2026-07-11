@@ -1,0 +1,41 @@
+{
+	"name": "v3_cylinder",
+	"_doc": "M2 gate V3 — flow past a cylinder (Cd/St, Re=100 & 200) + open-channel BCs. RESEARCH §10 V3 / research/11 §4. Cylinder surface is NO-SLIP (resolved BL at D=32); free-slip solids are also implemented (RESEARCH §3) but cannot shed or reach Cd≈1.33. re100.record_samples=16384 gives a ~39-shedding-cycle FFT window (dt≈0.469, T_shed≈197.5), clearing the PLAN's ≥20-cycle requirement.",
+	"D": 32,
+	"nx_D": 24,
+	"ny_D": 12,
+	"nz": 4,
+	"xc_D": 8.0,
+	"re100": {
+		"Re": 100,
+		"spinup_flowthroughs": 10,
+		"record_samples": 16384,
+		"cfl": 1.0,
+		"v_blip": 0.05
+	},
+	"re200": {
+		"Re": 200,
+		"spinup_flowthroughs": 6,
+		"record_samples": 2048,
+		"cfl": 1.0,
+		"v_blip": 0.05
+	},
+	"empty": {
+		"Lx": 10.0,
+		"Ly": 10.0,
+		"Lz": 5.0,
+		"h": 0.1,
+		"U": 1.0,
+		"d50": 3.5e-4,
+		"nu": 1.36e-6,
+		"flowthroughs": 4.0
+	},
+	"gates": {
+		"St_lo": 0.1558,
+		"St_hi": 0.1764,
+		"Cd_lo": 1.197,
+		"Cd_hi": 1.54,
+		"mass_tol": 1e-3,
+		"profile_tol": 0.05
+	}
+}
