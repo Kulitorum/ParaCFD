@@ -162,9 +162,14 @@ start Phase B until Phase A's oracle is green.
       `hostGrid()` (host metric arrays on graded, per 3.3). Substep/seed sizing keeps `g.h`=h_fine
       (conservative). Collapses to the uniform forms on a null-metric grid. Compiles; runtime is
       main-thread paint (not exercised headlessly).
-- [ ] 4.5 Persist/reconstruct the grid in `scene_io.*` (fine-core **recipe**, per design lean +
+- [x] 4.5 Persist/reconstruct the grid in `scene_io.*` (fine-core **recipe**, per design lean +
       `7a8f346` STEP-as-source-of-truth pattern); ensure legacy uniform scenes load as the special
       case
+      → `write_scene` serialises `recipe.graded` + the `fine_core` spec into the `.scn` JSON; `read_scene`
+      reads them and, when graded, regenerates `GridMetrics::generate(fine_core)` → `device_view()` (arrays
+      derived, not stored). Legacy scenes (no `fine_core`) ⇒ graded=false ⇒ the uniform grid stands.
+      VERIFIED end-to-end: a headless graded run saved a `.scn` carrying `"graded":true` + the full
+      fine_core, and a fresh `--load-scene` regenerated the graded grid and resumed (no crash).
 
 ## 5. Phase B — Verification tests
 
@@ -180,7 +185,11 @@ start Phase B until Phase A's oracle is green.
       grid
       → 15 kernels (both families) GPU-vs-CPU on a generated graded 23³ grid, all ≤3e-15. Proves the
       metric-reading kernels are correct on non-uniform spacing (not just collapsing to uniform).
-- [ ] 5.4 Add a scene round-trip test (graded save/reload; legacy uniform load)
+- [x] 5.4 Add a scene round-trip test (graded save/reload; legacy uniform load)
+      → `parity_probe` `scene_regen_deterministic`: `GridMetrics::generate(spec)` twice from the same
+      persisted spec yields an IDENTICAL grid (nx/ny/nz, dx, xc, xf, dz, zf, h_min all bit-equal) — the
+      round-trip invariant, since `.scn` regenerates from the spec. Plus the end-to-end headless save/
+      load in 4.5. Legacy uniform load = the existing null-metric path (graded=false).
 
 ## 6. Corner-resolution workflow
 

@@ -725,6 +725,27 @@ int main(int argc, char** argv)
 		rep.check("voxelize_building_located", located && allcore, d);
 	}
 
+	std::printf("-- graded scene round-trip: regenerate from the persisted recipe (tasks 4.5/5.4) --\n");
+	{
+		// A .scn persists the fine-core SPEC and regenerates the metrics on load (recipe-as-source-of-
+		// truth). The round-trip invariant is that GridMetrics::generate is deterministic: the same spec
+		// yields an identical grid — same widths, centres, and hence world↔index mapping.
+		FineCoreSpec spec;
+		spec.Lx = 4.0; spec.Ly = 3.0; spec.Lz = 2.0;
+		spec.x0 = 1.5; spec.x1 = 2.5; spec.y0 = 1.0; spec.y1 = 2.0; spec.z0 = 0.5; spec.z1 = 1.5;
+		spec.h_fine = 0.05; spec.growth = 1.18;
+		GridMetrics a = GridMetrics::generate(spec);
+		GridMetrics b = GridMetrics::generate(spec); // "reload": regenerate from the same persisted spec
+		MacGrid ga = a.host_view(), gb = b.host_view();
+		bool same = ga.nx == gb.nx && ga.ny == gb.ny && ga.nz == gb.nz && std::fabs(ga.h - gb.h) < 1e-15 && std::fabs(a.h_min() - b.h_min()) < 1e-15;
+		for (int i = 0; i < ga.nx && same; ++i)
+			if (std::fabs(ga.dx(i) - gb.dx(i)) > 1e-15 || std::fabs(ga.xc(i) - gb.xc(i)) > 1e-15 || std::fabs(ga.xf(i) - gb.xf(i)) > 1e-15) same = false;
+		for (int k = 0; k < ga.nz && same; ++k)
+			if (std::fabs(ga.dz(k) - gb.dz(k)) > 1e-15 || std::fabs(ga.zf(k) - gb.zf(k)) > 1e-15) same = false;
+		char d[64]; std::snprintf(d, sizeof d, "%dx%dx%d regenerated identical", ga.nx, ga.ny, ga.nz);
+		rep.check("scene_regen_deterministic", same, d);
+	}
+
 	free_all();
 	std::printf("\nparity_probe: %d/%d checks passed (%d failed)\n", rep.total - rep.failed, rep.total, rep.failed);
 	return rep.failed == 0 ? 0 : 1;

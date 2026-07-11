@@ -230,7 +230,11 @@ namespace windcfd::gui
 			{"base_solid_mode", d.recipe.base_solid_mode}, {"init_u", d.recipe.init_u},
 			{"init_v_blip", d.recipe.init_v_blip}, {"source_config", d.recipe.source_config},
 			{"bc", bc_json(d.recipe.bc)},
-			{"pr", pr_json(d.recipe.pr)}, {"info", info_json(d.recipe.info)} };
+			{"pr", pr_json(d.recipe.pr)}, {"info", info_json(d.recipe.info)},
+			{"graded", d.recipe.graded},
+			{"fine_core", { {"Lx", d.recipe.fine_core.Lx}, {"Ly", d.recipe.fine_core.Ly}, {"Lz", d.recipe.fine_core.Lz},
+				{"x0", d.recipe.fine_core.x0}, {"x1", d.recipe.fine_core.x1}, {"y0", d.recipe.fine_core.y0}, {"y1", d.recipe.fine_core.y1},
+				{"z0", d.recipe.fine_core.z0}, {"z1", d.recipe.fine_core.z1}, {"h_fine", d.recipe.fine_core.h_fine}, {"growth", d.recipe.fine_core.growth} } } };
 		j["state_bc"] = bc_json(s.bc);
 		j["solid_mode"] = s.solid_mode;
 		j["bed_inlet_mask"] = s.bed_inlet_mask;
@@ -349,6 +353,25 @@ namespace windcfd::gui
 			d.recipe.bc = bc_from(r.contains("bc") ? r.at("bc") : nlohmann::json());
 			d.recipe.pr = pr_from(r.contains("pr") ? r.at("pr") : nlohmann::json());
 			d.recipe.info = info_from(r.contains("info") ? r.at("info") : nlohmann::json());
+			// Graded fine-core grid: persist the RECIPE (spec) and regenerate the metric arrays on load
+			// (the STEP-as-source-of-truth pattern — the arrays are derived, not stored). A legacy scene
+			// has no fine_core ⇒ graded=false ⇒ the uniform grid reconstructed above (nx/ny/nz/h) stands.
+			d.recipe.graded = r.value("graded", false);
+			if (r.contains("fine_core"))
+			{
+				const auto& fcj = r.at("fine_core");
+				windcfd::core::FineCoreSpec& fc = d.recipe.fine_core;
+				fc.Lx = fcj.value("Lx", 0.0); fc.Ly = fcj.value("Ly", 0.0); fc.Lz = fcj.value("Lz", 0.0);
+				fc.x0 = fcj.value("x0", 0.0); fc.x1 = fcj.value("x1", 0.0);
+				fc.y0 = fcj.value("y0", 0.0); fc.y1 = fcj.value("y1", 0.0);
+				fc.z0 = fcj.value("z0", 0.0); fc.z1 = fcj.value("z1", 0.0);
+				fc.h_fine = fcj.value("h_fine", 0.0); fc.growth = fcj.value("growth", 1.15);
+			}
+			if (d.recipe.graded && d.recipe.fine_core.h_fine > 0.0)
+			{
+				d.recipe.metrics = std::make_shared<windcfd::core::GridMetrics>(windcfd::core::GridMetrics::generate(d.recipe.fine_core));
+				d.recipe.grid = d.recipe.metrics->device_view(); // device metric pointers for the rebuilt core
+			}
 		}
 		d.recipe.base_solid = as_u8(blobs, "base_solid");
 
