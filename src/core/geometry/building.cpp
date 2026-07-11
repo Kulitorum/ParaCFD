@@ -121,6 +121,29 @@ namespace windcfd::core
 			}
 			return out;
 		}
+
+		// Signed area of a closed polygon (shoelace); |area| distinguishes a real building
+		// outline from an open/degenerate wall path.
+		double poly_area(const Loop2D& p)
+		{
+			const std::size_t m = p.size();
+			if (m < 3) return 0.0;
+			double a = 0.0;
+			for (std::size_t i = 0, j = m - 1; i < m; j = i++)
+				a += p[j][0] * p[i][1] - p[i][0] * p[j][1];
+			return 0.5 * a;
+		}
+
+		// Point-in-triangle (edge-sign test, winding-agnostic).
+		bool point_in_tri(V2 p, V2 a, V2 b, V2 c)
+		{
+			double d1 = cross(p - a, b - a);
+			double d2 = cross(p - b, c - b);
+			double d3 = cross(p - c, a - c);
+			bool neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+			bool pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+			return !(neg && pos);
+		}
 	} // namespace
 
 	std::size_t Footprint::point_count() const
@@ -275,6 +298,51 @@ namespace windcfd::core
 		if (prm.corner_radius > half + 1e-9)
 			for (Loop2D& lp : wall_loops) lp = round_loop(lp, prm.corner_radius - half, 6);
 
+		// True SHARP (square) corners at corner_radius 0: start from the width-t distance band
+		// (rounded corners), then square off each CONVEX corner by adding an outward miter WEDGE
+		// triangle. Local + robust on non-convex outlines (no global offset polygon to self-
+		// intersect). Curved walls (small turn per facet) are left rounded via the angle threshold.
+		const bool sharp = (prm.corner_radius <= 1e-6);
+		struct Wedge
+		{
+			V2 a, b, c;
+		};
+		std::vector<Wedge> wedges;
+		if (sharp)
+		{
+			for (const Loop2D& lp : fp.loops)
+			{
+				const std::size_t m = lp.size();
+				if (m < 3) continue;
+				const double s = poly_area(lp) >= 0.0 ? 1.0 : -1.0; // loop orientation (+1 = CCW)
+				for (std::size_t i = 0; i < m; ++i)
+				{
+					V2 A{ lp[(i + m - 1) % m][0], lp[(i + m - 1) % m][1] };
+					V2 B{ lp[i][0], lp[i][1] };
+					V2 C{ lp[(i + 1) % m][0], lp[(i + 1) % m][1] };
+					V2 din = norm(B - A), dout = norm(C - B);
+					if (len(din) < 0.5 || len(dout) < 0.5) continue;
+					if (cross(din, dout) * s <= 0.15) continue; // only genuine convex corners (skip curves/concave)
+					const V2 uin = s > 0 ? V2{ din.y, -din.x } : V2{ -din.y, din.x };   // outward edge normals
+					const V2 uout = s > 0 ? V2{ dout.y, -dout.x } : V2{ -dout.y, dout.x };
+					const double denom = 1.0 + dot(uin, uout);
+					V2 mm = denom < 1e-6 ? uout : (uin + uout) * (1.0 / denom);
+					const double ml = len(mm);
+					if (ml > 6.0) mm = mm * (6.0 / ml); // miter limit -> bevel very sharp spikes
+					wedges.push_back({ B + uin * half, B + mm * half, B + uout * half });
+				}
+			}
+		}
+		auto wall_hit = [&](double x, double y) -> bool
+		{
+			if (!sharp) return dist_to_loops(x, y, wall_loops) <= half;
+			if (dist_to_loops(x, y, fp.loops) <= half) return true; // the rounded band...
+			V2 p{ x, y };
+			for (const Wedge& w : wedges) // ...squared off at convex corners
+				if (point_in_tri(p, w.a, w.b, w.c)) return true;
+			return false;
+		};
+
 		// xy region that can possibly be solid (footprint + wall/overhang reach), as cell indices.
 		const double reach = std::max(half, half + prm.roof_overhang) + 1.5 * g.h;
 		auto ci = [&](double v, int n) { int c = (int)std::floor(v / g.h); return c < 0 ? 0 : (c > n - 1 ? n - 1 : c); };
@@ -297,7 +365,7 @@ namespace windcfd::core
 					bool solid = false;
 					if (inWall)
 					{
-						if (dist_to_loops(cx, cy, wall_loops) <= half) { solid = true; ++wall_cells; }
+						if (wall_hit(cx, cy)) { solid = true; ++wall_cells; }
 					}
 					else // inRoof
 					{
