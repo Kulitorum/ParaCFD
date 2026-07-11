@@ -2,6 +2,8 @@
 // See building.h for the rationale (voxelize the centerline directly, no watertight solid).
 #include "core/geometry/building.h"
 
+#include "core/fluid/grid_metrics.h" // recommended_h_fine / below_resolution_floor (corner-resolution rule)
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -421,6 +423,12 @@ namespace windcfd::core
 		std::printf("[building] voxelize: t=%.3f (voxel wall=%.3f, grid h=%.3f) height=%.2f r=%.3f overhang=%.2f roof=%.2f -> %d solid cells (%d wall + %d roof, %.3f%% of domain)\n",
 			prm.wall_thickness, eff_thickness, g.h, prm.wall_height, prm.corner_radius, prm.roof_overhang, prm.roof_thickness,
 			total, wall_cells, roof_cells, 100.0 * total / std::max(1, g.p_count()));
+		// Corner-resolution floor (design D7): a rounded corner needs h_fine < r/4 to be distinguishable
+		// from sharp — otherwise a rounded-vs-sharp comparison is discretization noise, not physics.
+		if (below_resolution_floor(g.h, prm.corner_radius))
+			std::printf("[building] WARNING: cell size h=%.3f m ≥ r/4 (r=%.3f m) — the rounded corner is UNDER-RESOLVED "
+				"(not comparison-grade). Use h_fine ≈ %.3f m (r/10) for a trustworthy rounded-vs-sharp study.\n",
+				g.h, prm.corner_radius, recommended_h_fine(prm.corner_radius));
 		return mask;
 	}
 }

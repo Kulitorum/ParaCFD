@@ -346,3 +346,18 @@ opportunistically once R1 produces averaged data.
   Determinism: fixed seeds for SEM eddies; document any nondeterminism.
 - Commit style: Conventional Commits (`feat:`, `fix:`, `test:`, …). Keep the inherited fluid
   validations (cavity / cylinder) green — they are the foundation every wind result stands on.
+
+## Graded structured grid — DONE (the resolution-decouple milestone)
+
+The uniform grid welded feature resolution to domain size, so a rounded vs sharp corner was
+invisible at an affordable grid. Shipped an axis-separable **graded structured grid** (uniform
+`h_fine` core + geometrically graded coarse far field; `src/core/fluid/grid_metrics.*`): `MacGrid`
+gained per-axis metric arrays (null ⇒ uniform, byte-identical), every operator + the voxelizers +
+windloads + the slice sampler + the flow tracers are metric-aware, `.scn` persists the fine-core
+recipe, and it is all gated by the live `parity_probe` oracle (GPU-vs-CPU + golden + graded
+parity/MMS/MGPCG/windloads/voxelize/scene checks). Opt-in via a config `fine_core` object. **Left
+for the operator**: the physical acceptance runs — rounded corner at `h_fine = 30 mm` and `20 mm`,
+confirm the grid-convergence gate (Cd + peak-suction Cp stable within the averaging RMS band), then
+one converged sharp-vs-rounded comparison. Also outstanding: GUI dock controls for the fine core and
+the graded voxel-staircase overlay (display polish). Full record:
+`openspec/changes/graded-structured-grid/`.

@@ -121,6 +121,10 @@ start Phase B until Phase A's oracle is green.
       grid-dims readout still shows uniform-derived dims on a graded grid (cosmetic, 3.4).
 - [ ] 3.4 Add GUI fine-core controls in `main_window.*`; optionally auto-track the placed building
       bbox + margin (see design Open Questions)
+      → **DEFERRED (usability, not verifiable headlessly).** The graded grid is fully usable today via
+      the config `fine_core` object + Apply (re-reads the config). Dock spinboxes (h_fine/growth/box or
+      auto-track the placed building bbox + margin) + Apply-override fine-core fields + the grid-dims
+      readout using metric dims are GUI polish needing interactive testing (offscreen renders 0 frames).
 
 ## 4. Phase B — Consumers
 
@@ -193,16 +197,33 @@ start Phase B until Phase A's oracle is green.
 
 ## 6. Corner-resolution workflow
 
-- [ ] 6.1 Implement the `h_fine` sizing helper (~`r/10`) and surface the `h ≥ r/4` resolution
+- [x] 6.1 Implement the `h_fine` sizing helper (~`r/10`) and surface the `h ≥ r/4` resolution
       floor to the user
-- [ ] 6.2 Document + support the matched-A/B and grid-convergence-gate protocol (rounded at 30 mm
+      → `grid_metrics.h`: `recommended_h_fine(r)=r/10` + `below_resolution_floor(h_fine,r)=(h_fine≥r/4)`.
+      `voxelize_building` prints a loud WARNING (not comparison-grade + the recommended h_fine) when a
+      rounded build is under-resolved. `parity_probe` `hfine_sizing_rule` verifies both.
+- [x] 6.2 Document + support the matched-A/B and grid-convergence-gate protocol (rounded at 30 mm
       vs 20 mm; compare Cd + peak-suction Cp within the averaging RMS band)
+      → Documented in CLAUDE.md ("Corner-resolution protocol") + RESEARCH.md: matched A/B (same domain,
+      fine_core spec, inflow; only the corner differs), the sizing rule + floor, the convergence gate
+      (rerun rounded at a finer h_fine; Cd + peak-suction Cp stable within the averaging RMS band), and
+      judge off the time-averaged loads (`LoadAverager`). Supported by the config `fine_core` +
+      `GridMetrics::generate` (matched grids) and the averaging window already in the GUI.
 
 ## 7. Validation & docs
 
 - [ ] 7.1 Run the rounded corner at `h_fine = 30 mm` and `20 mm`; confirm the grid-convergence
       gate; record the converged loads
+      → **USER-DRIVEN GPU JOB** (multi-hour converged averaging, per config, on the RTX 4090). The
+      machinery is complete: set a `fine_core` (`h_fine=0.03` then `0.02`) enclosing the placed
+      building, Build, Start, "Start averaging", let it converge (watch the drift hint), read Cd +
+      peak-suction Cp. Not runnable in a coding session.
 - [ ] 7.2 Produce one converged sharp-vs-rounded comparison on the graded grid as the acceptance
       demonstration
-- [ ] 7.3 Update `CLAUDE.md` / `RESEARCH.md` / `PLAN.md` to reflect the graded grid and the
+      → **USER-DRIVEN GPU JOB** (a matched A/B pair per 6.2, after 7.1's gate passes). The tool now
+      supports it end-to-end.
+- [x] 7.3 Update `CLAUDE.md` / `RESEARCH.md` / `PLAN.md` to reflect the graded grid and the
       resolution/convergence protocol
+      → CLAUDE.md: graded grid in the architecture map + Known-gaps (DONE) + the corner-resolution
+      protocol + parity_probe now the LIVE oracle (was "not in the tree") + the `parity_probe` target.
+      RESEARCH.md: a "Graded structured grid" numerics section. PLAN.md: the milestone-DONE note.

@@ -746,6 +746,15 @@ int main(int argc, char** argv)
 		rep.check("scene_regen_deterministic", same, d);
 	}
 
+	std::printf("-- h_fine sizing rule + resolution floor (task 6.1) --\n");
+	{
+		bool r10 = std::fabs(recommended_h_fine(0.3) - 0.03) < 1e-12;  // r/10
+		bool floor_hi = below_resolution_floor(0.08, 0.3);             // 0.08 ≥ r/4=0.075 ⇒ under-resolved
+		bool floor_ok = !below_resolution_floor(0.03, 0.3);            // 0.03 < 0.075 ⇒ comparison-grade
+		bool sharp = !below_resolution_floor(0.08, 0.0);               // sharp (r=0) never flagged
+		rep.check("hfine_sizing_rule", r10 && floor_hi && floor_ok && sharp, "h_fine≈r/10, floor at r/4");
+	}
+
 	free_all();
 	std::printf("\nparity_probe: %d/%d checks passed (%d failed)\n", rep.total - rep.failed, rep.total, rep.failed);
 	return rep.failed == 0 ? 0 : 1;

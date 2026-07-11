@@ -32,6 +32,15 @@ namespace windcfd::core
 	// no adjacent-cell ratio exceeding `growth`. Pure host, dependency-free — unit-testable.
 	std::vector<double> graded_axis_faces(double L, double a, double b, double h_fine, double growth);
 
+	// --- Corner-resolution workflow (design D7) --------------------------------------------------
+	// The rounded-vs-sharp corner signal rides on top of the discretization error, so h_fine is not a
+	// free knob. Rule: resolve a corner radius r with ≥ ~10 cells across it ⇒ recommended h_fine ≈ r/10
+	// (e.g. 30 mm for a 300 mm radius). Hard FLOOR: at h_fine ≥ r/4 the voxelized rounded corner is
+	// indistinguishable from sharp, so any measured difference is a discretization artifact — such a run
+	// is NOT comparison-grade and the workflow flags it.
+	inline double recommended_h_fine(double corner_radius) { return corner_radius > 0.0 ? corner_radius / 10.0 : 0.0; }
+	inline bool below_resolution_floor(double h_fine, double corner_radius) { return corner_radius > 0.0 && h_fine >= 0.25 * corner_radius; }
+
 	class GridMetrics
 	{
 	public:

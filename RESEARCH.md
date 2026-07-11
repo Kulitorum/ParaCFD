@@ -410,6 +410,25 @@ Fluid-relevant research notes retained from the fork:
 | 12 | Site/environmental conditions (approach-flow context) |
 | 14 | Inflow: ABL profile, SEM turbulent inlet, precursor, boundary conditions |
 
+## Graded structured grid (feature-resolution decoupling)
+
+To resolve a corner radius `r` without a fine grid over the whole domain, the MAC grid is an
+axis-separable **graded (tensor-product) mesh**: three independent 1-D meshes, each a UNIFORM
+`h_fine` core around the building inside a **geometrically graded** coarse far field (growth ratio
+≤ 1.15). `MacGrid` stores per-axis cell widths, centres, and cumulative face coords; operators use
+local metrics — divergence over the local cell width, the pressure gradient over the centre-to-
+centre distance, the Smagorinsky filter width per cell `(dx·dy·dz)^⅓`, and a **variable-coefficient
+finite-volume Poisson operator** `Ap = Σ_f w_f (p_c − p_nb)`, `w_f = A_f/(d_f·V)`, which stays SPD
+(CG/MGPCG valid) and reduces exactly to `count/h²` when uniform. MG coarse levels take metrics by
+**decimating** the fine face coordinates (`xf_coarse[i]=xf_fine[2i]`), not by averaging `dx`.
+Formal accuracy drops 2nd → ~1st order on stretched cells; at growth ≤ 1.15 the MMS Laplacian order
+is measured ≈1.4 (graceful, per design). `dt` is limited by the smallest cell (`h_min`). Load
+integration (`windloads`) requires the building to lie in the UNIFORM core, where every exposed face
+is `h_fine²`. Sizing rule: `h_fine ≈ r/10` (≥10 cells/radius); a run at `h_fine ≥ r/4` is below the
+resolution floor (rounded ≈ sharp) and not comparison-grade. Verified by the `parity_probe` oracle
+(GPU-vs-CPU parity on a graded grid, MMS order, graded MGPCG convergence). Full spec:
+`openspec/changes/graded-structured-grid/`.
+
 **Key citations.** Stam 1999 (stable fluids); Selle et al. 2008 (MacCormack advection);
 McAdams, Sifakis & Teran 2010 (MGPCG); Smagorinsky 1963 (LES); Jarrin 2006 (SEM);
 Orlanski 1976 (convective outflow); Ghia, Ghia & Shin 1982 (cavity); Batty et al. 2007 (cut-cell,
