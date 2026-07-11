@@ -152,7 +152,7 @@ namespace windcfd::gui
 		// rate; the viewer always shows the latest device state). The same tick also captures a video
 		// frame when recording, on the fixed step cadence (maybeCaptureFrame early-returns otherwise).
 		repaint_timer_ = new QTimer(this);
-		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); });
+		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); updateWindLoadReadout(); });
 		repaint_timer_->start(16); // widened by setDisplayThrottle when "Fast sim" is engaged
 
 		// Create + start the worker.
@@ -361,6 +361,16 @@ namespace windcfd::gui
 		build_btn_->setToolTip("Size the domain around the building (with wind clearance), rebuild the sim at that grid, then voxelize the thickened walls + overhanging flat roof and inject them as the flow obstacle. Load a centerline via File ▸ Open centerline STEP… first.");
 		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
 		buildingCol->addWidget(build_btn_);
+
+		// Live wind-load readout: force coefficients integrated from the pressure field over the building
+		// surface (worker-side, ~every 30 steps). Dimensionless; updated on the repaint tick. Blank until a
+		// building exists. Monospaced so the columns line up.
+		load_readout_ = new QLabel("Wind loads: (build a building)");
+		load_readout_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		load_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");
+		load_readout_->setToolTip("Wind-load coefficients from the live pressure field (dimensionless): "
+			"Cd = drag (+x, along wind), Cl = lift/uplift (+z), Cs = side (+y); Cp = surface pressure-coefficient range.");
+		buildingCol->addWidget(load_readout_);
 		col->addWidget(buildingGroup);
 
 		// --- Visualization group ---------------------------------------------------------------
@@ -429,6 +439,12 @@ namespace windcfd::gui
 		solidVoxChk->setToolTip("Show/hide the solid-voxel staircase (obstacle), drawn dark-blue.");
 		connect(solidVoxChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowSolidVoxels(on); });
 		viz->addRow(solidVoxChk);
+		QCheckBox* cpVoxChk = new QCheckBox("Colour building by Cp");
+		cpVoxChk->setChecked(viewer_ ? viewer_->colourByCp() : true);
+		cpVoxChk->setToolTip("Tint the building's voxel staircase by surface pressure coefficient Cp "
+			"(blue = suction, red = pressure). Off = uniform dark-blue solid.");
+		connect(cpVoxChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setColourByCp(on); });
+		viz->addRow(cpVoxChk);
 		QCheckBox* axesChk = new QCheckBox("Show axes");
 		axesChk->setChecked(true);
 		axesChk->setToolTip("Show/hide the world-origin XYZ triad (X=red, Y=green, Z=blue) with metre ticks + corner gizmo.");
@@ -627,6 +643,7 @@ namespace windcfd::gui
 		worker_->primeCounters(steps0, t0);          // a scene restore resumes from the saved step (else 0)
 		worker_->setAutosaveInterval(autosave_interval_); // keep auto-saving across a rebuild/restore
 		worker_->setDisplayInterval(display_throttle_s_); // keep the "Fast sim" graphics throttle across a rebuild/restore
+		worker_->setWindLoadRho(recipe_.pr.rho);          // dynamic-pressure density = the solver's rho (Cp/Cd consistency)
 		// Rebuild factory: a re-inject rebuilds the core from an immutable recipe snapshot, entirely on
 		// the worker thread (make_core is Qt-free and thread-safe).
 		worker_->setRebuildFactory([recipe = recipe_](const std::vector<unsigned char>& solid, int mode)
@@ -1238,6 +1255,29 @@ namespace windcfd::gui
 			.arg(solid).arg(g.nx).arg(g.ny).arg(g.nz).arg(g.h), 8000);
 	}
 
+	// Refresh the Building-group wind-load readout from the worker's latest published WindLoads. Called on
+	// the ~60 Hz repaint tick (cheap: copies just the struct under the worker's loads mutex). Shows a hint
+	// until a building is present and its first loads have been integrated.
+	void MainWindow::updateWindLoadReadout()
+	{
+		if (!load_readout_) return;
+		windcfd::core::WindLoads L;
+		if (worker_ && worker_->latestLoads(L) && L.exposed_faces > 0)
+		{
+			load_readout_->setText(QString(
+				"Wind loads (dimensionless)\n"
+				"  Cd drag  (+x): %1\n"
+				"  Cl uplift(+z): %2\n"
+				"  Cs side  (+y): %3\n"
+				"  Cp range: %4 … %5\n"
+				"  exposed faces: %6")
+				.arg(L.Cd, 7, 'f', 3).arg(L.Cl, 7, 'f', 3).arg(L.Cs, 7, 'f', 3)
+				.arg(L.cp_min, 0, 'f', 2).arg(L.cp_max, 0, 'f', 2).arg(L.exposed_faces));
+		}
+		else
+			load_readout_->setText("Wind loads: (build a building)");
+	}
+
 	void MainWindow::addRecentFile(const QString& path)
 	{
 		QSettings s("COBOD", "WindCFD");
@@ -1448,6 +1488,8 @@ namespace windcfd::gui
 			worker_->computeDiversion(diversion_);
 			diversion_.inlet_U = recipe_.info.U;
 		}
+		// Snapshot the last integrated wind loads for the headless exit-log (worker still alive here).
+		if (worker_) last_loads_valid_ = worker_->latestLoads(last_loads_);
 		delete worker_;
 		worker_ = nullptr;
 		// worker_thread_ is parented to `this`; Qt deletes it. Null the viewer's ref.

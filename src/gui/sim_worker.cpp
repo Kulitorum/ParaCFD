@@ -50,6 +50,58 @@ namespace windcfd::gui
 		return true;
 	}
 
+	bool SimWorker::latestLoads(windcfd::core::WindLoads& out) const
+	{
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		if (!loads_valid_.load()) return false;
+		out = loads_snapshot_;
+		return true;
+	}
+
+	bool SimWorker::copyLoads(windcfd::core::WindLoads& out, std::vector<float>& cell_cp, windcfd::core::MacGrid& grid) const
+	{
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		if (!loads_valid_.load()) return false;
+		out = loads_snapshot_;
+		cell_cp = cell_cp_snapshot_;
+		grid = loads_grid_;
+		return true;
+	}
+
+	// Integrate the wind loads from the LIVE core pressure field (worker owns the core; the D2H copies are
+	// default-stream, so ordered after the just-finished step()). No-op when there is no building (no solid
+	// cells) — nothing to publish. Cheap: one {p,solid} D2H + an O(building cells) host integration. GL-free.
+	void SimWorker::maybe_compute_loads()
+	{
+		if (!core_) return;
+		const MacGrid g = core_->grid();
+		const std::size_t np = (std::size_t)g.p_count();
+		if (np == 0) return;
+		ls_host_.resize(np);
+		cudaMemcpy(ls_host_.data(), core_->solid_dev(), np, cudaMemcpyDeviceToHost);
+		bool any_solid = false;
+		for (unsigned char b : ls_host_)
+			if (b) { any_solid = true; break; }
+		if (!any_solid) { loads_valid_.store(false); return; } // empty channel: no building loads to report
+
+		lp_host_.resize(np);
+		cudaMemcpy(lp_host_.data(), core_->p_dev(), sizeof(double) * np, cudaMemcpyDeviceToHost);
+
+		windcfd::core::WindLoadParams prm;
+		prm.rho = load_rho_.load();
+		prm.u_ref = core_->inlet_speed();               // live reference (inlet) speed [m/s]
+		if (std::fabs(prm.u_ref) < 1e-6) prm.u_ref = 1.0; // guard q→0 (e.g. tidal slack): keep Cp finite
+		const windcfd::core::WindLoads L =
+			windcfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
+
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		loads_snapshot_ = L;
+		cell_cp_snapshot_.swap(lcp_host_); // move the fresh Cp field in; scratch keeps the old (reassigned next time)
+		loads_grid_ = g;
+		loads_valid_.store(true);
+		loads_gen_.fetch_add(1);
+	}
+
 	void SimWorker::requestRebuild(std::vector<unsigned char> solid, int solid_mode)
 	{
 		{
@@ -85,6 +137,7 @@ namespace windcfd::gui
 		sim_time_.store(0.0);
 		publish_display();              // show the fresh initial condition immediately
 		publish_mask(mask);             // overlay follows the new obstacle mask
+		maybe_compute_loads();          // seed the load readout for the freshly-injected building
 	}
 
 	void SimWorker::computeDiversion(DiversionReport& out) const
@@ -237,6 +290,7 @@ namespace windcfd::gui
 			cudaMemcpy(m0.data(), core_->solid_dev(), m0.size(), cudaMemcpyDeviceToHost);
 			publish_mask(m0);
 		}
+		maybe_compute_loads(); // seed the load readout from the initial condition (no-op if no building)
 
 		int since_stats = 0;
 		double last_dt = core_->last_dt();
@@ -334,6 +388,10 @@ namespace windcfd::gui
 			steps_.fetch_add(1);
 			sim_time_.store(sim_time_.load() + last_dt);
 			if (req > 0) step_requests_.fetch_sub(1);
+
+			// Wind loads: re-integrate the pressure field over the building every kLoadsEvery steps (cheap,
+			// off the display lock). A manual single-step (req>0) also refreshes so a paused user sees loads.
+			if ((steps_.load() % kLoadsEvery) == 0 || req > 0) maybe_compute_loads();
 
 			// Auto-save a restart-point checkpoint every `autosave_interval_` steps (0 = off).
 			if (const int iv = autosave_interval_.load(); iv > 0)

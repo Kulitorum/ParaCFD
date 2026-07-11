@@ -69,6 +69,11 @@ namespace windcfd::gui
 		void finalize();
 		const DiversionReport& diversion() const { return diversion_; }
 
+		// Latest wind loads sampled at shutdown (valid only if a building was present). For the headless
+		// exit-log assertion in main().
+		const windcfd::core::WindLoads& lastLoads() const { return last_loads_; }
+		bool lastLoadsValid() const { return last_loads_valid_; }
+
 		// Latest worker totals (for the scripted-gate summary in main.cpp).
 		long long lastSteps() const { return last_steps_; }
 		double lastSimTime() const { return last_sim_time_; }
@@ -135,6 +140,10 @@ namespace windcfd::gui
 		// exactly as loadStepFile does. Driven by the "Build" button and once on centerline load. No-op
 		// (with a status message) if no centerline is loaded.
 		void buildBuilding();
+
+		// Refresh the Building-group live wind-load coefficient readout from the worker's latest WindLoads
+		// (Cd/Cl/Cs + Cp range). Called on the repaint tick; no-op until a building's loads are published.
+		void updateWindLoadReadout();
 
 		void shutdownWorker();
 		// `steps0`/`t0` prime the worker's counters (a scene restore resumes from the saved step).
@@ -248,10 +257,13 @@ namespace windcfd::gui
 		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
 		QDoubleSpinBox* roof_thick_spin_ = nullptr;
 		QPushButton* build_btn_ = nullptr;
+		QLabel* load_readout_ = nullptr; // live wind-load coefficient readout (Cd/Cl/Cs + Cp range)
 
 		bool model_injected_ = false;
 		bool worker_down_ = false;
 		DiversionReport diversion_;
+		windcfd::core::WindLoads last_loads_{}; // wind loads captured at shutdown (headless exit-log)
+		bool last_loads_valid_ = false;
 		long long last_steps_ = 0;
 		double last_sim_time_ = 0.0;
 	};

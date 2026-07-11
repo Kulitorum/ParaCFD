@@ -11,6 +11,7 @@
 #pragma once
 
 #include "core/fluid/channel_core.h"
+#include "core/windloads.h"     // WindLoads / WindLoadParams / compute_wind_loads
 #include "gui/flow_particles.h" // FlowField
 #include "gui/scene_io.h"       // CheckpointState / CheckpointStatePtr
 
@@ -67,6 +68,22 @@ namespace windcfd::gui
 		// latest mask + its grid, or false if none.
 		std::uint64_t maskGeneration() const { return mask_gen_.load(); }
 		bool copyMask(std::vector<unsigned char>& mask, windcfd::core::MacGrid& grid);
+
+		// --- Live wind-load readout (M-loads) ----------------------------------------------------
+		// When a building/obstacle is present (solid_cells>0) the worker integrates the pressure field
+		// over the voxelized surface every kLoadsEvery steps (core/windloads.h; O(building cells), off
+		// the step() critical path — a D2H of {p,solid} + a host loop) and publishes the latest WindLoads
+		// + the per-solid-surface-cell Cp field. loadGeneration() bumps on every publish so the viewer
+		// re-colours the voxel overlay only then. `rho` for the dynamic pressure must match the SOLVER's
+		// density (set from the recipe); u_ref follows the live inlet speed. All thread-safe (main thread).
+		void setWindLoadRho(double rho) { load_rho_.store(rho); }
+		std::uint64_t loadGeneration() const { return loads_gen_.load(); }
+		bool hasLoads() const { return loads_valid_.load(); }
+		// Cheap: copies just the WindLoads struct (for the ~60 Hz GUI readout). Returns false if none yet.
+		bool latestLoads(windcfd::core::WindLoads& out) const;
+		// Full pull incl. the per-cell Cp field + its grid (for the viewer's Cp colouring). Call only when
+		// loadGeneration() changes (not per-frame) — it copies g.p_count() floats.
+		bool copyLoads(windcfd::core::WindLoads& out, std::vector<float>& cell_cp, windcfd::core::MacGrid& grid) const;
 
 		// Factory that rebuilds the core with a given obstacle mask + surface mode. Set once
 		// (captures the immutable SimRecipe). Invoked ONLY on the worker thread by run().
@@ -171,6 +188,7 @@ namespace windcfd::gui
 		void maybe_publish_host_flow(); // worker-thread: throttled D2H of {u,v,w,solid} for arrows
 		void emit_checkpoint(long long tag); // worker-thread: gather full state → emit checkpointReady
 		void publish_mask(const std::vector<unsigned char>& mask); // worker-thread: snapshot the mask + bump gen
+		void maybe_compute_loads(); // worker-thread: D2H {p,solid} + integrate wind loads → publish (if a building exists)
 
 		std::unique_ptr<windcfd::core::ChannelFluidCore> core_;
 
@@ -179,6 +197,22 @@ namespace windcfd::gui
 		std::vector<unsigned char> mask_snapshot_;
 		windcfd::core::MacGrid mask_grid_{};
 		std::atomic<std::uint64_t> mask_gen_{ 0 };
+
+		// Live wind-load snapshot (host), republished every kLoadsEvery steps while a building exists.
+		// loads_gen_ bumps on each publish (viewer re-colours only then). The Cp field is g.p_count()
+		// floats (NaN off the surface). Host scratch (lp_host_/ls_host_/lcp_host_) is worker-thread-only,
+		// reused each compute to avoid re-allocation.
+		static constexpr long long kLoadsEvery = 30; // recompute cadence [steps]
+		mutable std::mutex loads_mtx_;
+		windcfd::core::WindLoads loads_snapshot_{};
+		std::vector<float> cell_cp_snapshot_;
+		windcfd::core::MacGrid loads_grid_{};
+		std::atomic<std::uint64_t> loads_gen_{ 0 };
+		std::atomic<bool> loads_valid_{ false };
+		std::atomic<double> load_rho_{ 1.225 }; // dynamic-pressure density (set from the solver's rho)
+		std::vector<double> lp_host_;            // worker-thread pressure D2H scratch
+		std::vector<unsigned char> ls_host_;     // worker-thread solid-mask D2H scratch
+		std::vector<float> lcp_host_;            // worker-thread per-cell Cp scratch
 
 		// Pending core rebuild (obstacle re-injection). Guarded by rebuild_mtx_; flagged atomic.
 		std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;

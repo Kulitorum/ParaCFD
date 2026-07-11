@@ -51,16 +51,19 @@ void main() { fragColor = vColor; }
 		const char* kMeshVert = R"(#version 430 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
+layout(location=2) in vec3 aColor; // per-vertex Cp colour (voxel overlay only; ignored unless uUseVertexColor)
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform vec4 uClipPlane; // (n, d); keep dot(world,n)+d >= 0. Only clips when GL_CLIP_DISTANCE0 is enabled.
 out vec3 vN;
 out vec3 vWorld;
+out vec3 vColor;
 void main()
 {
 	vec4 wp = uModel * vec4(aPos, 1.0);
 	vWorld = wp.xyz;
 	vN = mat3(uModel) * aNormal;
+	vColor = aColor;
 	gl_ClipDistance[0] = dot(vec4(wp.xyz, 1.0), uClipPlane);
 	gl_Position = uMVP * vec4(aPos, 1.0);
 }
@@ -68,8 +71,10 @@ void main()
 		const char* kMeshFrag = R"(#version 430 core
 in vec3 vN;
 in vec3 vWorld;
+in vec3 vColor;
 uniform vec3 uEye;
 uniform vec4 uBaseColor;
+uniform int  uUseVertexColor; // 0 = flat uBaseColor (STEP model / uniform voxels); !=0 = per-vertex Cp colour
 out vec4 fragColor;
 void main()
 {
@@ -77,7 +82,8 @@ void main()
 	vec3 L = normalize(uEye - vWorld);
 	float diff = max(abs(dot(N, L)), 0.0); // two-sided
 	float ambient = 0.28;
-	vec3 c = uBaseColor.rgb * (ambient + 0.72 * diff);
+	vec3 base = (uUseVertexColor != 0) ? vColor : uBaseColor.rgb;
+	vec3 c = base * (ambient + 0.72 * diff);
 	fragColor = vec4(c, uBaseColor.a);
 }
 )";
@@ -198,8 +204,21 @@ void main()
 	{
 		worker_ = w;
 		vox_mask_gen_ = 0;      // re-pull the voxel overlay from the (new) worker's live mask
+		vox_load_gen_ = 0;      // re-pull the Cp field from the (new) worker
+		vox_cell_cp_.clear();
+		has_vox_cp_ = false;
 		clearVoxelOverlay();    // drop any stale mask geometry until the new one is published
 		updateWantHostFlow();
+	}
+
+	void SliceViewer::setColourByCp(bool on)
+	{
+		if (colour_by_cp_ == on) return;
+		colour_by_cp_ = on;
+		// Re-extract the overlay so it picks up (or drops) the per-vertex Cp colours. The mask geometry is
+		// retained in pending_vox_solid_, so this is a pure recolour when a building is present.
+		if (has_vox_ || !pending_vox_solid_.empty()) vox_upload_pending_ = true;
+		update();
 	}
 
 	// The worker only D2H-publishes the host {u,v,w,solid} snapshot when asked; both the arrows AND
@@ -280,6 +299,7 @@ void main()
 		if (mesh_idx_ebo_) glDeleteBuffers(1, &mesh_idx_ebo_);
 		if (vox_pos_vbo_) glDeleteBuffers(1, &vox_pos_vbo_);
 		if (vox_norm_vbo_) glDeleteBuffers(1, &vox_norm_vbo_);
+		if (vox_color_vbo_) glDeleteBuffers(1, &vox_color_vbo_);
 		if (arrow_glyph_vbo_) glDeleteBuffers(1, &arrow_glyph_vbo_);
 		if (arrow_inst_vbo_) glDeleteBuffers(1, &arrow_inst_vbo_);
 		if (tracer_vbo_) glDeleteBuffers(1, &tracer_vbo_);
@@ -941,6 +961,7 @@ void main()
 		glGenBuffers(1, &mesh_idx_ebo_);
 		glGenBuffers(1, &vox_pos_vbo_);
 		glGenBuffers(1, &vox_norm_vbo_);
+		glGenBuffers(1, &vox_color_vbo_);
 		glGenBuffers(1, &arrow_glyph_vbo_);
 		glGenBuffers(1, &arrow_inst_vbo_);
 		glGenBuffers(1, &tracer_vbo_);
@@ -1652,8 +1673,15 @@ void main()
 			return s[(std::size_t)g.pidx(i, j, k)] != 0;
 		};
 
-		std::vector<float> pos, nrm;
+		// Colour by Cp when enabled AND the worker has published a Cp field matching this grid. Each solid
+		// cell's exposed faces take the cell's mean Cp, mapped through the shared colormap ramp over the
+		// symmetric range [vox_cp_lo_,vox_cp_hi_] (blue = suction … red = pressure).
+		const bool want_cp = colour_by_cp_ && (int)vox_cell_cp_.size() == g.p_count();
+		const float cp_span = (vox_cp_hi_ > vox_cp_lo_) ? (vox_cp_hi_ - vox_cp_lo_) : 1.0f;
+
+		std::vector<float> pos, nrm, col;
 		const float h = (float)g.h;
+		float cr = 0.5f, cg = 0.5f, cb = 0.5f; // current cell's Cp colour (set per solid cell below)
 		auto quad = [&](float ox, float oy, float oz, float ux, float uy, float uz, float vx, float vy, float vz, float nx, float ny, float nz)
 		{
 			float p0[3] = { ox, oy, oz };
@@ -1665,6 +1693,7 @@ void main()
 			{
 				pos.push_back(p[0]); pos.push_back(p[1]); pos.push_back(p[2]);
 				nrm.push_back(nx); nrm.push_back(ny); nrm.push_back(nz);
+				if (want_cp) { col.push_back(cr); col.push_back(cg); col.push_back(cb); }
 			}
 		};
 		for (int k = 0; k < g.nz; ++k)
@@ -1672,6 +1701,13 @@ void main()
 				for (int i = 0; i < g.nx; ++i)
 				{
 					if (!solid_at(i, j, k)) continue;
+					if (want_cp)
+					{
+						const float cp = vox_cell_cp_[(std::size_t)g.pidx(i, j, k)];
+						if (cp == cp) // finite (NaN off the surface → neutral grey)
+							scour_colormap((cp - vox_cp_lo_) / cp_span, cr, cg, cb);
+						else { cr = cg = cb = 0.6f; }
+					}
 					const float x0 = i * h, y0 = j * h, z0 = k * h;
 					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, h, 0, 0, 0, h, -1, 0, 0); // -x
 					if (!solid_at(i + 1, j, k)) quad(x0 + h, y0, z0, 0, 0, h, 0, h, 0, 1, 0, 0); // +x
@@ -1682,7 +1718,7 @@ void main()
 				}
 
 		vox_vertex_count_ = (int)(pos.size() / 3);
-		if (vox_vertex_count_ == 0) { has_vox_ = false; pending_vox_solid_.clear(); return; }
+		if (vox_vertex_count_ == 0) { has_vox_ = false; has_vox_cp_ = false; return; }
 
 		glBindVertexArray(vox_vao_);
 		glBindBuffer(GL_ARRAY_BUFFER, vox_pos_vbo_);
@@ -1693,11 +1729,23 @@ void main()
 		glBufferData(GL_ARRAY_BUFFER, nrm.size() * sizeof(float), nrm.data(), GL_STATIC_DRAW);
 		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(1);
+		has_vox_cp_ = want_cp && col.size() == pos.size();
+		if (has_vox_cp_)
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, vox_color_vbo_);
+			glBufferData(GL_ARRAY_BUFFER, col.size() * sizeof(float), col.data(), GL_STATIC_DRAW);
+			glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+			glEnableVertexAttribArray(2);
+		}
+		else
+			glDisableVertexAttribArray(2); // fall back to the flat uBaseColor path
 		glBindVertexArray(0);
 
 		has_vox_ = true;
-		pending_vox_solid_.clear(); // lives in GL now
-		std::fprintf(stderr, "[G1] voxel overlay: %d solid exposed-face triangles\n", vox_vertex_count_ / 3);
+		// NB: pending_vox_solid_ is RETAINED (not cleared) so a fresh Cp field — or a colour_by_cp_ toggle —
+		// can re-extract + re-colour the overlay without a mask republish from the worker.
+		std::fprintf(stderr, "[G1] voxel overlay: %d solid exposed-face triangles%s\n",
+			vox_vertex_count_ / 3, has_vox_cp_ ? " (Cp-coloured)" : "");
 	}
 
 	void SliceViewer::resizeGL(int w, int h)
@@ -1731,6 +1779,28 @@ void main()
 			{
 				vox_mask_gen_ = worker_->maskGeneration();
 				setVoxelOverlay(mask, mg); // queues uploadVoxelOverlay() for this same paint
+			}
+		}
+
+		// Sync the per-cell Cp field for the building overlay. The worker republishes it (bumping its load
+		// generation) only when it re-integrates the loads (~every 30 steps), so this pulls the fresh Cp +
+		// its symmetric colour range and queues a recolour ONLY then — never per-frame. Runs after the mask
+		// sync so both feed the SAME uploadVoxelOverlay() below.
+		if (worker_ && worker_->loadGeneration() != vox_load_gen_)
+		{
+			windcfd::core::WindLoads L;
+			std::vector<float> cp;
+			windcfd::core::MacGrid lg;
+			if (worker_->copyLoads(L, cp, lg))
+			{
+				vox_load_gen_ = worker_->loadGeneration();
+				vox_cell_cp_.swap(cp);
+				// Symmetric range about Cp=0 (so ~0 maps to the ramp's green midpoint), auto-tracked from the
+				// published extremes with a floor so an early flat field still spreads colour.
+				const float m = std::max({ std::fabs((float)L.cp_min), std::fabs((float)L.cp_max), 0.5f });
+				vox_cp_lo_ = -m;
+				vox_cp_hi_ = m;
+				if (colour_by_cp_ && !pending_vox_solid_.empty()) vox_upload_pending_ = true; // recolour
 			}
 		}
 
@@ -1809,6 +1879,7 @@ void main()
 			mesh_prog_.setUniformValue("uEye", camera_.eye());
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
 			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.74f, 0.71f, 0.66f, 1.0f));
+			mesh_prog_.setUniformValue("uUseVertexColor", 0); // STEP model: flat base colour
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // the STEP model is a SOLID ⇒ clipped
 			glBindVertexArray(mesh_vao_);
 			const QMatrix4x4 model = modelMatrix();
@@ -1832,7 +1903,11 @@ void main()
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // voxel solids ⇒ clipped
 			glBindVertexArray(vox_vao_);
-			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid
+			// Cp colouring: per-vertex ramp colours when built (checkbox ON + a Cp field published); else the
+			// uniform dark-blue solid. The overlay is re-extracted on toggle so has_vox_cp_ tracks the choice.
+			const bool cp_shade = colour_by_cp_ && has_vox_cp_;
+			mesh_prog_.setUniformValue("uUseVertexColor", cp_shade ? 1 : 0);
+			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid (uUseVertexColor==0)
 			glDrawArrays(GL_TRIANGLES, 0, vox_vertex_count_);
 			glBindVertexArray(0);
 			glDisable(GL_CLIP_DISTANCE0);

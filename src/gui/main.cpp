@@ -403,6 +403,16 @@ int main(int argc, char** argv)
 			dr.solid_cells, dr.mean_speed_solid, pen_tol, dr.max_speed_fluid, dr.inlet_U);
 	}
 
+	// --- Wind-load summary (building pressure integration) -----------------------
+	if (win.lastLoadsValid())
+	{
+		const windcfd::core::WindLoads& wl = win.lastLoads();
+		std::fprintf(stderr,
+			"[G1] wind-loads: Cd=%.3f (drag +x) Cl=%.3f (uplift +z) Cs=%.3f (side +y); "
+			"Cp=[%.2f, %.2f]; exposed_faces=%lld; A_frontal=%.3f m^2 A_plan=%.3f m^2 L_ref=%.3f m\n",
+			wl.Cd, wl.Cl, wl.Cs, wl.cp_min, wl.cp_max, wl.exposed_faces, wl.A_frontal, wl.A_plan, wl.L_ref);
+	}
+
 	if (autoclose_ms > 0)
 		std::printf("G1: %s — %lld frames, %.1f fps over %.2f s; %lld sim steps\n",
 			rc == 0 ? "PASS" : "FAIL", frames, fps, secs, sim_steps);

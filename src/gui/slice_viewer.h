@@ -72,6 +72,13 @@ namespace windcfd::gui
 		bool showSolidVoxels() const { return show_solid_vox_; }
 		bool showAxes() const { return show_axes_; }
 
+		// Colour the building's voxel-overlay faces by the owning cell's surface pressure coefficient Cp
+		// (published by the worker; mapped through colormap.h over a symmetric range). ON (default) tints
+		// the staircase blue=suction … red=pressure; OFF reverts to the uniform dark-blue solid colour.
+		// Toggling re-uploads the overlay (recolour) on the next paint. Main thread.
+		void setColourByCp(bool on);
+		bool colourByCp() const { return colour_by_cp_; }
+
 		// --- Clip plane (see inside hollow structures) ---------------------------
 		// A single movable plane that hides SOLIDS on the camera side — the STEP mesh and the voxel-solid
 		// staircase — so the interior of a hollow structure is exposed. The flow
@@ -313,15 +320,26 @@ namespace windcfd::gui
 		unsigned int gizmo_vao_ = 0, gizmo_vbo_ = 0; // dynamic manipulator line geometry
 
 		// Voxel-overlay (staircase mask) GL objects. Exposed solid-cell faces, lit shader.
-		unsigned int vox_vao_ = 0, vox_pos_vbo_ = 0, vox_norm_vbo_ = 0;
+		unsigned int vox_vao_ = 0, vox_pos_vbo_ = 0, vox_norm_vbo_ = 0, vox_color_vbo_ = 0;
 		int vox_vertex_count_ = 0;     // total exposed-face vertices
 		bool has_vox_ = false;
 		bool vox_upload_pending_ = false;
-		std::vector<unsigned char> pending_vox_solid_;
+		std::vector<unsigned char> pending_vox_solid_; // retained after upload so a Cp update can re-colour
 		windcfd::core::MacGrid pending_vox_grid_;
 		// Live flow-mask overlay: the last mask generation pulled from the worker. The overlay is
 		// re-extracted (exposed faces only) whenever the worker republishes a changed mask.
 		std::uint64_t vox_mask_gen_ = 0;
+
+		// Cp colouring of the voxel overlay (feature: colour building by surface pressure coefficient).
+		// vox_cell_cp_ is the worker's per-solid-cell mean Cp (g.p_count(), NaN off the surface); the
+		// symmetric range [vox_cp_lo_,vox_cp_hi_] is auto-tracked from the published cp_min/cp_max. The
+		// overlay carries a per-vertex colour VBO built from these when colour_by_cp_ is on. vox_load_gen_
+		// mirrors the worker's loadGeneration() so a fresh Cp field triggers a recolour (like the mask).
+		bool colour_by_cp_ = true;
+		std::vector<float> vox_cell_cp_;
+		float vox_cp_lo_ = -1.5f, vox_cp_hi_ = 1.0f;
+		bool has_vox_cp_ = false;      // per-vertex Cp colours are built + valid for the current overlay
+		std::uint64_t vox_load_gen_ = 0;
 
 		// Layer visibility (feature 2). All default ON.
 		bool show_slice_ = true;
