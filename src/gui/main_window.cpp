@@ -10,6 +10,8 @@
 #include "gui/video_recorder.h"
 #include "gui/video_settings_dialog.h"
 
+#include <cuda_runtime.h> // cudaMemGetInfo — size the Apply grid cap to the actual device VRAM
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -168,7 +170,7 @@ namespace windcfd::gui
 		// rate; the viewer always shows the latest device state). The same tick also captures a video
 		// frame when recording, on the fixed step cadence (maybeCaptureFrame early-returns otherwise).
 		repaint_timer_ = new QTimer(this);
-		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); updateWindLoadReadout(); });
+		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); updateWindLoadReadout(); updateAvgReadout(); });
 		repaint_timer_->start(16); // widened by setDisplayThrottle when "Fast sim" is engaged
 
 		// Create + start the worker.
@@ -397,10 +399,53 @@ namespace windcfd::gui
 		// building exists. Monospaced so the columns line up.
 		load_readout_ = new QLabel("Wind loads: (build a building)");
 		load_readout_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-		load_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");
-		load_readout_->setToolTip("Wind-load coefficients from the live pressure field (dimensionless): "
-			"Cd = drag (+x, along wind), Cl = lift/uplift (+z), Cs = side (+y); Cp = surface pressure-coefficient range.");
+		load_readout_->setWordWrap(true); // wrap instead of forcing the dock wider than the viewport
+		load_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#1a4d7a;"); // dark blue: readable on the light dock
+		load_readout_->setToolTip("INSTANTANEOUS wind-load coefficients from the live pressure field (dimensionless): "
+			"Cd = drag (+x, along wind), Cl = lift/uplift (+z), Cs = side (+y); Cp = surface pressure-coefficient range. "
+			"On a turbulent (LES) flow these fluctuate every frame — press Start averaging for the converged values.");
 		buildingCol->addWidget(load_readout_);
+
+		// --- Converged time-averaged loads --------------------------------------------------------------
+		// A single snapshot off an unsettled, turbulent flow is one random draw. Watch the flow spin up (the
+		// instantaneous readout above stops trending), then Start averaging to accumulate mean / RMS / peak
+		// loads + a time-averaged surface Cp (which the building recolours to). "Start in N h" defers the
+		// start by wall-clock time so an overnight run can settle first and hand you a multi-hour average.
+		QHBoxLayout* avgBtnRow = new QHBoxLayout;
+		avg_start_btn_ = new QPushButton("Start averaging");
+		avg_start_btn_->setToolTip("Begin accumulating converged time-averaged loads (mean / RMS / peak) and a time-averaged surface Cp from NOW. Press once the flow looks settled (the instantaneous Cd above has stopped trending). The building recolours to the averaged Cp.");
+		connect(avg_start_btn_, &QPushButton::clicked, this, [this] { if (worker_) worker_->startAveraging(0.0); });
+		avg_stop_btn_ = new QPushButton("Stop");
+		avg_stop_btn_->setToolTip("Stop accumulating (freezes the averaged result so you can read it) or cancel a scheduled start.");
+		connect(avg_stop_btn_, &QPushButton::clicked, this, [this] { if (worker_) worker_->stopAveraging(); });
+		avgBtnRow->addWidget(avg_start_btn_);
+		avgBtnRow->addWidget(avg_stop_btn_);
+		buildingCol->addLayout(avgBtnRow);
+
+		QHBoxLayout* avgSchedRow = new QHBoxLayout;
+		avg_schedule_btn_ = new QPushButton("Start in…");
+		avg_schedule_btn_->setToolTip("Deferred start for overnight runs: begin averaging after this many hours of WALL-CLOCK time. Start the sim, schedule +6 h, and wake up to a settled multi-hour average.");
+		avg_delay_spin_ = new QDoubleSpinBox;
+		avg_delay_spin_->setRange(0.1, 72.0);
+		avg_delay_spin_->setDecimals(1);
+		avg_delay_spin_->setSingleStep(0.5);
+		avg_delay_spin_->setValue(6.0);
+		avg_delay_spin_->setSuffix(" h");
+		avg_delay_spin_->setToolTip("Wall-clock hours to wait before averaging starts (for overnight spin-up).");
+		connect(avg_schedule_btn_, &QPushButton::clicked, this,
+			[this] { if (worker_) worker_->startAveraging(avg_delay_spin_->value() * 3600.0); });
+		avgSchedRow->addWidget(avg_schedule_btn_);
+		avgSchedRow->addWidget(avg_delay_spin_);
+		buildingCol->addLayout(avgSchedRow);
+
+		avg_readout_ = new QLabel("Time-average: idle\n(press Start averaging when spun up)");
+		avg_readout_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		avg_readout_->setWordWrap(true); // wrap instead of forcing the dock wider than the viewport
+		avg_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#1e6b2e;"); // dark green: readable on the light dock
+		avg_readout_->setToolTip("Converged time-averaged loads over the current window: mean (the trustworthy coefficient), "
+			"RMS (fluctuation), peak (min…max, design-critical), the averaged Cp range, and a convergence-drift hint "
+			"(how far the running mean still moves — small ⇒ converged).");
+		buildingCol->addWidget(avg_readout_);
 		col->addWidget(buildingGroup);
 
 		// --- Visualization group ---------------------------------------------------------------
@@ -785,6 +830,11 @@ namespace windcfd::gui
 		std::fprintf(stderr, "[G1] simulation started (run gate released)\n");
 	}
 
+	void MainWindow::startLoadAveraging(double delaySeconds)
+	{
+		if (worker_) worker_->startAveraging(delaySeconds);
+	}
+
 	void MainWindow::setInputSpeed(double U)
 	{
 		if (!u_spin_ || U <= 0.0) return;
@@ -847,19 +897,42 @@ namespace windcfd::gui
 		updateGridReadout();
 	}
 
+	// Apply grid cap sized to the actual device: ~80% of TOTAL VRAM at the ~240 B/cell gauge below. Using
+	// total (not free) is deliberate — Apply/Build free the current grid BEFORE building the new one, so the
+	// new grid effectively has the whole card. Cached (total VRAM is constant); kMaxCells is the fallback if
+	// no CUDA device is queryable. ~240 B/cell is conservative (real steady ≈ 185 B/cell: core + MGPCG +
+	// snapshots), so 80% of VRAM at 240 B/cell keeps healthy headroom for the OS / display / render buffers.
+	long long MainWindow::maxCells()
+	{
+		if (max_cells_cache_ > 0) return max_cells_cache_;
+		std::size_t freeB = 0, totalB = 0;
+		if (cudaMemGetInfo(&freeB, &totalB) == cudaSuccess && totalB > 0)
+		{
+			vram_total_gb_ = (double)totalB / (1024.0 * 1024.0 * 1024.0);
+			const double budget = 0.80 * (double)totalB; // 80% of total VRAM for the solver
+			max_cells_cache_ = std::max(1000000LL, (long long)(budget / 240.0));
+		}
+		else
+			max_cells_cache_ = kMaxCells; // no CUDA device visible → conservative fixed fallback
+		return max_cells_cache_;
+	}
+
 	void MainWindow::updateGridReadout()
 	{
 		if (!grid_readout_ || !lx_spin_) return;
 		int nx = 0, ny = 0, nz = 0;
 		grid_dims_for(lx_spin_->value(), ly_spin_->value(), lz_spin_->value(), h_spin_->value(), nx, ny, nz);
 		const long long cells = (long long)nx * ny * nz;
-		// Rough device-memory gauge (fluid + snapshot double fields) — an order-of-
-		// magnitude hint only, not an allocation contract.
-		const double mb = cells * 240.0 / (1024.0 * 1024.0);
-		const bool ok = cells > 0 && cells <= kMaxCells;
-		QString txt = QString("→ %1 × %2 × %3 = %4 cells  (~%5 MB)")
-			.arg(nx).arg(ny).arg(nz).arg(cells).arg(mb, 0, 'f', 0);
-		if (!ok) txt += QString("\n⚠ too fine (> %1 M cells) — increase h").arg(kMaxCells / 1000000);
+		const long long cap = maxCells();
+		// Rough device-memory gauge (fluid + snapshot double fields) — an order-of-magnitude hint, not an
+		// allocation contract. Shown against the card's total VRAM so it's clear how much room is left.
+		const double gb = cells * 240.0 / (1024.0 * 1024.0 * 1024.0);
+		const bool ok = cells > 0 && cells <= cap;
+		QString txt = QString("→ %1 × %2 × %3 = %4 cells\n  (~%5 GB")
+			.arg(nx).arg(ny).arg(nz).arg(cells).arg(gb, 0, 'f', 1);
+		if (vram_total_gb_ > 0.0) txt += QString(" of %1 GB").arg(vram_total_gb_, 0, 'f', 0);
+		txt += " VRAM)";
+		if (!ok) txt += QString("\n⚠ too large (> %1 M cells ≈ 80%% of VRAM) — increase h").arg(cap / 1000000);
 		grid_readout_->setText(txt);
 		grid_readout_->setStyleSheet(ok ? QString() : QString("color:#c0392b;"));
 		if (apply_btn_) apply_btn_->setEnabled(ok);
@@ -1467,6 +1540,59 @@ namespace windcfd::gui
 			load_readout_->setText("Wind loads: (build a building)");
 	}
 
+	// Refresh the time-average block: the run state (idle / overnight countdown / collecting / stopped) and,
+	// once samples have been folded, the converged mean / RMS / peak coefficients, the elapsed window (in
+	// seconds and in flow-through times L_x/U), the averaged Cp range and a convergence-drift hint. Called on
+	// the repaint tick alongside updateWindLoadReadout; cheap (atomics + one small struct copy).
+	void MainWindow::updateAvgReadout()
+	{
+		if (!avg_readout_ || !worker_) return;
+		using AvgPhase = SimWorker::AvgPhase;
+		const AvgPhase ph = worker_->avgPhase();
+
+		if (ph == AvgPhase::Pending)
+		{
+			const double rem = worker_->avgCountdownSeconds();
+			const int h = (int)(rem / 3600.0);
+			const int m = (int)((rem - 3600.0 * h) / 60.0);
+			const int s = (int)(rem - 3600.0 * h - 60.0 * m);
+			avg_readout_->setText(QString("Time-average: starts in %1h %2m %3s\n(overnight — flow keeps developing until then)")
+				.arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0')));
+			return;
+		}
+
+		windcfd::core::WindLoadStats S;
+		if (worker_->latestAvgStats(S) && S.samples > 0)
+		{
+			const double ft = S.flow_through_time > 1e-9 ? S.duration / S.flow_through_time : 0.0;
+			const QString head = (ph == AvgPhase::Collecting) ? "collecting" : "stopped";
+			const QString drift = S.Cd_drift >= 0.0 ? QString("%1%").arg(S.Cd_drift * 100.0, 0, 'f', 2) : QString("—");
+			// Kept to short lines (header on its own row, tight columns) so the block never forces the dock
+			// wider than the viewport; word-wrap catches any overflow from unusually large transient values.
+			avg_readout_->setText(QString(
+				"Time-average — %1\n"
+				"  %2 samples · %3 s · %4 flow-throughs\n"
+				"        mean      rms    peak (min…max)\n"
+				"  Cd %5 %6  %7…%8\n"
+				"  Cl %9 %10  %11…%12\n"
+				"  Cs %13 %14  %15…%16\n"
+				"  Cp(avg): %17 … %18\n"
+				"  drift (1st half vs all): %19")
+				.arg(head).arg(S.samples).arg(S.duration, 0, 'f', 1).arg(ft, 0, 'f', 1)
+				.arg(S.Cd_mean, 8, 'f', 3).arg(S.Cd_rms, 7, 'f', 3).arg(S.Cd_min, 0, 'f', 2).arg(S.Cd_max, 0, 'f', 2)
+				.arg(S.Cl_mean, 8, 'f', 3).arg(S.Cl_rms, 7, 'f', 3).arg(S.Cl_min, 0, 'f', 2).arg(S.Cl_max, 0, 'f', 2)
+				.arg(S.Cs_mean, 8, 'f', 3).arg(S.Cs_rms, 7, 'f', 3).arg(S.Cs_min, 0, 'f', 2).arg(S.Cs_max, 0, 'f', 2)
+				.arg(S.cp_min, 0, 'f', 2).arg(S.cp_max, 0, 'f', 2)
+				.arg(drift));
+			return;
+		}
+
+		if (ph == AvgPhase::Collecting)
+			avg_readout_->setText("Time-average: collecting… (waiting for the first load sample)");
+		else
+			avg_readout_->setText("Time-average: idle (press Start averaging when spun up)");
+	}
+
 	void MainWindow::addRecentFile(const QString& path)
 	{
 		QSettings s("COBOD", "WindCFD");
@@ -1679,6 +1805,7 @@ namespace windcfd::gui
 		}
 		// Snapshot the last integrated wind loads for the headless exit-log (worker still alive here).
 		if (worker_) last_loads_valid_ = worker_->latestLoads(last_loads_);
+		if (worker_) last_avg_valid_ = worker_->latestAvgStats(last_avg_stats_); // converged loads (--average-now)
 		delete worker_;
 		worker_ = nullptr;
 		// worker_thread_ is parented to `this`; Qt deletes it. Null the viewer's ref.

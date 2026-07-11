@@ -84,11 +84,31 @@ namespace windcfd::gui
 		void setWindLoadRho(double rho) { load_rho_.store(rho); }
 		std::uint64_t loadGeneration() const { return loads_gen_.load(); }
 		bool hasLoads() const { return loads_valid_.load(); }
-		// Cheap: copies just the WindLoads struct (for the ~60 Hz GUI readout). Returns false if none yet.
+		// Cheap: copies just the INSTANTANEOUS WindLoads struct (for the ~60 Hz GUI readout). False if none.
 		bool latestLoads(windcfd::core::WindLoads& out) const;
-		// Full pull incl. the per-cell Cp field + its grid (for the viewer's Cp colouring). Call only when
-		// loadGeneration() changes (not per-frame) — it copies g.p_count() floats.
-		bool copyLoads(windcfd::core::WindLoads& out, std::vector<float>& cell_cp, windcfd::core::MacGrid& grid) const;
+		// The per-cell Cp field + symmetric colour range [lo,hi] the building overlay should show: the
+		// TIME-AVERAGED Cp while an averaging window is active (Collecting/Stopped), otherwise the live
+		// instantaneous Cp. Keyed on loadGeneration() (bumps each publish) — call only when it changes, not
+		// per-frame (copies g.p_count() floats). Returns false if no Cp has been integrated yet.
+		bool copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, windcfd::core::MacGrid& grid) const;
+
+		// --- Converged, time-averaged loads (M-loads §7.6) ---------------------------------------
+		// The live Cd/Cl/Cs/Cp above are INSTANTANEOUS values off an unsettled, turbulent flow — one random
+		// draw, not the trustworthy quantity. The user watches the flow spin up, then presses "Start
+		// averaging" to accumulate converged mean / RMS / peak statistics (+ a time-averaged Cp field) over
+		// a window they control. A deferred start (delay_seconds > 0, WALL-CLOCK) exists for overnight runs:
+		// start the sim, schedule averaging in N hours, and wake up to a settled multi-hour average.
+		enum class AvgPhase { Idle, Pending, Collecting, Stopped };
+		// Begin (or schedule) averaging. delay_seconds <= 0 ⇒ start now; > 0 ⇒ start after that much
+		// wall-clock time. Resets the accumulator when collection actually begins. Thread-safe (main thread).
+		void startAveraging(double delay_seconds);
+		// Stop collecting (freezing the last result for reading) or cancel a pending scheduled start.
+		void stopAveraging() { avg_stop_req_.store(true); }
+		AvgPhase avgPhase() const { return (AvgPhase)avg_phase_pub_.load(); }
+		double avgCountdownSeconds() const { return avg_countdown_.load(); } // wall secs until a scheduled start
+		// Latest averaged statistics (valid once collecting has folded >=1 sample; frozen after Stop). Cheap
+		// (copies the small struct). Returns false while Idle/Pending or before the first sample.
+		bool latestAvgStats(windcfd::core::WindLoadStats& out) const;
 
 		// Factory that rebuilds the core with a given obstacle mask + surface mode. Set once
 		// (captures the immutable SimRecipe). Invoked ONLY on the worker thread by run().
@@ -194,6 +214,9 @@ namespace windcfd::gui
 		void emit_checkpoint(long long tag); // worker-thread: gather full state → emit checkpointReady
 		void publish_mask(const std::vector<unsigned char>& mask); // worker-thread: snapshot the mask + bump gen
 		void maybe_compute_loads(); // worker-thread: D2H {p,solid} + integrate wind loads → publish (if a building exists)
+		void service_averaging();   // worker-thread: process start/stop commands + the Pending→Collecting (wall-clock) transition
+		void begin_collecting();    // worker-thread: reset the accumulator + enter Collecting from the current sim-time
+		void reset_averaging();     // worker-thread: return to Idle + invalidate the published averaged snapshot (on rebuild)
 
 		std::unique_ptr<windcfd::core::ChannelFluidCore> core_;
 
@@ -218,6 +241,25 @@ namespace windcfd::gui
 		std::vector<double> lp_host_;            // worker-thread pressure D2H scratch
 		std::vector<unsigned char> ls_host_;     // worker-thread solid-mask D2H scratch
 		std::vector<float> lcp_host_;            // worker-thread per-cell Cp scratch
+
+		// Converged time-averaged loads (see startAveraging). The accumulator + phase are WORKER-THREAD-ONLY;
+		// the main thread posts commands via the atomics below and reads back through avg_phase_pub_/
+		// avg_countdown_ (atomics) and avg_stats_snapshot_/avg_cp_snapshot_ (under loads_mtx_). avg_valid_pub_
+		// gates the building overlay onto the averaged Cp (copyDisplayCp): set true once a sample is folded,
+		// stays true when Stopped (frozen), cleared on reset/rebuild so the overlay falls back to live Cp.
+		windcfd::core::LoadAverager averager_;          // worker-thread only
+		AvgPhase avg_phase_ = AvgPhase::Idle;           // worker-thread only
+		std::chrono::steady_clock::time_point avg_deadline_{}; // worker-thread only: scheduled start (Pending)
+		std::vector<float> avg_cp_scratch_;             // worker-thread mean-Cp scratch (reused each publish)
+		windcfd::core::WindLoadStats avg_stats_snapshot_{}; // published (loads_mtx_)
+		std::vector<float> avg_cp_snapshot_;                // published time-averaged per-cell Cp (loads_mtx_)
+		float avg_cp_lo_ = -0.5f, avg_cp_hi_ = 0.5f;        // published symmetric averaged-Cp range (loads_mtx_)
+		bool avg_valid_pub_ = false;                        // published (loads_mtx_): averaged Cp/stats ready
+		std::atomic<bool> avg_start_req_{ false };          // main→worker: begin/schedule averaging
+		std::atomic<bool> avg_stop_req_{ false };           // main→worker: stop/cancel
+		std::atomic<double> avg_start_delay_{ 0.0 };        // main→worker: wall-clock delay for the start [s]
+		std::atomic<int> avg_phase_pub_{ 0 };               // worker→GUI: AvgPhase mirror
+		std::atomic<double> avg_countdown_{ 0.0 };          // worker→GUI: wall secs until a scheduled start
 
 		// Pending core rebuild (obstacle re-injection). Guarded by rebuild_mtx_; flagged atomic.
 		std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;

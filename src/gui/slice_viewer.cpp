@@ -1800,18 +1800,18 @@ void main()
 		// sync so both feed the SAME uploadVoxelOverlay() below.
 		if (worker_ && worker_->loadGeneration() != vox_load_gen_)
 		{
-			windcfd::core::WindLoads L;
 			std::vector<float> cp;
+			float lo = 0.0f, hi = 0.0f;
 			windcfd::core::MacGrid lg;
-			if (worker_->copyLoads(L, cp, lg))
+			// The worker hands back the TIME-AVERAGED Cp (+ its symmetric range) once an averaging window is
+			// active, else the live instantaneous Cp — so the building recolours to the converged field the
+			// moment the user starts averaging, with no extra plumbing here.
+			if (worker_->copyDisplayCp(cp, lo, hi, lg))
 			{
 				vox_load_gen_ = worker_->loadGeneration();
 				vox_cell_cp_.swap(cp);
-				// Symmetric range about Cp=0 (so ~0 maps to the ramp's green midpoint), auto-tracked from the
-				// published extremes with a floor so an early flat field still spreads colour.
-				const float m = std::max({ std::fabs((float)L.cp_min), std::fabs((float)L.cp_max), 0.5f });
-				vox_cp_lo_ = -m;
-				vox_cp_hi_ = m;
+				vox_cp_lo_ = lo;
+				vox_cp_hi_ = hi;
 				if (colour_by_cp_ && !pending_vox_solid_.empty()) vox_upload_pending_ = true; // recolour
 			}
 		}

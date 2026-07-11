@@ -94,6 +94,15 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
   `Mx/My/Mz` + `CM*`, `A_frontal`/`A_plan`, `L_ref`=height, `cp_min/max`, and an optional
   **per-cell Cp** field for visualisation. Pressure-only (no skin friction); wind assumed +x.
   Host-only, OCC-free.
+  - **`LoadAverager` + `WindLoadStats`** (same file) — turn the **instantaneous** per-step
+    `WindLoads` into **converged, time-averaged** statistics. A turbulent (LES) flow never settles
+    instantaneously — only its statistics do — so a single snapshot is one random draw. `add()`
+    folds each sample (Welford, numerically stable) into a running **mean + RMS(fluctuation) +
+    peak(min/max)** of Cd/Cl/Cs plus a running **time-average of the per-cell surface Cp**;
+    `result()` reports those + the averaged-Cp range and a **convergence-drift hint** (how far the
+    running mean still moves between the window's first half and the whole — small ⇒ converged).
+    The window is **user-controlled** (there is deliberately **no automatic convergence
+    detection** — the user watches the flow spin up and judges by eye). Host-only.
 - **IO / config** (`src/core/`): `config.{h,cpp}` (JSON config via vendored nlohmann,
   `src/3rdparty/nlohmann/json.hpp`; **air defaults** ρ=1.225, ν=1.5e-5, `d50` retained only as a
   wall-roughness length), `vti_writer.cpp`/`vti_reader.cpp` (VTI fields), `cuda_probe.cu`.
@@ -146,8 +155,17 @@ GUI features:
   while held.
 - **Live wind loads**: a dock readout shows live **Cd / Cl / Cs** and the **Cp** range,
   integrated worker-side from the pressure field over the building surface.
+- **Converged time-averaged loads**: those live loads are **instantaneous on a turbulent flow**
+  (one random sample). A **"Start averaging"** button begins accumulating converged **mean / RMS
+  / peak** Cd/Cl/Cs + a **time-averaged surface Cp** over a user-controlled window; a second
+  readout shows the state, sample count, elapsed sim-time in **flow-through times** (Lₓ/U), the
+  converged coefficients and a **convergence-drift** hint. **"Start in N h"** defers the start by
+  **wall-clock** time for **overnight runs** (start the sim, schedule +6 h, wake to a settled
+  multi-hour average). **Stop** freezes the result. No automatic convergence detection — the user
+  watches the instantaneous Cd stop trending, then starts the window (see `LoadAverager`).
 - **Cp colouring**: the building's voxel staircase is tinted by surface **Cp** (a diverging
-  colour ramp) with a legend + a "Colour building by Cp" toggle.
+  colour ramp) with a legend + a "Colour building by Cp" toggle; once averaging is active the
+  tint + legend switch to the **time-averaged** Cp (the meaningful field for comparing suctions).
 - Plain-STEP load auto-voxelizes into the live obstacle (File → Open STEP… / `--load-step`);
   left-side settings dock (live sim controls that don't reset; **Input speed U** capped at
   **40 m/s**; a Domain & resolution **Apply** that rebuilds at t=0); flow arrows (2D/3D,
@@ -201,7 +219,9 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   the worker auto-starts (no Start button). Useful for CI / solver debugging, not visual checks.
 - Other CLI flags (see `main.cpp`): `--load-centerline <path>`, `--load-step <path>`,
   `--model-place dx,dy,dz[,rz[,scale]]`, `--set-u <U>`, `--tidal Umax,plateau,ramp`,
-  `--clip <x|y|z|camera>,<frac>`, `--tracers`, `--save-scene`/`--load-scene`, `--record`.
+  `--clip <x|y|z|camera>,<frac>`, `--tracers`, `--save-scene`/`--load-scene`, `--record`,
+  `--average-now` / `--average-in <s>` (headless smoke of load-averaging: start/schedule the
+  converged window; the exit-log prints the mean/RMS/peak + flow-through count).
 
 ## Key conventions & invariants (preserve these)
 
@@ -251,9 +271,14 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
 - **DONE**: air physics defaults (`Config` now ships ρ=1.225, ν=1.5e-5); the **building
   pipeline** (centerline → thickened walls + roof solid, rounded vs sharp corners); the
   **wind-load extraction** (surface **Cp**, integrated **Cd/Cl/Cs** + moments), live in the GUI.
-- **Convergence + TIME-AVERAGED loads** — the live Cd/Cl/Cs and Cp are **instantaneous on an
-  unsettled flow**, so the **rounded-vs-sharp corner** comparison is **not trustworthy yet**.
-  Settle the flow, then time-average the loads before comparing.
+- **DONE — convergence + TIME-AVERAGED loads** (`LoadAverager`/`WindLoadStats`, GUI "Start
+  averaging" / "Start in N h" / Stop): the live loads are still instantaneous, but the user can
+  now accumulate **converged mean / RMS / peak** Cd/Cl/Cs + a **time-averaged Cp** over a window
+  they control (with an overnight wall-clock deferred start), and the building recolours to the
+  averaged Cp. **Remaining judgement call**: convergence is **not auto-detected** — the user must
+  run long enough (watch the drift hint / the mean plateau, ~10+ flow-through times) before the
+  **rounded-vs-sharp corner** comparison is trustworthy. Verify each config's mean is converged
+  (small drift, tight RMS) before comparing two runs.
 - **No ABL wind inflow profile** — the inlet is currently **uniform**; the log-law wall model
   and SEM inlet exist as infrastructure but aren't wired into the building configs.
 - **Building viscosity is a moderate `nu = 1e-3` default** (`configs/building.json`), not the

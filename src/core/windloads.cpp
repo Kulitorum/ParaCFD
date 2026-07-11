@@ -127,4 +127,107 @@ namespace windcfd::core
 		L.CMz = Mz * qinv / (Ap * Lr);
 		return L;
 	}
+
+	// --- LoadAverager: instantaneous samples -> converged time-averaged statistics -------------------
+	namespace
+	{
+		// One Welford update: fold `x` into (n already incremented) running mean `m` + M2 accumulator `s`.
+		inline void welford(double x, long long n, double& m, double& s)
+		{
+			const double d = x - m;
+			m += d / (double)n;
+			s += d * (x - m);
+		}
+	}
+
+	void LoadAverager::reset(int p_count, double t_start)
+	{
+		n_ = 0;
+		t_start_ = t_last_ = t_start;
+		m_cd_ = m_cl_ = m_cs_ = 0;
+		s_cd_ = s_cl_ = s_cs_ = 0;
+		min_cd_ = max_cd_ = min_cl_ = max_cl_ = min_cs_ = max_cs_ = 0;
+		const std::size_t n = p_count > 0 ? (std::size_t)p_count : 0;
+		cp_sum_.assign(n, 0.0);
+		cp_cnt_.assign(n, 0);
+		cd_hist_.clear();
+	}
+
+	void LoadAverager::add(const WindLoads& L, const std::vector<float>& cell_cp, double sim_time)
+	{
+		++n_;
+		t_last_ = sim_time;
+		welford(L.Cd, n_, m_cd_, s_cd_);
+		welford(L.Cl, n_, m_cl_, s_cl_);
+		welford(L.Cs, n_, m_cs_, s_cs_);
+		if (n_ == 1)
+		{
+			min_cd_ = max_cd_ = L.Cd;
+			min_cl_ = max_cl_ = L.Cl;
+			min_cs_ = max_cs_ = L.Cs;
+		}
+		else
+		{
+			min_cd_ = std::min(min_cd_, L.Cd); max_cd_ = std::max(max_cd_, L.Cd);
+			min_cl_ = std::min(min_cl_, L.Cl); max_cl_ = std::max(max_cl_, L.Cl);
+			min_cs_ = std::min(min_cs_, L.Cs); max_cs_ = std::max(max_cs_, L.Cs);
+		}
+		// Per-cell Cp running sum (surface cells only: finite values; NaN marks off the surface).
+		const std::size_t n = std::min(cp_sum_.size(), cell_cp.size());
+		for (std::size_t c = 0; c < n; ++c)
+		{
+			const float cp = cell_cp[c];
+			if (cp == cp) // false only for NaN
+			{
+				cp_sum_[c] += (double)cp;
+				++cp_cnt_[c];
+			}
+		}
+		cd_hist_.push_back((float)m_cd_);
+	}
+
+	WindLoadStats LoadAverager::result(std::vector<float>* out_mean_cp) const
+	{
+		WindLoadStats st;
+		st.samples = n_;
+		st.duration = t_last_ - t_start_;
+		st.Cd_mean = m_cd_; st.Cl_mean = m_cl_; st.Cs_mean = m_cs_;
+		if (n_ > 0)
+		{
+			st.Cd_rms = std::sqrt(s_cd_ / (double)n_);
+			st.Cl_rms = std::sqrt(s_cl_ / (double)n_);
+			st.Cs_rms = std::sqrt(s_cs_ / (double)n_);
+		}
+		st.Cd_min = min_cd_; st.Cd_max = max_cd_;
+		st.Cl_min = min_cl_; st.Cl_max = max_cl_;
+		st.Cs_min = min_cs_; st.Cs_max = max_cs_;
+		// Convergence hint: cumulative mean of the first half of the window vs the whole window. If the
+		// flow is settled these agree (drift -> 0); if it is still trending they differ. cd_hist_[k-1] is
+		// the running mean after k samples, so the first-half mean is cd_hist_[n/2 - 1].
+		if (n_ >= 20 && (std::size_t)(n_ / 2) <= cd_hist_.size() && (n_ / 2) >= 1)
+		{
+			const double mean_all = m_cd_;
+			const double mean_half = (double)cd_hist_[(std::size_t)(n_ / 2) - 1];
+			st.Cd_drift = std::fabs(mean_all - mean_half) / std::max(1e-9, std::fabs(mean_all));
+		}
+		// Time-averaged per-cell Cp + its range over the surface.
+		double cpmin = 1e300, cpmax = -1e300;
+		if (out_mean_cp) out_mean_cp->assign(cp_sum_.size(), std::numeric_limits<float>::quiet_NaN());
+		for (std::size_t c = 0; c < cp_sum_.size(); ++c)
+		{
+			if (cp_cnt_[c] > 0)
+			{
+				const double mean = cp_sum_[c] / (double)cp_cnt_[c];
+				if (out_mean_cp) (*out_mean_cp)[c] = (float)mean;
+				if (mean < cpmin) cpmin = mean;
+				if (mean > cpmax) cpmax = mean;
+			}
+		}
+		if (cpmax >= cpmin)
+		{
+			st.cp_min = cpmin;
+			st.cp_max = cpmax;
+		}
+		return st;
+	}
 }

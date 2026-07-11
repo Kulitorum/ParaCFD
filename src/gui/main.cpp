@@ -86,6 +86,7 @@ int main(int argc, char** argv)
 	double apply_h = 0.0, apply_lx = 0.0, apply_ly = 0.0, apply_lz = 0.0;
 	double set_u = 0.0;
 	double display_interval = 0.0;
+	double average_in_s = -1.0; // >=0 ⇒ start converged load-averaging after this many WALL-CLOCK seconds
 	std::string tidal_arg;
 	std::string clip_arg;
 	bool tracers_on = false;
@@ -107,6 +108,8 @@ int main(int argc, char** argv)
 		else if (a == "--apply-h" && i + 1 < argc) { apply_h = std::atof(argv[++i]); apply_grid = true; }
 		else if (a == "--apply-domain" && i + 3 < argc) { apply_lx = std::atof(argv[++i]); apply_ly = std::atof(argv[++i]); apply_lz = std::atof(argv[++i]); apply_grid = true; }
 		else if (a == "--set-u" && i + 1 < argc) set_u = std::atof(argv[++i]);
+		else if (a == "--average-now") average_in_s = 0.0;
+		else if (a == "--average-in" && i + 1 < argc) average_in_s = std::atof(argv[++i]); // wall-clock seconds
 		else if (a == "--model-place" && i + 1 < argc) model_place_arg = argv[++i];
 		else if (a == "--display-interval" && i + 1 < argc) display_interval = std::atof(argv[++i]);
 		else if (a == "--tidal" && i + 1 < argc) tidal_arg = argv[++i];
@@ -374,6 +377,12 @@ int main(int argc, char** argv)
 		// must advance for loads to develop. Interactive runs stay held until the user presses Start.
 		std::fprintf(stderr, "[G1] scripted run: auto-starting simulation, auto-close in %d ms\n", autoclose_ms);
 		win.startSimulation();
+		// Optional headless smoke of load-averaging: begin (or schedule) converged mean/RMS/peak accumulation.
+		if (average_in_s >= 0.0)
+		{
+			std::fprintf(stderr, "[G1] --average: starting converged load-averaging in %.1f s (wall-clock)\n", average_in_s);
+			win.startLoadAveraging(average_in_s);
+		}
 		QTimer::singleShot(autoclose_ms, &app, &QApplication::quit);
 	}
 
@@ -415,6 +424,22 @@ int main(int argc, char** argv)
 			"[G1] wind-loads: Cd=%.3f (drag +x) Cl=%.3f (uplift +z) Cs=%.3f (side +y); "
 			"Cp=[%.2f, %.2f]; exposed_faces=%lld; A_frontal=%.3f m^2 A_plan=%.3f m^2 L_ref=%.3f m\n",
 			wl.Cd, wl.Cl, wl.Cs, wl.cp_min, wl.cp_max, wl.exposed_faces, wl.A_frontal, wl.A_plan, wl.L_ref);
+	}
+
+	// --- Converged time-averaged load summary (headless --average-now check) -----
+	if (win.lastAvgStatsValid())
+	{
+		const windcfd::core::WindLoadStats& s = win.lastAvgStats();
+		const double ft = s.flow_through_time > 1e-9 ? s.duration / s.flow_through_time : 0.0;
+		std::fprintf(stderr,
+			"[G1] time-avg: %lld samples over %.3f s (%.2f flow-throughs); "
+			"Cd mean=%.3f rms=%.3f peak=[%.3f,%.3f]; Cl mean=%.3f rms=%.3f; Cs mean=%.3f rms=%.3f; "
+			"Cp(avg)=[%.2f,%.2f]; mean-Cd drift=%.2f%%\n",
+			s.samples, s.duration, ft, s.Cd_mean, s.Cd_rms, s.Cd_min, s.Cd_max,
+			s.Cl_mean, s.Cl_rms, s.Cs_mean, s.Cs_rms, s.cp_min, s.cp_max,
+			s.Cd_drift >= 0.0 ? s.Cd_drift * 100.0 : -1.0);
+		std::printf("G1-timeavg: %s — %lld samples, Cd_mean=%.3f rms=%.3f over %.2f flow-throughs\n",
+			s.samples > 0 ? "PASS" : "FAIL", s.samples, s.Cd_mean, s.Cd_rms, ft);
 	}
 
 	if (autoclose_ms > 0)

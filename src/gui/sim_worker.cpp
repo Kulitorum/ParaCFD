@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -58,14 +59,92 @@ namespace windcfd::gui
 		return true;
 	}
 
-	bool SimWorker::copyLoads(windcfd::core::WindLoads& out, std::vector<float>& cell_cp, windcfd::core::MacGrid& grid) const
+	bool SimWorker::copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, windcfd::core::MacGrid& grid) const
 	{
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		if (!loads_valid_.load()) return false;
-		out = loads_snapshot_;
-		cell_cp = cell_cp_snapshot_;
 		grid = loads_grid_;
+		if (avg_valid_pub_) // an averaging window is active/frozen → colour the building by the TIME-AVERAGED Cp
+		{
+			cell_cp = avg_cp_snapshot_;
+			lo = avg_cp_lo_;
+			hi = avg_cp_hi_;
+		}
+		else // no averaging → the live instantaneous Cp, symmetric about 0 (floor so an early flat field spreads colour)
+		{
+			cell_cp = cell_cp_snapshot_;
+			const float m = std::max({ std::fabs((float)loads_snapshot_.cp_min), std::fabs((float)loads_snapshot_.cp_max), 0.5f });
+			lo = -m;
+			hi = m;
+		}
 		return true;
+	}
+
+	bool SimWorker::latestAvgStats(windcfd::core::WindLoadStats& out) const
+	{
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		if (!avg_valid_pub_) return false;
+		out = avg_stats_snapshot_;
+		return true;
+	}
+
+	void SimWorker::startAveraging(double delay_seconds)
+	{
+		avg_start_delay_.store(delay_seconds);
+		avg_stop_req_.store(false); // a fresh start supersedes any un-serviced stop
+		avg_start_req_.store(true);
+	}
+
+	// Worker-thread: enter Collecting NOW, reseeding the accumulator from the current sim-time + grid.
+	void SimWorker::begin_collecting()
+	{
+		const int pc = core_ ? core_->grid().p_count() : 0;
+		averager_.reset(pc, sim_time_.load());
+		avg_phase_ = AvgPhase::Collecting;
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		avg_valid_pub_ = false; // fall back to live Cp until the first sample lands
+		avg_stats_snapshot_ = windcfd::core::WindLoadStats{};
+	}
+
+	void SimWorker::reset_averaging()
+	{
+		avg_phase_ = AvgPhase::Idle;
+		avg_countdown_.store(0.0);
+		avg_phase_pub_.store((int)AvgPhase::Idle);
+		std::lock_guard<std::mutex> lk(loads_mtx_);
+		avg_valid_pub_ = false;
+		avg_stats_snapshot_ = windcfd::core::WindLoadStats{};
+	}
+
+	// Worker-thread: service start/stop commands and advance a scheduled (Pending) start by WALL-CLOCK time.
+	// Called every loop iteration (even while paused) so an overnight countdown ticks and fires on schedule.
+	void SimWorker::service_averaging()
+	{
+		if (avg_stop_req_.exchange(false))
+		{
+			if (avg_phase_ == AvgPhase::Collecting) avg_phase_ = AvgPhase::Stopped; // freeze the result
+			else if (avg_phase_ == AvgPhase::Pending) avg_phase_ = AvgPhase::Idle;  // cancel the schedule
+		}
+		if (avg_start_req_.exchange(false))
+		{
+			const double d = avg_start_delay_.load();
+			if (d > 0.0)
+			{
+				avg_phase_ = AvgPhase::Pending;
+				avg_deadline_ = std::chrono::steady_clock::now() +
+					std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(d));
+			}
+			else
+				begin_collecting();
+		}
+		if (avg_phase_ == AvgPhase::Pending)
+		{
+			const double rem = std::chrono::duration<double>(avg_deadline_ - std::chrono::steady_clock::now()).count();
+			if (rem <= 0.0) begin_collecting();
+			else avg_countdown_.store(rem);
+		}
+		if (avg_phase_ != AvgPhase::Pending) avg_countdown_.store(0.0);
+		avg_phase_pub_.store((int)avg_phase_);
 	}
 
 	// Integrate the wind loads from the LIVE core pressure field (worker owns the core; the D2H copies are
@@ -94,11 +173,33 @@ namespace windcfd::gui
 		const windcfd::core::WindLoads L =
 			windcfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
 
+		// Fold this instantaneous sample into the converged time-average while a window is collecting. Done
+		// BEFORE the swap below (the averager still needs lcp_host_) and off the display lock. result() also
+		// fills avg_cp_scratch_ with the time-averaged per-cell Cp for the building colouring.
+		windcfd::core::WindLoadStats st;
+		bool have_avg = false;
+		if (avg_phase_ == AvgPhase::Collecting)
+		{
+			averager_.add(L, lcp_host_, sim_time_.load());
+			st = averager_.result(&avg_cp_scratch_);
+			st.flow_through_time = (double)g.nx * g.h / std::max(1e-6, std::fabs(prm.u_ref)); // L_x / U_ref [s]
+			have_avg = true;
+		}
+
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		loads_snapshot_ = L;
 		cell_cp_snapshot_.swap(lcp_host_); // move the fresh Cp field in; scratch keeps the old (reassigned next time)
 		loads_grid_ = g;
 		loads_valid_.store(true);
+		if (have_avg)
+		{
+			avg_stats_snapshot_ = st;
+			avg_cp_snapshot_.swap(avg_cp_scratch_); // publish the averaged Cp; scratch keeps the old (refilled next time)
+			const float m = std::max({ std::fabs((float)st.cp_min), std::fabs((float)st.cp_max), 0.5f });
+			avg_cp_lo_ = -m;
+			avg_cp_hi_ = m;
+			avg_valid_pub_ = true;
+		}
 		loads_gen_.fetch_add(1);
 	}
 
@@ -123,9 +224,14 @@ namespace windcfd::gui
 			mode = pending_mode_;
 		}
 		if (!factory_) return;
+		// Free the OLD core's device memory BEFORE building the new one, so a re-inject never holds TWO cores
+		// at once (no ~2x VRAM peak — lets a big grid fill the card). The rebuild re-initialises the flow from
+		// scratch regardless, so nothing is lost by dropping the old fields here. If the build then fails we
+		// are left with no core; the run loop below guards on that rather than dereferencing null.
+		core_.reset();
 		auto nc = factory_(mask, mode); // constructed + flow-initialised ON THIS (worker) thread
-		if (!nc) return;
-		core_ = std::move(nc);          // old core (its CUDA buffers) freed here
+		if (!nc) return;                // core_ stays null; run() idles until a valid rebuild replaces it
+		core_ = std::move(nc);
 		if (inlet_override_.load()) core_->set_inlet_speed(inlet_speed_.load()); // keep the chosen current
 		if (inlet_prof_override_.load()) // keep the chosen inlet profile across a rebuild
 		{
@@ -135,6 +241,7 @@ namespace windcfd::gui
 		}
 		steps_.store(0);
 		sim_time_.store(0.0);
+		reset_averaging();              // the mask/grid changed — the old window is meaningless; back to Idle
 		publish_display();              // show the fresh initial condition immediately
 		publish_mask(mask);             // overlay follows the new obstacle mask
 		maybe_compute_loads();          // seed the load readout for the freshly-injected building
@@ -304,6 +411,14 @@ namespace windcfd::gui
 			// Obstacle re-injection: rebuild the core on THIS thread before anything else, so a
 			// paused viewer still picks up the new mask (and never races the main/GL thread).
 			if (rebuild_pending_.load()) apply_pending_rebuild();
+
+			// Load-averaging control: service Start/Stop and tick the overnight (wall-clock) deferred start.
+			// Runs every iteration — even while paused/held — so a scheduled start fires on time regardless.
+			service_averaging();
+
+			// Defensive: a rebuild that freed the old core but failed to build a new one leaves us without a
+			// core. Idle safely (the GUI can Apply/Build a valid grid) rather than dereferencing null below.
+			if (!core_) { QThread::msleep(5); continue; }
 
 			// Live current change (GUI "Input speed"): update the running core's inlet before stepping.
 			// A paused viewer picks it up too (the wake evolves on the next play/step).

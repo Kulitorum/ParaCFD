@@ -76,6 +76,16 @@ namespace windcfd::gui
 		const windcfd::core::WindLoads& lastLoads() const { return last_loads_; }
 		bool lastLoadsValid() const { return last_loads_valid_; }
 
+		// Latest converged time-averaged loads captured at shutdown (valid only if averaging collected >=1
+		// sample). For the headless `--average-now` exit-log in main().
+		const windcfd::core::WindLoadStats& lastAvgStats() const { return last_avg_stats_; }
+		bool lastAvgStatsValid() const { return last_avg_valid_; }
+
+		// Programmatically start (or schedule) converged load averaging, exactly as the "Start averaging" /
+		// "Start in…" dock buttons: delaySeconds <= 0 begins now, > 0 defers by that much wall-clock time.
+		// Used by the `--average-now` CLI smoke hook to verify the averaging pipeline headlessly.
+		void startLoadAveraging(double delaySeconds = 0.0);
+
 		// Latest worker totals (for the scripted-gate summary in main.cpp).
 		long long lastSteps() const { return last_steps_; }
 		double lastSimTime() const { return last_sim_time_; }
@@ -243,7 +253,12 @@ namespace windcfd::gui
 		QPushButton* start_btn_ = nullptr; // "Start Simulation" — releases the master run gate (holds until pressed)
 		QPushButton* step_btn_ = nullptr;  // single-step (enabled only once started)
 		bool sim_started_ = false;         // master run gate mirror; re-applied to every (re)spawned worker
-		static constexpr long long kMaxCells = 40000000LL; // Apply guard: refuse an OOM-risking grid
+		// Apply device-memory guard. The real cap is ~80% of total VRAM (cudaMemGetInfo) at ~240 B/cell —
+		// see maxCells()/updateGridReadout; kMaxCells is only the fallback when no CUDA device is visible.
+		static constexpr long long kMaxCells = 40000000LL;
+		long long maxCells();           // cached dynamic cell cap from total VRAM (falls back to kMaxCells)
+		long long max_cells_cache_ = 0; // 0 = not computed yet
+		double vram_total_gb_ = 0.0;    // total device VRAM [GB] for the grid readout (0 = unknown)
 
 		// Recent-files (feature 1): persisted via QSettings("COBOD","WindCFD"). The submenu is
 		// rebuilt on demand (pruning files that no longer exist), MRU-first, capped at kMaxRecent.
@@ -292,13 +307,28 @@ namespace windcfd::gui
 		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
 		QDoubleSpinBox* roof_thick_spin_ = nullptr;
 		QPushButton* build_btn_ = nullptr;
-		QLabel* load_readout_ = nullptr; // live wind-load coefficient readout (Cd/Cl/Cs + Cp range)
+		QLabel* load_readout_ = nullptr; // live INSTANTANEOUS wind-load coefficient readout (Cd/Cl/Cs + Cp range)
+
+		// --- Converged, time-averaged loads (the trustworthy statistics) -------------------------
+		// Instantaneous loads read off a turbulent, unsettled flow are one random sample. The user watches
+		// the flow spin up, then presses Start averaging to accumulate mean/RMS/peak + a time-averaged Cp
+		// field; Start-in-N-h defers the start (wall-clock) for overnight runs. avg_readout_ shows the state
+		// (idle / countdown / collecting / stopped), sample count, elapsed sim-time + flow-through times, the
+		// converged coefficients and a convergence-drift hint — refreshed on the repaint tick.
+		QPushButton* avg_start_btn_ = nullptr;
+		QPushButton* avg_stop_btn_ = nullptr;
+		QPushButton* avg_schedule_btn_ = nullptr;
+		QDoubleSpinBox* avg_delay_spin_ = nullptr; // wall-clock hours before a deferred (overnight) start
+		QLabel* avg_readout_ = nullptr;
+		void updateAvgReadout(); // repaint-tick refresh of the time-average block (state/countdown + stats)
 
 		bool model_injected_ = false;
 		bool worker_down_ = false;
 		DiversionReport diversion_;
 		windcfd::core::WindLoads last_loads_{}; // wind loads captured at shutdown (headless exit-log)
 		bool last_loads_valid_ = false;
+		windcfd::core::WindLoadStats last_avg_stats_{}; // time-averaged loads captured at shutdown (--average-now)
+		bool last_avg_valid_ = false;
 		long long last_steps_ = 0;
 		double last_sim_time_ = 0.0;
 	};
