@@ -64,6 +64,8 @@ add_library(libwindcfd STATIC
 	# Geometry — watertight ray-parity voxelizer (STEP TriMesh → solid obstacle mask). OCC-free
 	# (needs only the mesh); the shared model placement + TriMesh headers live in core/geometry/.
 	src/core/geometry/voxelize.cpp
+	# Building — 3D-print centerline surface -> thickened wall + flat roof solid mask (distance-field).
+	src/core/geometry/building.cpp
 )
 set_target_properties(libwindcfd PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
@@ -149,6 +151,13 @@ foreach(_tk ${OCC_LINK_TOOLKITS})
 	endif()
 	target_link_libraries(windcfd_geometry PRIVATE "${OCC_LIB_DIR}/${_tk}.lib")
 endforeach()
+
+# --- building_probe (dev tool: centerline STEP -> building solid mask) -------
+# Loads a centerline STEP via windcfd_geometry, sections + voxelizes a building. Links OCC
+# (through windcfd_geometry) so the OCC DLLs are deployed next to it.
+add_executable(building_probe tools/building_probe.cpp)
+target_link_libraries(building_probe PRIVATE libwindcfd windcfd_geometry)
+windcfd_deploy_occ_dlls(building_probe)
 
 # --- windcfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
 # Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can
