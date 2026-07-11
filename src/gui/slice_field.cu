@@ -71,10 +71,11 @@ namespace windcfd::gui
 			float x, y, z;
 			slice_vertex_world(sp, a, b, x, y, z);
 			MacGrid g = sp.grid;
-			float invh = (float)(1.0 / g.h);
-			int i = clampi((int)floorf(x * invh), 0, g.nx - 1);
-			int j = clampi((int)floorf(y * invh), 0, g.ny - 1);
-			int k = clampi((int)floorf(z * invh), 0, g.nz - 1);
+			// World → cell index via the grid's world↔index map (graded-aware; floor(x/h) uniform). On a
+			// graded grid sp.grid is the DEVICE view, so grid_fx reads device metric arrays on the device.
+			int i = clampi((int)floor(windcfd::core::grid_fx(g, (double)x)), 0, g.nx - 1);
+			int j = clampi((int)floor(windcfd::core::grid_fy(g, (double)y)), 0, g.ny - 1);
+			int k = clampi((int)floor(windcfd::core::grid_fz(g, (double)z)), 0, g.nz - 1);
 			float s = sample_scalar(u, v, w, p, g, sp.field, i, j, k);
 			float denom = (sp.vmax > sp.vmin) ? (sp.vmax - sp.vmin) : 1.0f;
 			return colormap((s - sp.vmin) / denom);

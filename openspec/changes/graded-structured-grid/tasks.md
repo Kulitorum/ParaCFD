@@ -135,8 +135,14 @@ start Phase B until Phase A's oracle is green.
       reuses all the parity code; uniform grid ⇒ `xfa` null ⇒ Δ=0 (byte-identical). VERIFIED
       (`parity_probe`): a square footprint at world (1,1) voxelizes to solid cells centred on (1,1),
       all in the uniform core — the old `floor(x/h)` would mis-place it.
-- [ ] 4.2 Update the CUDA-GL slice sampler (`slice_field.cu`, `slice_gl.cu`) to sample via the
+- [x] 4.2 Update the CUDA-GL slice sampler (`slice_field.cu`, `slice_gl.cu`) to sample via the
       world→index mapping
+      → `eval_vertex` (slice_field.cu): world→cell via `grid_fx/fy/fz(g,·)` (were `floor(x/h)`).
+      `grid_*` are `WINDCFD_HD`, so the device kernel reads the device-view grid's device metric
+      arrays on the device. Collapses to `floor(x/h)` on a uniform grid. slice_gl.cu is interop-only
+      (no coordinate mapping). NOTE: the voxel-staircase overlay cube positions in slice_viewer.cpp
+      still assume uniform `h` (a graded staircase would draw at uniform spacing) — display polish,
+      not verifiable headlessly (offscreen renders 0 frames).
 - [x] 4.3 **windloads (`windloads.cpp`) — the deliverable**: feed `h_fine` (not a stale global `h`)
       and **add a guard asserting the building bbox ⊆ the uniform fine core** so all surface faces
       are `h_fine²` and `A_frontal/A_plan/L_ref`/moment arms stay valid; fail loudly if a surface
@@ -149,8 +155,13 @@ start Phase B until Phase A's oracle is green.
       `parity_probe`: building in the core integrates; building reaching the graded transition is
       rejected. NOTE: a graded run producing loads over a real building also needs task 4.1 (the
       voxelizer's world→index cell mapping); the guard + host-grid caller are complete.
-- [ ] 4.4 Route `flow_particles.cpp` + `flow_tracers.cpp` locate/sample through the world→index map;
+- [x] 4.4 Route `flow_particles.cpp` + `flow_tracers.cpp` locate/sample through the world→index map;
       take domain extent from `xf[nx]`/`yf[ny]`/`zf[nz]`, not `nx·h`
+      → Both files: `is_solid` locate via `grid_fx/fy/fz`; `sample` cell-centre index via `grid_cx/
+      cy/cz` (were `x/h-0.5`); domain extent `g.Lx()/Ly()/Lz()` (were `nx*h`). `f.grid` is the worker's
+      `hostGrid()` (host metric arrays on graded, per 3.3). Substep/seed sizing keeps `g.h`=h_fine
+      (conservative). Collapses to the uniform forms on a null-metric grid. Compiles; runtime is
+      main-thread paint (not exercised headlessly).
 - [ ] 4.5 Persist/reconstruct the grid in `scene_io.*` (fine-core **recipe**, per design lean +
       `7a8f346` STEP-as-source-of-truth pattern); ensure legacy uniform scenes load as the special
       case
