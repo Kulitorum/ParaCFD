@@ -53,7 +53,7 @@
 namespace scour::gui
 {
 	MainWindow::MainWindow(std::unique_ptr<scour::core::ChannelFluidCore> core, const SimRecipe& recipe,
-		SeabedScenario scen, QWidget* parent)
+		QWidget* parent)
 		: QMainWindow(parent), recipe_(recipe)
 	{
 		const SimInfo& info = recipe_.info;
@@ -67,13 +67,6 @@ namespace scour::gui
 
 		// --- File menu: load / clear a STEP model --------------------------------
 		QMenu* fileMenu = menuBar()->addMenu("&File");
-		QAction* loadScenario = fileMenu->addAction("Load seabed scenario…");
-		connect(loadScenario, &QAction::triggered, this, [this] {
-			QString fn = QFileDialog::getOpenFileName(this, "Load seabed scenario", QString(),
-				"Scenario JSON (*.json);;All files (*)");
-			if (!fn.isEmpty()) startSeabedScenario(fn);
-		});
-		fileMenu->addSeparator();
 		QAction* openStep = fileMenu->addAction("Open STEP…");
 		openStep->setShortcut(QKeySequence::Open);
 		connect(openStep, &QAction::triggered, this, [this] {
@@ -99,8 +92,8 @@ namespace scour::gui
 		connect(loadScene, &QAction::triggered, this, [this] { loadSceneDialog(); });
 
 		fileMenu->addSeparator();
-		// Record an MP4 of the run: opens a settings popup (path / cadence / quality / fps / auto-record) with
-		// Start/Stop + a live "● REC — N frames" status. A frame is captured on each sand-bed change (ffmpeg).
+		// Record an MP4 of the run: opens a settings popup (path / cadence / quality / fps) with Start/Stop
+		// + a live "● REC — N frames" status. One frame is captured every N sim steps (ffmpeg).
 		record_action_ = fileMenu->addAction("Record Video…");
 		connect(record_action_, &QAction::triggered, this, [this] { openRecordDialog(); });
 
@@ -146,13 +139,13 @@ namespace scour::gui
 
 		// Continuous repaint at ~60 Hz on the main thread (decoupled from the sim step
 		// rate; the viewer always shows the latest device state). The same tick also captures a video
-		// frame when recording and the sand bed has changed (maybeCaptureFrame early-returns otherwise).
+		// frame when recording, on the fixed step cadence (maybeCaptureFrame early-returns otherwise).
 		repaint_timer_ = new QTimer(this);
 		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); });
 		repaint_timer_->start(16); // widened by setDisplayThrottle when "Fast sim" is engaged
 
-		// Create + start the worker (and attach the seabed engine + bed viz if the scenario is active).
-		spawnWorker(std::move(core), std::move(scen));
+		// Create + start the worker.
+		spawnWorker(std::move(core));
 	}
 
 	void MainWindow::buildControlDock()
@@ -205,80 +198,24 @@ namespace scour::gui
 		speedForm->addRow("Input speed U", u_spin_);
 
 		// Inlet velocity profile: uniform (top-hat) vs boundary-layer (log-law). The BL profile tapers the
-		// near-bed inflow to ~0 at the bed top, so the sediment's leading edge isn't over-eroded by the
-		// top-hat's spurious full-U bed shear. Applies LIVE (the flow adjusts over a flow-through).
+		// near-wall inflow to ~0 at the floor, a thinner wall-bounded inflow. Applies LIVE (the flow adjusts
+		// over a flow-through).
 		inlet_profile_box_ = new QComboBox;
 		inlet_profile_box_->addItems({ "Uniform (top-hat)", "Boundary layer (log-law)" });
-		inlet_profile_box_->setToolTip("Inlet velocity profile. Boundary layer (log-law) → near-bed u≈0 at the bed: the physical fix for top-hat leading-edge scour. Applies live; sediment runs default to it.");
+		inlet_profile_box_->setToolTip("Inlet velocity profile. Boundary layer (log-law) → near-bed u≈0 at the wall: a thinner wall-bounded inflow. Applies live.");
 		connect(inlet_profile_box_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
 			if (!worker_) return;
 			const bool loglaw = (idx == 1);
-			const double z0 = (have_sp_ && last_sp_.d50 > 0.0) ? last_sp_.d50 / 12.0 : (0.2e-3 / 12.0);
-			const double datum = have_sp_ ? last_sp_.sand_depth : 0.0;
+			const double z0 = 0.2e-3 / 12.0; // nominal wall roughness
+			const double datum = 0.0;
 			worker_->setInletProfile(loglaw, z0, datum);
 		});
 		speedForm->addRow("Inlet profile", inlet_profile_box_);
-
-		// Suspended-sediment boundary on the streamwise (x) faces. Open sea: the inlet carries the Rouse
-		// equilibrium load so sheltered pockets get sand to deposit and the outlet lets it leave; Recycle:
-		// flux-matched recirculating flume (mass-conserving); Closed: the legacy zero-flux box. Live; the
-		// switch only affects an active seabed run (no bed ⇒ no-op).
-		sed_bc_box_ = new QComboBox;
-		sed_bc_box_->addItems({ "Open sea (equilibrium)", "Recycle (flume)", "Closed (no exchange)" });
-		sed_bc_box_->setToolTip("Suspended-sediment inlet/outlet. Open sea: incoming water carries the equilibrium suspended load (fills sheltered pockets), outlet lets it leave; Recycle: outlet load fed back, mass-conserving; Closed: no exchange (legacy). Applies live to an active seabed run.");
-		connect(sed_bc_box_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
-			if (!worker_) return;
-			int mode = (idx == 0) ? scour::core::SED_BC_OPEN : (idx == 1) ? scour::core::SED_BC_RECYCLE : scour::core::SED_BC_CLOSED;
-			worker_->setSedBoundary(mode);
-		});
-		speedForm->addRow("Sediment BC", sed_bc_box_);
 		simCol->addLayout(speedForm);
 
-		// "Add sand" (LIVE — keeps the developed flow, NO t=0 reset): fill the lower N metres with sand
-		// around any rigid solid and continue as an erodible-seabed sediment run, so even a plain fluid
-		// viewer with a voxelized obstacle becomes a live scour sim. It stays in this live box precisely
-		// because it does NOT reset — unlike the grid Apply, which is its own box below.
-		auto* sandLine = new QFrame; sandLine->setFrameShape(QFrame::HLine); sandLine->setEnabled(false);
-		simCol->addWidget(sandLine);
-		QFormLayout* sandForm = new QFormLayout;
-		sandForm->setLabelAlignment(Qt::AlignLeft);
-		sand_spin_ = new QDoubleSpinBox;
-		sand_spin_->setRange(0.0, 50.0);
-		sand_spin_->setDecimals(3);
-		sand_spin_->setSingleStep(0.10);
-		sand_spin_->setValue(1.0);
-		sand_spin_->setSuffix(" m");
-		sand_spin_->setToolTip("Depth of sand to fill from the bottom up. Rigid structure/obstacle voxels stay solid; sand fills the rest.");
-		sandForm->addRow("Sand depth", sand_spin_);
-		simCol->addLayout(sandForm);
-		QPushButton* addSandBtn = new QPushButton("Add sand (keep flow)");
-		addSandBtn->setToolTip("Fill the lower N metres with sand around any solid and continue as an erodible-seabed sediment run. LIVE: the developed flow is PRESERVED — no t=0 reset (sim time/step continue). PRE-CALIBRATION / qualitative.");
-		connect(addSandBtn, &QPushButton::clicked, this, [this] { addSand(); });
-		simCol->addWidget(addSandBtn);
-
-		// MORFAC (morphological acceleration): multiplies morphological time so the bed evolves M× faster
-		// than the flow clock — the "catch up faster" knob for watching scour develop. Live: retunes the
-		// running seabed engine (a no-op without a bed; a value chosen before "Add sand" is applied when the
-		// engine attaches). ⚠ Physically valid to ~10 steady / ~5 reversing (RESEARCH §7); above that the
-		// flow and bed decouple and the per-step |Δz_b| limiter clips, so higher isn't proportionally faster.
-		QFormLayout* morfacForm = new QFormLayout;
-		morfacForm->setLabelAlignment(Qt::AlignLeft);
-		morfac_spin_ = new QDoubleSpinBox;
-		morfac_spin_->setRange(1.0, 50.0);
-		morfac_spin_->setDecimals(1);
-		morfac_spin_->setSingleStep(1.0);
-		morfac_spin_->setValue(5.0);
-		morfac_spin_->setSuffix(QString::fromUtf8(" ×")); // "×"
-		morfac_spin_->setToolTip("MORFAC — morphological acceleration. The bed evolves this many times faster than the flow clock, so scour 'catches up' sooner. Live: retunes the running seabed engine (no effect without a bed; a value set before 'Add sand' applies when the engine attaches). Physically valid to ~10 (steady) / ~5 (reversing tide); above that the flow and bed decouple and the per-step bed-change limiter clips, so higher isn't proportionally faster.");
-		connect(morfac_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-			[this](double v) { if (worker_) worker_->setMorfac(v); });
-		morfacForm->addRow("MORFAC (bed speed-up)", morfac_spin_);
-		simCol->addLayout(morfacForm);
-
 		// Tidal reversal (LIVE, no reset): drive a reversing current U_d(t) that face-swaps the inlet/
-		// outlet through a cosine slack ramp (RESEARCH §8). Watch a scour hole reorganize as the tide
-		// flips. It takes over "Input speed U" while enabled (greyed below). ⚠ MORFAC ≤ 5 in reversing
-		// flow (RESEARCH §7) — a run-setup choice; keep the scenario's morfac modest.
+		// outlet through a cosine slack ramp (RESEARCH §8). Watch the wake reorganize as the tide flips.
+		// It takes over "Input speed U" while enabled (greyed below).
 		auto* tideLine = new QFrame; tideLine->setFrameShape(QFrame::HLine); tideLine->setEnabled(false);
 		simCol->addWidget(tideLine);
 		tidal_chk_ = new QCheckBox("Tidal reversal (live)");
@@ -351,81 +288,13 @@ namespace scour::gui
 		gridCol->addWidget(apply_btn_);
 		col->addWidget(gridGroup);
 
-#ifdef SCOUR_HAVE_JOLT
-		// --- Drop objects (preparation) — REBUILDS + RESETS to a fresh seabed run at t=0 ----------
-		// Scatter scaled copies of a STEP protection unit above a sand bed, settle them under gravity
-		// (Jolt), then voxelize the settled pile as the rigid structure and start the morphodynamic run
-		// (largest-first timed release — an armour-layer pour). Like the grid Apply it RESETS to t=0, so it
-		// sits in its own box. ⚠ Needs a domain sized for the units (e.g. g1_viewer_full's 10×10×5 m).
-		// A grid Apply AFTER a drop PERSISTS the settled pile: applyGrid re-voxelizes the multi-block
-		// placements at the new grid (the `have_pile` path) instead of reverting to the config obstacle.
-		QGroupBox* dropGroup = new QGroupBox("Drop objects (preparation)");
-		QVBoxLayout* dropCol = new QVBoxLayout(dropGroup);
-
-		QHBoxLayout* dropPathRow = new QHBoxLayout;
-		QLineEdit* dropPathEdit = new QLineEdit;
-		{
-			QSettings s("COBOD", "ScourProtection");
-			dropPathEdit->setText(s.value("dropStepFile", "Experiments/V000 Code tests/XStone_Decomposed.stp").toString());
-		}
-		dropPathEdit->setToolTip("STEP protection unit to scatter + settle (default: XStone_Decomposed.stp, an 8-piece convex compound). Remembered across sessions.");
-		QPushButton* dropBrowse = new QPushButton("Browse…");
-		connect(dropBrowse, &QPushButton::clicked, this, [this, dropPathEdit] {
-			const QString fn = QFileDialog::getOpenFileName(this, "Drop unit STEP", dropPathEdit->text(),
-				"STEP files (*.step *.stp);;All files (*)");
-			if (!fn.isEmpty()) dropPathEdit->setText(fn);
-		});
-		dropPathRow->addWidget(dropPathEdit, 1);
-		dropPathRow->addWidget(dropBrowse);
-		dropCol->addLayout(dropPathRow);
-
-		QFormLayout* dropForm = new QFormLayout;
-		dropForm->setLabelAlignment(Qt::AlignLeft);
-		QSpinBox* dropCount = new QSpinBox; dropCount->setRange(1, 2000); dropCount->setValue(12);
-		dropCount->setToolTip("Number of units to scatter + settle onto the bed.");
-		dropForm->addRow("Count", dropCount);
-		QDoubleSpinBox* dropSmin = new QDoubleSpinBox; dropSmin->setRange(0.05, 10.0); dropSmin->setDecimals(2); dropSmin->setSingleStep(0.1); dropSmin->setValue(0.6);
-		dropSmin->setToolTip("Minimum random size scale applied to each unit.");
-		dropForm->addRow("Size min", dropSmin);
-		QDoubleSpinBox* dropSmax = new QDoubleSpinBox; dropSmax->setRange(0.05, 10.0); dropSmax->setDecimals(2); dropSmax->setSingleStep(0.1); dropSmax->setValue(1.0);
-		dropSmax->setToolTip("Maximum random size scale applied to each unit.");
-		dropForm->addRow("Size max", dropSmax);
-		QDoubleSpinBox* dropSand = new QDoubleSpinBox; dropSand->setRange(0.0, 50.0); dropSand->setDecimals(3); dropSand->setSingleStep(0.1); dropSand->setSuffix(" m"); dropSand->setValue(0.5);
-		dropSand->setToolTip("Depth of the sand bed the units drop onto — and the erodible bed for the ensuing scour run.");
-		dropForm->addRow("Sand depth", dropSand);
-		QSpinBox* dropSeed = new QSpinBox; dropSeed->setRange(0, 1000000000); dropSeed->setValue(1234);
-		dropSeed->setToolTip("Random seed for the scatter (positions / orientations / sizes). Same seed ⇒ the same pile.");
-		dropForm->addRow("Seed", dropSeed);
-		QSpinBox* dropCadence = new QSpinBox; dropCadence->setRange(0, 600); dropCadence->setValue(drop_release_ticks_); dropCadence->setSuffix(" ticks");
-		dropCadence->setToolTip("Animation ticks (~60 Hz) between releasing successive units — the staged pour. Larger = slower release; 0 = release all at once.");
-		connect(dropCadence, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) { drop_release_ticks_ = v; });
-		dropForm->addRow("Release cadence", dropCadence);
-		dropCol->addLayout(dropForm);
-
-		QPushButton* dropBtn = new QPushButton("Drop & settle");
-		dropBtn->setToolTip("Scatter + settle the units under gravity, then start a fresh erodible-seabed run (RESETS to t=0) with the settled pile as the rigid structure. ⚠ Size the domain for the units (e.g. 10×10×5 m).");
-		connect(dropBtn, &QPushButton::clicked, this, [this, dropPathEdit, dropCount, dropSeed, dropSmin, dropSmax, dropSand] {
-			const QString path = dropPathEdit->text().trimmed();
-			if (path.isEmpty()) { statusBar()->showMessage("drop: choose a STEP unit first", 4000); return; }
-			QSettings("COBOD", "ScourProtection").setValue("dropStepFile", path); // remember last used
-			dropBlocks(path, dropCount->value(), (unsigned)dropSeed->value(),
-				dropSmin->value(), dropSmax->value(), dropSand->value());
-		});
-		dropCol->addWidget(dropBtn);
-		QPushButton* clearDropBtn = new QPushButton("Clear pile / re-drop");
-		clearDropBtn->setToolTip("Stop settling + remove the current pile so you can adjust the parameters and Drop & settle again. (Drop & settle also clears any prior pile automatically.)");
-		connect(clearDropBtn, &QPushButton::clicked, this, [this] { clearDropPile(); });
-		dropCol->addWidget(clearDropBtn);
-		col->addWidget(dropGroup);
-#endif
-
 		// --- Visualization group ---------------------------------------------------------------
 		QGroupBox* vizGroup = new QGroupBox("Visualization");
 		QFormLayout* viz = new QFormLayout(vizGroup);
 		viz->setLabelAlignment(Qt::AlignLeft);
 
 		QComboBox* fieldBox = new QComboBox;
-		fieldBox->addItems({ "Speed |u|", "u (x-vel)", "v (y-vel)", "w (z-vel)", "Pressure", "Concentration" });
+		fieldBox->addItems({ "Speed |u|", "u (x-vel)", "v (y-vel)", "w (z-vel)", "Pressure" });
 		connect(fieldBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 			[this](int i) { if (viewer_) viewer_->setField(static_cast<Field>(i)); });
 		viz->addRow("Field", fieldBox);
@@ -474,7 +343,7 @@ namespace scour::gui
 		sliceChk->setToolTip("Show/hide the coloured slice plane. When shown, arrows draw black for contrast.");
 		connect(sliceChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowSlice(on); });
 		viz->addRow(sliceChk);
-		slice_chk_ = sliceChk; // so the seabed scenario can default it OFF (the bed is the star there)
+		slice_chk_ = sliceChk;
 		QCheckBox* modelChk = new QCheckBox("Show model");
 		modelChk->setChecked(true);
 		modelChk->setToolTip("Show/hide the smooth STEP polygon mesh.");
@@ -482,27 +351,9 @@ namespace scour::gui
 		viz->addRow(modelChk);
 		QCheckBox* solidVoxChk = new QCheckBox("Show solid voxels");
 		solidVoxChk->setChecked(true);
-		solidVoxChk->setToolTip("Show/hide the RIGID solid-voxel staircase (structure / obstacle), drawn dark-blue.");
+		solidVoxChk->setToolTip("Show/hide the solid-voxel staircase (obstacle), drawn dark-blue.");
 		connect(solidVoxChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowSolidVoxels(on); });
 		viz->addRow(solidVoxChk);
-		QCheckBox* sedVoxChk = new QCheckBox("Show sediment voxels");
-		sedVoxChk->setChecked(true);
-		sedVoxChk->setToolTip("Show/hide the ERODIBLE sediment-voxel staircase (sand bed), drawn orange.");
-		connect(sedVoxChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowSedimentVoxels(on); });
-		viz->addRow(sedVoxChk);
-		QCheckBox* bedChk = new QCheckBox("Show bed");
-		bedChk->setChecked(true);
-		bedChk->setToolTip("Show/hide the erodible seabed surface (the height-coloured z_b polygon + its Δz_b legend). Seabed scenario only.");
-		connect(bedChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowBed(on); });
-		viz->addRow(bedChk);
-		QComboBox* bedColBox = new QComboBox;
-		bedColBox->addItems({ "Elevation", "Exchange rate" });
-		bedColBox->setToolTip("Colour the seabed surface by: Elevation (Δz_b — scour blue / deposit red), or "
-			"Exchange rate = deposition − pickup (blue = sand being lifted / eroded, red = sand landing). "
-			"Same surface, different colour source. Seabed scenario only.");
-		connect(bedColBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-			[this](int i) { if (viewer_) viewer_->setBedColorMode(i); });
-		viz->addRow("Bed colour", bedColBox);
 		QCheckBox* axesChk = new QCheckBox("Show axes");
 		axesChk->setChecked(true);
 		axesChk->setToolTip("Show/hide the world-origin XYZ triad (X=red, Y=green, Z=blue) with metre ticks + corner gizmo.");
@@ -618,14 +469,14 @@ namespace scour::gui
 		col->addWidget(vizGroup);
 
 		// --- Clip plane group (see inside hollow structures) -----------------------------------
-		// A movable plane that hides SOLIDS (STEP model + voxel solids + seabed) on the camera side so
-		// the interior of a hollow structure is exposed; the flow slice + arrows are never clipped.
+		// A movable plane that hides SOLIDS (STEP model + voxel solids) on the camera side so the interior
+		// of a hollow structure is exposed; the flow slice + arrows are never clipped.
 		QGroupBox* clipGroup = new QGroupBox("Clip plane (see inside)");
 		QFormLayout* clip = new QFormLayout(clipGroup);
 		clip->setLabelAlignment(Qt::AlignLeft);
 
 		QCheckBox* clipChk = new QCheckBox("Enable clip plane");
-		clipChk->setToolTip("Hide solids (model + voxels + seabed) between the camera and a movable plane, so you can see inside hollow structures. The flow slice and arrows stay visible.");
+		clipChk->setToolTip("Hide solids (model + voxels) between the camera and a movable plane, so you can see inside hollow structures. The flow slice and arrows stay visible.");
 		connect(clipChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setClipEnabled(on); });
 		clip->addRow(clipChk);
 
@@ -653,10 +504,10 @@ namespace scour::gui
 		col->addWidget(clipGroup);
 
 		// --- Model placement (gizmo) -----------------------------------------------------------
-		// A single UNIFIED manipulator drawn on the model/structure: 3 translate arrows, 3 rotate rings and
-		// 3 scale cubes (X red / Y green / Z blue) plus a grey uniform-scale centre — all shown at once, and
-		// the handle you grab picks the operation (translate/rotate/scale). Works on a fluid-viewer model AND
-		// a seabed structure; the next "Apply" (Domain & resolution) re-voxelizes it exactly where you placed it.
+		// A single UNIFIED manipulator drawn on the model: 3 translate arrows, 3 rotate rings and 3 scale
+		// cubes (X red / Y green / Z blue) plus a grey uniform-scale centre — all shown at once, and the
+		// handle you grab picks the operation (translate/rotate/scale). The next "Apply" (Domain &
+		// resolution) re-voxelizes it exactly where you placed it.
 		QGroupBox* gizmoGroup = new QGroupBox("Model placement (gizmo)");
 		QVBoxLayout* gizmoCol = new QVBoxLayout(gizmoGroup);
 		gizmo_enable_chk_ = new QCheckBox("Enable manipulator (move + rotate + scale)");
@@ -689,7 +540,7 @@ namespace scour::gui
 		syncGridControls(); // seed the domain/h boxes + readout from the current sim
 	}
 
-	void MainWindow::spawnWorker(std::unique_ptr<scour::core::ChannelFluidCore> core, SeabedScenario scen,
+	void MainWindow::spawnWorker(std::unique_ptr<scour::core::ChannelFluidCore> core,
 		long long steps0, double t0)
 	{
 		// The checkpoint hand-off carries a shared_ptr across a queued connection — register it once.
@@ -702,7 +553,7 @@ namespace scour::gui
 		worker_->setAutosaveInterval(autosave_interval_); // keep auto-saving across a rebuild/restore
 		worker_->setDisplayInterval(display_throttle_s_); // keep the "Fast sim" graphics throttle across a rebuild/restore
 		// Rebuild factory: a re-inject rebuilds the core from an immutable recipe snapshot, entirely on
-		// the worker thread (make_core is Qt-free and thread-safe). Unused in the seabed scenario.
+		// the worker thread (make_core is Qt-free and thread-safe).
 		worker_->setRebuildFactory([recipe = recipe_](const std::vector<unsigned char>& solid, int mode)
 			{ return make_core(recipe, solid, mode); });
 		connect(worker_, &SimWorker::checkpointReady, this, &MainWindow::onCheckpointReady, Qt::QueuedConnection);
@@ -711,10 +562,8 @@ namespace scour::gui
 		connect(worker_thread_, &QThread::started, worker_, &SimWorker::run);
 		connect(worker_, &SimWorker::stats, this, [this](qint64 steps, double t, double dt, double simFps) {
 			last_steps_ = steps; last_sim_time_ = t;
-			// Always show the live step/time/dt + the measured sim throughput (steps/s) — even in the seabed
-			// scenario, where the sim is clearly progressing (the old !seabed_ guard froze this readout).
-			// simFps is the SIM rate (climbs under "Fast sim"), distinct from the render fps on the right.
-			// The pre-calibration disclaimer is appended as a marker so it is not lost.
+			// Live step/time/dt + the measured sim throughput (steps/s). simFps is the SIM rate (climbs
+			// under "Fast sim"), distinct from the render fps on the right.
 			QString s = QString("step %1   t = %2 s   dt = %3 ms   %4 sim fps")
 				.arg(steps).arg(t, 0, 'f', 3).arg(dt * 1e3, 0, 'f', 2).arg(simFps, 0, 'f', 1);
 			if (worker_ && worker_->tidalOn())
@@ -723,57 +572,17 @@ namespace scour::gui
 				const char* dir = qAbs(u) < 0.02 ? "slack" : (u > 0.0 ? "flood +x" : "ebb −x");
 				s += QString("   |   tide %1 m/s (%2)").arg(u, 0, 'f', 2).arg(QString::fromUtf8(dir));
 			}
-			if (seabed_) s += "   |   seabed (pre-calibration, qualitative)";
 			status_->setText(s);
 		}, Qt::QueuedConnection);
 		viewer_->setWorker(worker_);
 
-		// --- Erodible-seabed scenario: attach the morphodynamic engine + bed viz -----------------
-		if (scen.active)
-		{
-			seabed_ = true;
-			last_sp_ = scen.params; have_sp_ = true; // remember the sediment params for a later "Add sand"
-			// Reflect the scenario's MORFAC in the control (signals blocked so it shows, not re-pushes — the
-			// engine already carries it). The user can then dial it live via setMorfac.
-			if (morfac_spin_) { morfac_spin_->blockSignals(true); morfac_spin_->setValue(scen.params.morfac); morfac_spin_->blockSignals(false); }
-			worker_->setMorpho(std::move(scen.engine), scen.spinup);
-			viewer_->setBedSurface(recipe_.info.nx, recipe_.info.ny, scen.bed_z0);
-			// The default horizontal slice (z≈mid-height) is an opaque sheet that would occlude the
-			// bed from an overhead view. In the seabed scenario the bed IS the subject, so hide the
-			// slice by default (unchecking the box drives viewer_->setShowSlice(false)); the user can
-			// re-enable it for a flow cross-section. Fluid viewers keep the slice on.
-			if (slice_chk_) slice_chk_->setChecked(false);
-			if (scen.has_structure && !scen.structure_mesh.empty())
-			{
-				const auto& p = scen.structure_place;
-				scene_mesh_ = scen.structure_mesh;           // persist for a scene save (before the move below)
-				scene_place_ = p;
-				// Seed the gizmo from the structure placement (NOT a fixed override matrix) so the seabed
-				// structure stays MOVABLE: drag to reposition, then Apply re-voxelizes it into the sand at
-				// the new placement (place-before-run). setMesh seeds the gizmo pivot from the bbox; then
-				// setModelPlacement drives it to `p` (mesh_override_ off ⇒ hasModelPlacement() true ⇒ editable).
-				viewer_->setMesh(scen.structure_mesh);
-				viewer_->setModelPlacement(p);
-			}
-			if (status_) status_->setText("PRE-CALIBRATION DEMO — constants nominal, results qualitative");
-		}
-		else
-			seabed_ = false;
-
-		updateGizmoUi(); // gizmo is fluid-viewer-only (seabed structure is fixed)
+		updateGizmoUi();
 		worker_thread_->start();
-		maybeAutoRecord(); // if armed in the Record Video… dialog, start recording a fresh seabed/drop run
 	}
 
 	void MainWindow::teardownWorkerForReload()
 	{
-#ifdef SCOUR_HAVE_JOLT
-		// A non-drop rebuild (scene load / Apply / Add sand / commit) ends the drop sink-coupling. commitDrop
-		// re-arms it AFTER this teardown; the other callers leave it off (the pile is gone/replaced).
-		drop_active_ = false;
-		if (resettle_timer_) resettle_timer_->stop();
-#endif
-		// Stop + join + delete the worker AND its thread so a fresh core/engine can replace it with no
+		// Stop + join + delete the worker AND its thread so a fresh core can replace it with no
 		// concurrency (the core is only ever (re)built while the worker thread is fully joined — never
 		// racing a live worker, and construction touches no GL). Deleting the thread each time avoids a
 		// QThread accumulating across repeated reloads.
@@ -790,37 +599,6 @@ namespace scour::gui
 		if (viewer_) viewer_->setWorker(nullptr);
 		worker_down_ = false;
 		model_injected_ = false;
-	}
-
-	bool MainWindow::startSeabedScenario(const QString& path)
-	{
-		teardownWorkerForReload();
-
-		SimRecipe recipe; SeabedScenario scen; std::string warn;
-		auto core = build_seabed_sim(path.toStdString(), recipe, scen, warn);
-		if (!core)
-		{
-			statusBar()->showMessage(QString("seabed scenario load failed: %1").arg(QString::fromStdString(warn)), 6000);
-			return false;
-		}
-		if (!warn.empty()) std::fprintf(stderr, "[seabed] %s\n", warn.c_str());
-		recipe_ = recipe;
-
-		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — seabed scenario [%1: %2x%3x%4, h=%5 m]")
-			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
-		if (viewer_)
-		{
-			viewer_->clearVoxelOverlay();
-			viewer_->clearMesh();
-			viewer_->setInfo(info); // re-frame the camera + rebuild slice geometry for the new grid
-		}
-		model_mesh_ = scour::core::TriMesh{};
-		added_sand_m_ = 0.0; // a real scenario FILE: a grid Apply rebuilds it via build_seabed_sim, not the conversion path
-		spawnWorker(std::move(core), std::move(scen));
-		syncGridControls(); // the scenario's domain/h now drive the editable boxes
-		statusBar()->showMessage("seabed scenario loaded", 4000);
-		return true;
 	}
 
 	void MainWindow::applyGridValues(double Lx, double Ly, double Lz, double h)
@@ -843,13 +621,6 @@ namespace scour::gui
 	{
 		if (!u_spin_ || U <= 0.0) return;
 		u_spin_->setValue(U); // fires valueChanged → worker_->setInletSpeed + viewer_->setReferenceU (live, no reset)
-	}
-
-	void MainWindow::setMorfacValue(double m)
-	{
-		if (!morfac_spin_ || m <= 0.0) return;
-		morfac_spin_->setValue(m);            // fires valueChanged → worker_->setMorfac when the value changes
-		if (worker_) worker_->setMorfac(m);   // also apply directly, so an unchanged value still lands on the engine
 	}
 
 	// Push the current tidal-reversal control values to the worker (live, no reset). While the tide is on
@@ -890,12 +661,6 @@ namespace scour::gui
 		}
 	}
 
-	void MainWindow::addSandMeters(double depth)
-	{
-		if (sand_spin_ && depth > 0.0) sand_spin_->setValue(depth);
-		addSand();
-	}
-
 	void MainWindow::syncGridControls()
 	{
 		if (!lx_spin_) return;
@@ -906,16 +671,10 @@ namespace scour::gui
 		lz_spin_->setValue(info.Lz);
 		h_spin_->setValue(info.h);
 		u_spin_->setValue(info.U);
-		if (inlet_profile_box_) // reflect the built inlet mode (seabed ⇒ log-law, fluid ⇒ uniform)
+		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
 			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == scour::core::INLET_LOGLAW ? 1 : 0);
-		}
-		if (sed_bc_box_) // reflect the scenario's suspended-sediment boundary (open-sea by default)
-		{
-			const QSignalBlocker bs(sed_bc_box_);
-			int m = have_sp_ ? last_sp_.sed_bc : scour::core::SED_BC_OPEN;
-			sed_bc_box_->setCurrentIndex(m == scour::core::SED_BC_OPEN ? 0 : m == scour::core::SED_BC_RECYCLE ? 1 : 2);
 		}
 		updateGridReadout();
 	}
@@ -926,7 +685,7 @@ namespace scour::gui
 		int nx = 0, ny = 0, nz = 0;
 		grid_dims_for(lx_spin_->value(), ly_spin_->value(), lz_spin_->value(), h_spin_->value(), nx, ny, nz);
 		const long long cells = (long long)nx * ny * nz;
-		// Rough device-memory gauge (fluid + snapshot double fields, seabed adds more) — an order-of-
+		// Rough device-memory gauge (fluid + snapshot double fields) — an order-of-
 		// magnitude hint only, not an allocation contract.
 		const double mb = cells * 240.0 / (1024.0 * 1024.0);
 		const bool ok = cells > 0 && cells <= kMaxCells;
@@ -940,9 +699,9 @@ namespace scour::gui
 
 	void MainWindow::updateGizmoUi()
 	{
-		// Enabled whenever a gizmo-editable model/structure exists — a fluid-viewer model, a seabed structure
-		// (real scenario, Add-sand conversion, or restored scene), all of which are seeded into the gizmo. The
-		// "Enable manipulator" checkbox (gizmo_on_) persists in the viewer across an Apply, so nothing to reset.
+		// Enabled whenever a gizmo-editable model exists (a loaded fluid-viewer model or a restored scene,
+		// both seeded into the gizmo). The "Enable manipulator" checkbox (gizmo_on_) persists in the viewer
+		// across an Apply, so nothing to reset.
 		const bool ok = viewer_ && viewer_->hasModelPlacement();
 		if (gizmo_group_) gizmo_group_->setEnabled(ok);
 		if (gizmo_enable_chk_ && viewer_ && gizmo_enable_chk_->isChecked() != viewer_->gizmoEnabled())
@@ -972,7 +731,7 @@ namespace scour::gui
 		if (rzDeg != 0.0) x.rot = QQuaternion::fromAxisAndAngle(0.0f, 0.0f, 1.0f, (float)rzDeg) * x.rot;
 		if (scale > 0.0) x.scale *= (float)scale;
 		viewer_->setModelXform(x);
-		if (!seabed_) setModelAsObstacle(true); // re-voxelize where placed (fluid viewer)
+		setModelAsObstacle(true); // re-voxelize where placed
 		updateGizmoUi();
 		std::fprintf(stderr, "[G1] model placement: t=(%.3f %.3f %.3f) m, rz=%.1f deg, scale=%.3f\n",
 			x.t.x(), x.t.y(), x.t.z(), rzDeg, x.scale.x());
@@ -992,94 +751,21 @@ namespace scour::gui
 			return;
 		}
 
-		// Rebuild the SAME sim (scenario or fluid viewer) at the new grid: re-run the exact setup path
-		// this recipe came from with only the domain + h overridden — every physics/scenario parameter
-		// is preserved. A fluid viewer keeps its loaded STEP model (re-displayed, re-voxelized at the
-		// new h if it was injected); a scenario re-voxelizes its own structure + re-inits the sand bed.
-		// Three rebuild paths at the new grid:
-		//  - real_scenario: loaded from a seabed scenario FILE → build_seabed_sim re-voxelizes its own
-		//    structure + re-inits the sand from the config.
-		//  - converted: a fluid viewer turned into a seabed run at runtime via "Add sand" (added_sand_m_>0)
-		//    → the config has no structure/sand, so rebuild the seabed HERE with the loaded model (or the
-		//    config obstacle) as the rigid structure + the stored sand depth. This is what keeps a resized
-		//    model-plus-sand run from reverting to the config's default cylinder.
-		//  - fluid: plain viewer → build_sim, then re-voxelize the loaded model as the obstacle (if any).
-		// A committed drop/settle PILE (still active) must SURVIVE the resize: capture it BEFORE the
-		// teardown below (which clears drop_active_) and route it through the converted-seabed path,
-		// re-voxelizing the multi-block placements at the new grid instead of reverting to the config
-		// obstacle. `have_pile` is a plain bool in both build configs (false when Jolt is compiled out).
-#ifdef SCOUR_HAVE_JOLT
-		const bool have_pile = drop_active_ && !drop_placements_.empty() && !drop_mesh_.empty();
-#else
-		const bool have_pile = false;
-#endif
-		const bool converted = added_sand_m_ > 0.0 || have_pile;
-		const bool real_scenario = recipe_.is_scenario && !converted;
-		const bool fluid = !real_scenario && !converted;
+		// Rebuild the fluid viewer at the new grid: re-run build_sim with only the domain + h overridden —
+		// every other physics parameter is preserved. A loaded STEP model is kept (re-displayed and
+		// re-voxelized as the obstacle at the new h if it was injected).
 		const std::string src = recipe_.source_config;
 		const bool had_model = !model_mesh_.empty();
 		scour::core::TriMesh keep_mesh = had_model ? model_mesh_ : scour::core::TriMesh{};
 
-		// Preserve the user's gizmo placement (move/rotate/scale) across the rebuild so the model/structure
-		// is re-voxelized WHERE IT WAS PLACED, not re-centred. keep_place is the affine for voxelization;
-		// keep_x restores the full gizmo state so the manipulator keeps editing from the same transform.
-		// Captured from the VIEWER (not model_mesh_), so it works for a fluid obstacle AND a seabed structure
-		// (which has no model_mesh_ but IS gizmo-editable). The "Enable manipulator" state persists in the viewer.
-		const bool have_place = viewer_ && viewer_->hasModelPlacement();
-		scour::core::ModelPlacement keep_place = have_place
-			? viewer_->modelPlacement()
-			: (had_model ? place_model_on_bed(keep_mesh, recipe_.info.Lx, recipe_.info.Ly) : scour::core::ModelPlacement{});
+		// Preserve the user's gizmo placement (move/rotate/scale) across the rebuild so the model is
+		// re-voxelized WHERE IT WAS PLACED, not re-centred. The "Enable manipulator" state persists in the viewer.
 		SliceViewer::ModelGizmoXform keep_x = viewer_ ? viewer_->modelXform() : SliceViewer::ModelGizmoXform{};
 
 		teardownWorkerForReload();
 
-		SimRecipe recipe; SeabedScenario scen; std::string warn;
-		std::unique_ptr<scour::core::ChannelFluidCore> core;
-		if (real_scenario)
-			// Pass the gizmo placement so a repositioned structure re-voxelizes where placed (place-before-run).
-			core = build_seabed_sim(src, recipe, scen, warn, &ov, have_place ? &keep_place : nullptr);
-		else if (converted)
-		{
-			using namespace scour::core;
-			// Get the new grid + config obstacle at the new resolution (fluid recipe, not spawned).
-			SimRecipe frec; std::string fw;
-			build_sim(src, frec, fw, &ov);
-			const MacGrid ng = frec.grid;
-			const double U = (ov.U > 0.0) ? ov.U : frec.info.U;
-			// Rigid structure at the new grid, in priority order:
-			//  - a settled drop/settle PILE (have_pile): re-voxelize the SAME unit mesh at every resting
-			//    block pose (world-fixed placements) so a resize KEEPS the pile — the persistence fix;
-			//  - a single loaded model: voxelize it at the gizmo placement (moved/rotated/scaled);
-			//  - neither: the config obstacle.
-			ModelPlacement place = keep_place;
-			std::vector<unsigned char> rigid;
-			if (have_pile)
-			{
-#ifdef SCOUR_HAVE_JOLT
-				int pile_cells = 0;
-				rigid = voxelize_mesh_instances(drop_mesh_, ng, drop_placements_, &pile_cells);
-				std::fprintf(stderr, "[drop] pile re-voxelized on resize: %d rigid cells across %zu blocks\n",
-					pile_cells, drop_placements_.size());
-#endif
-			}
-			else if (had_model)
-				rigid = voxelize_mesh(keep_mesh, ng, place, nullptr, nullptr, nullptr, nullptr);
-			else
-				rigid = frec.base_solid;
-			const SeabedParams* base = have_sp_ ? &last_sp_ : nullptr;
-			core = build_seabed_from_structure(ng, U, added_sand_m_, rigid, base, src, /*spinup*/ 200,
-				/*nu_fluid*/ 5.0e-3, recipe, scen, warn, /*build_core*/ true);
-			// A single model is displayed as the structure mesh; a pile is displayed via its per-block
-			// placements (re-attached after spawnWorker below), so leave scen.structure_mesh empty for it.
-			if (core && had_model && !have_pile)
-			{
-				scen.structure_mesh = keep_mesh;   // display the model as the structure at its bed placement
-				scen.structure_place = place;
-				scen.has_structure = true;
-			}
-		}
-		else
-			core = build_sim(src, recipe, warn, &ov);
+		SimRecipe recipe; std::string warn;
+		std::unique_ptr<scour::core::ChannelFluidCore> core = build_sim(src, recipe, warn, &ov);
 		if (!core)
 		{
 			statusBar()->showMessage(QString("apply failed: %1").arg(QString::fromStdString(warn)), 6000);
@@ -1089,21 +775,20 @@ namespace scour::gui
 		recipe_ = recipe;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — %1 [%2: %3x%4x%5, h=%6 m]")
-			.arg((real_scenario || converted) ? "seabed" : "G1 slice viewer")
+		setWindowTitle(QString("ScourProtection — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
 		if (viewer_)
 		{
 			viewer_->clearVoxelOverlay();      // drop stale-size staircase geometry
-			viewer_->clearMesh();              // spawnWorker re-attaches the scenario/structure mesh
+			viewer_->clearMesh();
 			viewer_->setInfo(info);            // re-frame + re-size all grid-derived viewer geometry
 		}
-		model_mesh_ = keep_mesh;               // keep the loaded model (fluid re-inject / converted structure)
-		spawnWorker(std::move(core), std::move(scen));
+		model_mesh_ = keep_mesh;               // keep the loaded model (fluid re-inject)
+		spawnWorker(std::move(core));
 
 		// Fluid viewer with a loaded model: re-show it and re-voxelize it as the obstacle at the new h (it
-		// IS the obstacle). The converted-seabed path already seated the model as the structure above.
-		if (fluid && had_model && viewer_)
+		// IS the obstacle).
+		if (had_model && viewer_)
 		{
 			viewer_->setMesh(scour::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);    // re-apply the user's placement (setMesh reset it)
@@ -1111,329 +796,10 @@ namespace scour::gui
 			updateGizmoUi();
 		}
 
-#ifdef SCOUR_HAVE_JOLT
-		// A settled drop pile survives the resize: re-display it at its (world-fixed) block poses and
-		// re-arm the G3.3 sink coupling so it keeps sinking into the developing scour hole. build_core
-		// reset the flow/bed to t=0 (Apply always does), but the PILE persists as the rigid structure.
-		if (have_pile && viewer_)
-		{
-			viewer_->setMesh(scour::core::TriMesh(drop_mesh_));
-			viewer_->setBlockPlacements(drop_placements_);
-			drop_active_ = true;              // teardownWorkerForReload cleared it; the pile is still here
-			resettle_last_zb_.clear();
-			if (resettle_timer_) resettle_timer_->start(2000);
-		}
-#endif
-
 		syncGridControls(); // reflect the built grid (floor/clamp may differ from the typed value)
 		statusBar()->showMessage(QString("grid applied: %1x%2x%3 @ h=%4 m — sim reset to t=0")
 			.arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h), 5000);
 	}
-
-	void MainWindow::addSand()
-	{
-		if (!worker_ || !sand_spin_) return;
-		const double X = sand_spin_->value();
-		if (X <= 0.0) { statusBar()->showMessage("set a sand depth > 0 to add sand", 4000); return; }
-
-		const scour::core::MacGrid g = recipe_.grid;
-
-		// The RIGID structure = the kind-2 cells of the live flow mask (structure / obstacle), EXCLUDING
-		// any existing sand (kind 1) so re-adding sand doesn't freeze the old bed. Works from a fluid
-		// viewer (all solids rigid) or an existing seabed scenario (only the structure is rigid).
-		std::vector<unsigned char> rigid((size_t)g.p_count(), 0);
-		{
-			std::vector<unsigned char> kind; scour::core::MacGrid mg;
-			if (worker_->copyMask(kind, mg) && (int)kind.size() == g.p_count())
-			{
-				for (std::size_t n = 0; n < kind.size(); ++n) if (kind[n] == 2) rigid[n] = 1;
-			}
-			else if ((int)recipe_.base_solid.size() == g.p_count())
-			{
-				for (std::size_t n = 0; n < rigid.size(); ++n) if (recipe_.base_solid[n]) rigid[n] = 1;
-			}
-		}
-
-		const scour::core::SeabedParams* base = have_sp_ ? &last_sp_ : nullptr;
-
-		// Build ONLY the morphodynamic engine + initial sand+structure mask + recipe (build_core=false):
-		// we do NOT construct a fresh flow core, and we do NOT tear down the worker. The developed flow is
-		// PRESERVED — the worker installs the sand mask in place via ChannelFluidCore::update_solid, so you
-		// can spin the flow up to steady state and then add sand without resetting it. The now-solid sand
-		// cells are zeroed; every untouched fluid cell keeps its {u,v,w,p}. The loaded model (if any) stays
-		// displayed where it is (sand fills around it); a procedural obstacle shows via the voxel overlay.
-		SimRecipe recipe; SeabedScenario scen; std::string warn;
-		build_seabed_from_structure(g, recipe_.info.U, X, rigid, base,
-			recipe_.source_config, /*spinup*/ 200, /*nu_fluid*/ 5.0e-3, recipe, scen, warn, /*build_core*/ false);
-		if (!scen.engine)
-		{
-			statusBar()->showMessage(QString("add sand failed: %1").arg(QString::fromStdString(warn)), 6000);
-			return;
-		}
-		if (!warn.empty()) std::fprintf(stderr, "[seabed] %s\n", warn.c_str());
-
-		// Adopt the seabed state on the GUI side (bed viz + params) WITHOUT resetting the view.
-		seabed_ = true;
-		added_sand_m_ = X; // mark this as a runtime conversion so a later grid Apply rebuilds it correctly
-		last_sp_ = scen.params; have_sp_ = true;
-		recipe_ = recipe; // provenance + inlet-profile combo (now log-law); grid is unchanged
-		if (viewer_) viewer_->setBedSurface(recipe.info.nx, recipe.info.ny, scen.bed_z0);
-
-		// Hand the engine + initial mask to the worker; it converts the running core in place (flow kept).
-		worker_->requestSeabedConversion(std::move(scen.engine), recipe.base_solid, /*spinup*/ 200,
-			/*loglaw*/ recipe.bc.inlet_mode == scour::core::INLET_LOGLAW, recipe.bc.z0, recipe.bc.bed_datum);
-
-		setWindowTitle(QString("ScourProtection — seabed (added sand, flow kept) [%1x%2x%3, h=%4 m, sand=%5 m]")
-			.arg(recipe.info.nx).arg(recipe.info.ny).arg(recipe.info.nz).arg(recipe.info.h).arg(X, 0, 'f', 2));
-		syncGridControls();
-		updateGizmoUi(); // now a seabed run ⇒ the model placement gizmo is disabled (structure fixed)
-		maybeAutoRecord(); // "Add sand" begins a seabed run in place (no spawnWorker) — arm auto-record here too
-		statusBar()->showMessage(QString("added %1 m sand — flow preserved (sediment run continues)").arg(X, 0, 'f', 2), 6000);
-	}
-
-	// ================= Drop/settle preparation phase (PLAN G3.2) =================================
-#ifdef SCOUR_HAVE_JOLT
-	bool MainWindow::dropBlocks(const QString& stepPath, int count, unsigned seed,
-		double scaleMin, double scaleMax, double sandDepth)
-	{
-		using namespace scour::core;
-
-		// Fresh drop: discard any prior pile + stop the sink re-settle before building the new one.
-		drop_active_ = false;
-		if (resettle_timer_) resettle_timer_->stop();
-		settle_world_.reset();
-		resettle_last_zb_.clear();
-
-		// Load the XStone: the full (holed) mesh for DISPLAY + VOXELIZATION, and the pre-cut convex solids
-		// for the Jolt collision compound (fallback: the whole mesh as a single convex hull).
-		std::string err;
-		TriMesh mesh = load_step_mesh(stepPath.toStdString(), 0.1, &err);
-		if (mesh.empty())
-		{
-			statusBar()->showMessage(QString("drop: STEP load failed: %1").arg(QString::fromStdString(err)), 6000);
-			std::fprintf(stderr, "[drop] STEP load failed: %s\n", err.c_str());
-			return false;
-		}
-		std::vector<TriMesh> solids = load_step_solids(stepPath.toStdString(), 0.1, nullptr);
-		ConvexShape shape;
-		if (!solids.empty()) shape.pieces = std::move(solids);
-		else shape.pieces.push_back(mesh); // bootstrap: whole-mesh hull
-		std::fprintf(stderr, "[drop] XStone: %zu display tris, %zu convex pieces; dropping %d @ scale [%.2f,%.2f], sand=%.2f m\n",
-			mesh.triangle_count(), shape.pieces.size(), count, scaleMin, scaleMax, sandDepth);
-
-		// Scatter `count` units above the sand surface, centred on the domain, at random orientation/scale.
-		const SimInfo& info = recipe_.info;
-		const std::array<float, 3> bsz = mesh.bbox_size();
-		const double unit_h = std::max({ (double)bsz[0], (double)bsz[1], (double)bsz[2] }) * scaleMax;
-		const double footprint = std::min(info.Lx, info.Ly) * 0.6;
-		// Drop the units from well ABOVE the sim domain (MH's ask): spawn 5 m higher than the domain
-		// z-size, staggered over ~unit heights so they don't all release from the exact same z. The Jolt
-		// settling world is decoupled from the CUDA fluid, so a spawn above Lz is fine — the units simply
-		// fall further before landing on the sand at z = sandDepth. The ~10–13 m/s impact from that height
-		// is caught by the CCD (LinearCast) + sub-stepping in settle.cpp, so nothing tunnels the floor.
-		const double drop_lo = info.Lz + 5.0;              // 5 m above the top of the simulation space
-		double drop_hi = drop_lo + 2.5 * unit_h;           // staggered release heights
-		// Scatter is sorted LARGEST-FIRST; we release the units over time in that order (big ones drop and
-		// settle first, smaller ones land among/on them later — an armour-layer pour).
-		std::vector<BlockInstance> instances = scatter_blocks(count, 0.5 * info.Lx, 0.5 * info.Ly, footprint,
-			drop_lo, drop_hi, scaleMin, scaleMax, bsz, seed);
-
-		// Build an EMPTY settling world (just the ground); stepDropAnimation releases the units one at a
-		// time. Land them on the sand surface at z = sandDepth.
-		GroundSpec ground; ground.bed_z = sandDepth;
-		SettleParams params; params.seed = seed; params.max_steps = 30000; // generous for a staged pour
-		params.reserve_bodies = count; // size Jolt's pair/contact buffers for the FULL pile (blocks are
-		                               // added incrementally) — else a big pour overflows + drops contacts.
-		settle_world_ = std::make_unique<SettleWorld>(shape, std::vector<BlockInstance>{}, ground, params);
-		drop_queue_ = std::move(instances);
-		drop_next_ = 0;
-		drop_release_ctr_ = 0; // release the first (largest) unit on the first tick
-		drop_placements_.clear();
-		drop_mesh_ = mesh;
-		drop_sand_depth_ = sandDepth;
-
-		// Pause the underlying flow and arm the display; the units appear as they are released.
-		if (worker_) worker_->setPlaying(false);
-		if (viewer_)
-		{
-			viewer_->clearVoxelOverlay();
-			viewer_->setMesh(TriMesh(mesh)); // the drawn geometry (holed XStone)
-			viewer_->clearBlockPlacements();
-			viewer_->setShowModel(false);    // nothing shown until the first unit drops
-		}
-		statusBar()->showMessage(QString("dropping %1 XStone units (largest first) — settling…").arg(count), 0);
-
-		// Animate the settle on the MAIN thread (cheap: tens of bodies); commitDrop() runs once it rests.
-		if (!drop_timer_)
-		{
-			drop_timer_ = new QTimer(this);
-			connect(drop_timer_, &QTimer::timeout, this, &MainWindow::stepDropAnimation);
-		}
-		drop_timer_->start(16); // ~60 Hz
-		return true;
-	}
-
-	void MainWindow::stepDropAnimation()
-	{
-		if (!settle_world_) { if (drop_timer_) drop_timer_->stop(); return; }
-
-		// Release the next (largest remaining) unit on a cadence — big units drop + settle first, then
-		// the smaller ones land among/on them.
-		if (drop_next_ < (int)drop_queue_.size() && --drop_release_ctr_ <= 0)
-		{
-			settle_world_->addBlock(drop_queue_[drop_next_++]);
-			drop_release_ctr_ = drop_release_ticks_;
-		}
-
-		settle_world_->step(20); // ~20 physics substeps per tick
-		drop_placements_ = settle_world_->placements();
-		if (viewer_)
-		{
-			if (!drop_placements_.empty()) viewer_->setShowModel(true);
-			viewer_->setBlockPlacements(drop_placements_);
-		}
-
-		// Done once every unit is released AND the whole pile has come to rest.
-		if (drop_next_ >= (int)drop_queue_.size() && settle_world_->all_asleep())
-		{
-			if (drop_timer_) drop_timer_->stop();
-			commitDrop();
-		}
-	}
-
-	void MainWindow::commitDrop()
-	{
-		using namespace scour::core;
-		if (!settle_world_) return;
-		const SettleResult res = settle_world_->result();
-		drop_placements_ = res.placements;
-		// KEEP settle_world_ alive for the G3.3 sink coupling (re-settle as the bed erodes below the pile).
-		std::fprintf(stderr, "[drop] settled: %d steps, %s, min_z=%.3f m, max_penetration=%.3f m\n",
-			res.steps, res.all_asleep ? "at rest" : "budget hit", res.min_z, res.max_penetration);
-
-		// Voxelize the settled pile into ONE rigid-structure mask (union over the placed blocks).
-		const MacGrid g = recipe_.grid;
-		int solid_cells = 0;
-		std::vector<unsigned char> rigid = voxelize_mesh_instances(drop_mesh_, g, drop_placements_, &solid_cells);
-		std::fprintf(stderr, "[drop] pile voxelized: %d rigid cells across %zu blocks\n", solid_cells, drop_placements_.size());
-
-		// Build a FRESH seabed run (t=0): the pile is the rigid structure, `drop_sand_depth_` m of sand
-		// fills below it — the same builder the "Add sand" path uses, with build_core=true for a full reset.
-		const SeabedParams* base = have_sp_ ? &last_sp_ : nullptr;
-		SimRecipe recipe; SeabedScenario scen; std::string warn;
-		std::unique_ptr<ChannelFluidCore> core = build_seabed_from_structure(
-			g, recipe_.info.U, drop_sand_depth_, rigid, base, recipe_.source_config,
-			/*spinup*/ 200, /*nu_fluid*/ 5.0e-3, recipe, scen, warn, /*build_core*/ true);
-		if (!core)
-		{
-			statusBar()->showMessage(QString("drop commit failed: %1").arg(QString::fromStdString(warn)), 6000);
-			std::fprintf(stderr, "[drop] commit failed: %s\n", warn.c_str());
-			return;
-		}
-		if (!warn.empty()) std::fprintf(stderr, "[drop] %s\n", warn.c_str());
-
-		// Swap in the seabed sim. The pile is DISPLAYED via the block placements (not a single structure
-		// mesh) + the worker's voxel overlay, so leave scen.structure_mesh empty.
-		teardownWorkerForReload();
-		recipe_ = recipe;
-		added_sand_m_ = drop_sand_depth_;
-		model_mesh_ = TriMesh{}; // the pile is not a single-placement obstacle
-		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — seabed (XStone drop) [%1x%2x%3, h=%4 m, %5 blocks]")
-			.arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h).arg(drop_placements_.size()));
-		if (viewer_)
-		{
-			viewer_->clearVoxelOverlay();
-			viewer_->clearMesh();
-			viewer_->setInfo(info);
-		}
-		spawnWorker(std::move(core), std::move(scen));
-		// Re-attach the pile display AFTER spawnWorker (which set up the seabed bed viz).
-		if (viewer_)
-		{
-			viewer_->setMesh(TriMesh(drop_mesh_));
-			viewer_->setBlockPlacements(drop_placements_);
-		}
-		std::fprintf(stderr, "[drop] committed: seabed run started (%zu blocks, %d rigid cells, sand=%.2f m)\n",
-			drop_placements_.size(), solid_cells, drop_sand_depth_);
-		statusBar()->showMessage(QString("XStone pile settled (%1 units) — morphodynamic run started").arg(drop_placements_.size()), 6000);
-
-		// G3.3 sink coupling: start the periodic re-settle so the pile sinks into the scour hole as the
-		// bed erodes beneath it. It re-settles only when the bed has moved ≥ ½ cell since the last one.
-		if (!resettle_timer_)
-		{
-			resettle_timer_ = new QTimer(this);
-			connect(resettle_timer_, &QTimer::timeout, this, &MainWindow::maybeResettle);
-		}
-		resettle_last_zb_.clear();
-		drop_active_ = true;
-		resettle_timer_->start(2000);
-	}
-
-	void MainWindow::maybeResettle()
-	{
-		using namespace scour::core;
-		if (!drop_active_ || !settle_world_ || !worker_ || drop_mesh_.empty()) return;
-
-		std::vector<float> zb;
-		if (!worker_->copyBed(zb)) return;
-		const int nx = recipe_.info.nx, ny = recipe_.info.ny;
-		if ((int)zb.size() != nx * ny) return;
-
-		// First tick after commit just records the (flat) baseline; later ticks trigger on bed change.
-		if ((int)resettle_last_zb_.size() != (int)zb.size()) { resettle_last_zb_ = zb; return; }
-		const double h = recipe_.info.h;
-		double dmax = 0.0;
-		for (std::size_t n = 0; n < zb.size(); ++n) dmax = std::max(dmax, (double)std::fabs(zb[n] - resettle_last_zb_[n]));
-		if (dmax < 0.5 * h) return; // not enough erosion yet
-		resettle_last_zb_ = zb;
-
-		// Downsample z_b to a coarse world-Z-up bed surface for the collision mesh (the scour hole is
-		// smooth, so a ~64² patch captures it cheaply). Sample (si,sj) at column (si·stride, sj·stride).
-		const int stride = std::max(1, std::max(nx, ny) / 64);
-		BedField bed;
-		bed.nx = (nx + stride - 1) / stride;
-		bed.ny = (ny + stride - 1) / stride;
-		bed.x0 = 0.5 * h; bed.y0 = 0.5 * h; bed.h = stride * h;
-		bed.z.assign((size_t)bed.nx * bed.ny, 0.0f);
-		for (int sj = 0; sj < bed.ny; ++sj)
-			for (int si = 0; si < bed.nx; ++si)
-			{
-				const int i = std::min(nx - 1, si * stride), j = std::min(ny - 1, sj * stride);
-				bed.z[(size_t)sj * bed.nx + si] = zb[(size_t)j * nx + i];
-			}
-
-		// Re-settle the pile onto the eroded bed (blocks that lost their sand support sink into the hole).
-		const SettleResult res = settle_world_->resettleOnBed(bed);
-		drop_placements_ = res.placements;
-		if (viewer_) viewer_->setBlockPlacements(drop_placements_);
-
-		// Re-voxelize the moved pile and hand the new structure to the worker (flow preserved in place).
-		int solid_cells = 0;
-		std::vector<unsigned char> rigid = voxelize_mesh_instances(drop_mesh_, recipe_.grid, drop_placements_, &solid_cells);
-		worker_->requestStructureUpdate(std::move(rigid));
-		std::fprintf(stderr, "[drop] re-settle: bed moved %.3f m (≥ %.3f) → pile sank (%d steps, min_z=%.3f), %d rigid cells\n",
-			dmax, 0.5 * h, res.steps, res.min_z, solid_cells);
-	}
-
-	// Dock "Clear pile / re-drop": stop the fall animation + the sink re-settle and remove the pile display,
-	// so the user can adjust parameters and Drop & settle again. Does NOT rebuild the sim — a fresh
-	// Drop & settle (or an Apply) does that; this just tears down the transient drop/settle state.
-	void MainWindow::clearDropPile()
-	{
-		drop_active_ = false;
-		if (drop_timer_) drop_timer_->stop();
-		if (resettle_timer_) resettle_timer_->stop();
-		settle_world_.reset();
-		drop_queue_.clear();
-		drop_placements_.clear();
-		drop_next_ = 0;
-		drop_release_ctr_ = 0;
-		resettle_last_zb_.clear();
-		if (viewer_) viewer_->clearBlockPlacements();
-		statusBar()->showMessage("pile cleared — adjust parameters and Drop & settle again", 4000);
-	}
-#endif
 
 	// ================= Scene save / restore (scene_io) ==========================================
 
@@ -1484,16 +850,13 @@ namespace scour::gui
 		if (!state) return;
 		SceneFile sf;
 		sf.def.recipe = recipe_;
-		sf.def.has_bed = state->has_bed;
-		sf.def.spinup = 0; // a restored run has already spun up
-		sf.def.bed_z0 = state->has_bed ? state->sp.sand_depth : 0.0;
 		sf.def.has_mesh = !scene_mesh_.empty();
 		if (sf.def.has_mesh)
 		{
 			sf.def.mesh = scene_mesh_;
 			// Persist the LIVE gizmo placement (move/rotate/scale) when the model is gizmo-editable, so a
 			// restored scene resumes at exactly where the model was placed; scene_place_ (the default
-			// centre-on-bed) is only the fallback for a seabed structure / no live placement.
+			// centre-on-bed) is only the fallback when there is no live placement.
 			sf.def.place = (viewer_ && viewer_->hasModelPlacement()) ? viewer_->modelPlacement() : scene_place_;
 		}
 		sf.state = std::move(*state); // we hold the last reference — move the big host arrays into the writer
@@ -1512,8 +875,8 @@ namespace scour::gui
 		std::string warn;
 		if (write_scene(path.toStdString(), sf, warn))
 		{
-			std::fprintf(stderr, "[scene] wrote %s (step %lld, %s)\n", path.toUtf8().constData(),
-				(long long)sf.state.steps, sf.state.has_bed ? "seabed" : "fluid");
+			std::fprintf(stderr, "[scene] wrote %s (step %lld)\n", path.toUtf8().constData(),
+				(long long)sf.state.steps);
 			statusBar()->showMessage(QString("%1 saved: %2")
 				.arg(manual ? "scene" : "checkpoint").arg(QFileInfo(path).fileName()), 5000);
 			if (manual && !pending_recent_keep_.isEmpty())
@@ -1598,34 +961,13 @@ namespace scour::gui
 		core->set_inlet_speed(st.bc.U_inlet);
 		core->load_state_host(st.u, st.v, st.w, st.p);
 
-		// Seabed engine (if any): rebuild from params + saved structure, inject the bed state, resume
-		// morphology immediately (spinup 0 — the flow is already developed).
-		SeabedScenario scen;
-		if (st.has_bed)
-		{
-			auto engine = std::make_unique<scour::core::SeabedMorpho>(recipe_.grid, st.sp, st.structure);
-			engine->load_state(st.bed_G, st.susp_c, st.bed_emax, st.bed_emay, st.morpho_steps);
-			scen.active = true;
-			scen.engine = std::move(engine);
-			scen.spinup = 0;
-			scen.bed_z0 = st.sp.sand_depth;
-			scen.params = st.sp;
-			scen.has_structure = !st.structure.empty();
-			if (d.has_mesh) { scen.structure_mesh = d.mesh; scen.structure_place = d.place; }
-		}
-
-		// GUI-side provenance so a later Apply / Add sand rebuilds correctly.
-		seabed_ = st.has_bed;
-		have_sp_ = st.has_bed;
-		if (st.has_bed) last_sp_ = st.sp;
-		added_sand_m_ = (st.has_bed && !recipe_.is_scenario) ? st.sp.sand_depth : 0.0;
+		// GUI-side provenance so a later Apply rebuilds correctly.
 		model_mesh_ = d.has_mesh ? d.mesh : scour::core::TriMesh{};
 		scene_mesh_ = model_mesh_;
 		scene_place_ = d.place;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — %1 [%2: %3x%4x%5, h=%6 m] @ step %7")
-			.arg(st.has_bed ? "seabed (restored)" : "restored")
+		setWindowTitle(QString("ScourProtection — restored [%1: %2x%3x%4, h=%5 m] @ step %6")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h).arg(st.steps));
 		if (viewer_)
 		{
@@ -1634,11 +976,11 @@ namespace scour::gui
 			viewer_->setInfo(info); // re-frame + re-size all grid-derived viewer geometry
 		}
 
-		spawnWorker(std::move(core), std::move(scen), st.steps, st.sim_time);
+		spawnWorker(std::move(core), st.steps, st.sim_time);
 
-		// Fluid viewer with a display mesh: seabed meshes are attached inside spawnWorker; a fluid one
-		// is attached here (the obstacle is already baked into the restored solid mask — no re-voxelize).
-		if (!st.has_bed && d.has_mesh && viewer_)
+		// Fluid viewer with a display mesh: attach it here (the obstacle is already baked into the restored
+		// solid mask — no re-voxelize).
+		if (d.has_mesh && viewer_)
 		{
 			viewer_->setMesh(scour::core::TriMesh(model_mesh_));
 			viewer_->setModelPlacement(d.place); // restore the saved gizmo placement (move/rotate/scale)
@@ -1688,10 +1030,9 @@ namespace scour::gui
 		addRecentFile(path);          // remember it in the Recent Files menu (feature 1)
 
 		// The loaded model IS the obstacle: voxelize it on the sim grid and inject it into the flow,
-		// REPLACING the config obstacle (the default cylinder). In a seabed scenario the bed + structure
-		// own the flow mask, so we only display the mesh there (setModelAsObstacle is a no-op then).
-		if (!seabed_) setModelAsObstacle(true, noslip);
-		updateGizmoUi(); // enable the placement gizmo for the freshly loaded (fluid) model
+		// REPLACING the config obstacle (the default cylinder).
+		setModelAsObstacle(true, noslip);
+		updateGizmoUi(); // enable the placement gizmo for the freshly loaded model
 		return true;
 	}
 
@@ -1750,7 +1091,6 @@ namespace scour::gui
 	bool MainWindow::setModelAsObstacle(bool on, bool noslip)
 	{
 		if (!worker_) return false;
-		if (seabed_) return false; // the seabed scenario owns the flow mask (bed + structure)
 		if (on && model_mesh_.empty())
 		{
 			statusBar()->showMessage("no model loaded — open a STEP first", 4000);
@@ -1812,7 +1152,6 @@ namespace scour::gui
 		if (recorder_->recording()) return true;
 		const bool ok = recorder_->start(path, rec_crf_, rec_preset_, rec_fps_);
 		last_capture_step_ = -1000000000LL; // capture the first frame immediately after recording starts
-		last_capture_zb_.clear();
 		// The menu item always opens the settings dialog (where Start/Stop live); a trailing ● just marks
 		// that a recording is in progress — it is NOT a stop toggle.
 		if (record_action_) record_action_->setText(ok ? QString::fromUtf8("Record Video…  \xE2\x97\x8F REC") : "Record Video…");
@@ -1832,7 +1171,6 @@ namespace scour::gui
 			video_dialog_ = new VideoSettingsDialog(this);
 			connect(video_dialog_, &VideoSettingsDialog::startRequested, this, [this] {
 				frame_step_interval_ = std::max<long long>(1, video_dialog_->cadenceSteps());
-				frame_bed_eps_ = video_dialog_->bedEps();
 				rec_crf_ = video_dialog_->crf();
 				rec_preset_ = video_dialog_->preset();
 				rec_fps_ = video_dialog_->fps();
@@ -1850,11 +1188,10 @@ namespace scour::gui
 				}
 				updateRecordDialogStatus();
 			});
-			connect(video_dialog_, &VideoSettingsDialog::autoRecordToggled, this, [this](bool on) { auto_record_ = on; });
 		}
 		// Seed with the live values (keep any path already resolved by the recorder).
 		const QString shownPath = (recorder_ && !recorder_->path().isEmpty()) ? recorder_->path() : QString();
-		video_dialog_->setValues(shownPath, (int)frame_step_interval_, rec_crf_, rec_preset_, rec_fps_, frame_bed_eps_, auto_record_);
+		video_dialog_->setValues(shownPath, (int)frame_step_interval_, rec_crf_, rec_preset_, rec_fps_);
 		updateRecordDialogStatus();
 		video_dialog_->show();
 		video_dialog_->raise();
@@ -1868,55 +1205,15 @@ namespace scour::gui
 		video_dialog_->setRecordingStatus(rec, rec ? recorder_->framesWritten() : 0);
 	}
 
-	// Auto-record hook: when a seabed/drop morphodynamic run begins (spawnWorker with an active bed), start
-	// recording to the dialog's path if the user armed "Auto-record". A no-op without a bed, without the arm,
-	// or (with a warning) without a path. Pulls the latest cadence/quality from the dialog first.
-	void MainWindow::maybeAutoRecord()
-	{
-		if (!auto_record_ || !seabed_) return;
-		if (recorder_ && recorder_->recording()) return;
-		QString path = video_dialog_ ? video_dialog_->path().trimmed() : QString();
-		if (path.isEmpty())
-		{
-			std::fprintf(stderr, "[video] auto-record armed but no output path set; skipping\n");
-			statusBar()->showMessage("auto-record armed but no file path set (open Record Video… to set one)", 5000);
-			return;
-		}
-		if (!path.endsWith(".mp4", Qt::CaseInsensitive)) path += ".mp4";
-		if (video_dialog_)
-		{
-			frame_step_interval_ = std::max<long long>(1, video_dialog_->cadenceSteps());
-			frame_bed_eps_ = video_dialog_->bedEps();
-			rec_crf_ = video_dialog_->crf();
-			rec_preset_ = video_dialog_->preset();
-			rec_fps_ = video_dialog_->fps();
-		}
-		std::fprintf(stderr, "[video] auto-record: seabed run started -> %s\n", path.toUtf8().constData());
-		startRecording(path);
-	}
-
 	void MainWindow::maybeCaptureFrame()
 	{
 		if (!recorder_ || !recorder_->recording() || !viewer_ || !worker_) return;
-		// Capture at most ONE frame per frame_step_interval_ sim steps of evolution — a controllable cadence,
-		// NOT one per step. Keying off the bed's max per-cell change alone failed: near active scour a cell
-		// hits the |Δz_b| limiter (~2.5 mm/step), tripping any small threshold EVERY step, so ~one frame per
-		// step (thousands ⇒ slow, duplicate-looking). The step cadence bounds the frame count regardless of
-		// how fast the bed moves; the tiny bed-change check then skips dead periods (spin-up / equilibrium /
-		// paused) so a static bed writes nothing.
+		// Capture at most ONE frame per frame_step_interval_ sim steps — a fixed time-lapse cadence that
+		// bounds the clip length regardless of how fast the sim runs. A paused sim stops advancing the step
+		// count, so it naturally writes nothing.
 		const long long step = worker_->steps();
 		if (step - last_capture_step_ < frame_step_interval_) return;
-		std::vector<float> zb;
-		if (!worker_->copyBed(zb)) return; // no bed yet ⇒ nothing to record
-		if (last_capture_zb_.size() == zb.size())
-		{
-			double dmax = 0.0;
-			for (std::size_t n = 0; n < zb.size(); ++n)
-				dmax = std::max(dmax, (double)std::fabs(zb[n] - last_capture_zb_[n]));
-			if (dmax < frame_bed_eps_) return; // bed hasn't visibly moved since the last frame
-		}
 		last_capture_step_ = step;
-		last_capture_zb_ = zb;
 		recorder_->writeFrame(viewer_->grabFramebuffer());
 	}
 

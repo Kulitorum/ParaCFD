@@ -33,55 +33,12 @@ namespace scour::gui
 
 	SimWorker::~SimWorker() { free_display(); }
 
-	void SimWorker::setMorpho(std::unique_ptr<scour::core::SeabedMorpho> m, int spinup)
-	{
-		morpho_ = std::move(m);
-		morpho_spinup_ = spinup;
-		bed_z0_ = morpho_ ? morpho_->sand_depth() : 0.0;
-		if (morpho_) morpho_V0_ = morpho_->bed_volume() + morpho_->susp_volume();
-	}
-
-	bool SimWorker::copyBed(std::vector<float>& zb)
-	{
-		if (!morpho_) return false;
-		std::lock_guard<std::mutex> lk(disp_mtx_);
-		if (disp_zb_.empty()) return false;
-		zb = disp_zb_;
-		return true;
-	}
-
-	bool SimWorker::copyBedExchange(std::vector<float>& rate)
-	{
-		if (!morpho_) return false;
-		std::lock_guard<std::mutex> lk(disp_mtx_);
-		if (disp_exch_.empty()) return false;
-		rate = disp_exch_;
-		return true;
-	}
-
 	void SimWorker::publish_mask(const std::vector<unsigned char>& mask)
 	{
 		std::lock_guard<std::mutex> lk(mask_mtx_);
 		mask_snapshot_ = mask;
 		mask_grid_ = core_->grid();
 		mask_gen_.fetch_add(1);
-	}
-
-	void SimWorker::publish_solid_kind(const std::vector<unsigned char>& solid)
-	{
-		// Kind codes: 0 = fluid, 1 = erodible sediment (sand), 2 = rigid solid (structure/obstacle).
-		// The overlay's exposed-face test still treats any non-zero as solid, so the staircase is the
-		// union; the per-cell code just picks the colour. Sand = solid AND NOT structure.
-		const bool have_bed = (morpho_ != nullptr);
-		const std::vector<unsigned char>* structure = have_bed ? &morpho_->structure_host() : nullptr;
-		std::vector<unsigned char> kind(solid.size(), 0);
-		for (std::size_t n = 0; n < solid.size(); ++n)
-		{
-			if (!solid[n]) continue;
-			const bool is_struct = structure && n < structure->size() && (*structure)[n];
-			kind[n] = is_struct ? 2 : (have_bed ? 1 : 2); // no bed ⇒ all solids are rigid (obstacle)
-		}
-		publish_mask(kind);
 	}
 
 	bool SimWorker::copyMask(std::vector<unsigned char>& mask, scour::core::MacGrid& grid)
@@ -101,75 +58,6 @@ namespace scour::gui
 			pending_mode_ = solid_mode;
 		}
 		rebuild_pending_.store(true);
-	}
-
-	void SimWorker::requestSeabedConversion(std::unique_ptr<scour::core::SeabedMorpho> engine,
-		std::vector<unsigned char> initial_solid, int spinup, bool loglaw, double z0, double bed_datum)
-	{
-		{
-			std::lock_guard<std::mutex> lk(convert_mtx_);
-			pending_engine_ = std::move(engine);
-			pending_convert_solid_ = std::move(initial_solid);
-			pending_convert_spinup_ = spinup;
-			pending_convert_loglaw_ = loglaw;
-			pending_convert_z0_ = z0;
-			pending_convert_datum_ = bed_datum;
-		}
-		convert_pending_.store(true);
-	}
-
-	void SimWorker::apply_seabed_conversion()
-	{
-		if (!convert_pending_.exchange(false)) return;
-		std::unique_ptr<scour::core::SeabedMorpho> engine;
-		std::vector<unsigned char> solid;
-		int spinup = 0; bool loglaw = false; double z0 = 0.0, datum = 0.0;
-		{
-			std::lock_guard<std::mutex> lk(convert_mtx_);
-			engine = std::move(pending_engine_);
-			solid.swap(pending_convert_solid_);
-			spinup = pending_convert_spinup_;
-			loglaw = pending_convert_loglaw_;
-			z0 = pending_convert_z0_;
-			datum = pending_convert_datum_;
-		}
-		if (!engine || !core_ || (int)solid.size() != core_->grid().p_count()) return;
-
-		// Install the sand+structure mask IN PLACE — the developed flow is preserved in the untouched
-		// cells; only the now-solid cells are zeroed. No factory rebuild, no init_uniform, no t=0 reset.
-		core_->update_solid(solid);
-		core_->set_bed_inlet_mask(true);              // the erodible bed now reaches the inlet plane
-		if (loglaw) core_->set_inlet_profile(true, z0, datum); // seabed inlet BL (leading-edge fix)
-
-		// Attach the (already-built) engine; morphology waits `spinup` MORE steps so the re-masked flow
-		// settles first. Sim time/step count are NOT reset — the run continues from its developed state.
-		morpho_ = std::move(engine);
-		morpho_spinup_ = steps_.load() + spinup;
-		bed_z0_ = morpho_->sand_depth();
-		morpho_V0_ = morpho_->bed_volume() + morpho_->susp_volume();
-
-		publish_display();               // reflect the zeroed sand cells immediately
-		publish_solid_kind(solid);       // overlay: sand (orange) vs structure (dark-blue)
-		std::fprintf(stderr, "[seabed] live conversion: sand+structure installed via update_solid "
-			"(flow preserved), morphology begins at step %d\n", (int)morpho_spinup_);
-	}
-
-	void SimWorker::apply_structure_update()
-	{
-		if (!structure_pending_.exchange(false)) return;
-		if (!morpho_ || !core_) return; // no bed yet: drop the update (the pile isn't erodible-coupled)
-		std::vector<unsigned char> s;
-		{ std::lock_guard<std::mutex> lk(structure_mtx_); s.swap(pending_structure_); }
-		if ((int)s.size() != core_->grid().p_count()) return;
-
-		// Swap the rigid structure in the engine → new flow solid mask (sand ∪ new structure); re-mask the
-		// flow IN PLACE so the developed wake is preserved (untouched cells keep {u,v,w,p}).
-		std::vector<unsigned char> new_solid = morpho_->set_structure(s);
-		if ((int)new_solid.size() != core_->grid().p_count()) return;
-		core_->update_solid(new_solid);
-		publish_display();
-		publish_solid_kind(new_solid); // overlay: re-extract the pile + bed at their new positions
-		std::fprintf(stderr, "[seabed] structure updated (drop re-settle): flow re-masked in place\n");
 	}
 
 	void SimWorker::apply_pending_rebuild()
@@ -196,7 +84,7 @@ namespace scour::gui
 		steps_.store(0);
 		sim_time_.store(0.0);
 		publish_display();              // show the fresh initial condition immediately
-		publish_solid_kind(mask);       // overlay follows the new obstacle mask (rigid ⇒ dark-blue)
+		publish_mask(mask);             // overlay follows the new obstacle mask
 	}
 
 	void SimWorker::computeDiversion(DiversionReport& out) const
@@ -244,13 +132,6 @@ namespace scour::gui
 		core_->copy_state_host(s->u, s->v, s->w, s->p); // D2H velocities + pressure (worker thread ⇒ race-free)
 		s->solid.resize((size_t)s->grid.p_count());
 		cudaMemcpy(s->solid.data(), core_->solid_dev(), s->solid.size(), cudaMemcpyDeviceToHost);
-		if (morpho_)
-		{
-			s->has_bed = true;
-			s->sp = morpho_->params();
-			morpho_->save_state(s->bed_G, s->susp_c, s->bed_emax, s->bed_emay, s->morpho_steps);
-			s->structure = morpho_->structure_host();
-		}
 		emit checkpointReady(s, (qint64)tag);
 	}
 
@@ -271,7 +152,7 @@ namespace scour::gui
 		fw_back_.resize((size_t)g.w_count());
 		fs_back_.resize((size_t)g.p_count());
 		// Read the LIVE core fields (this worker owns the core; no lock needed). The D2H copies are
-		// default-stream and therefore ordered after the just-finished step()/morpho work.
+		// default-stream and therefore ordered after the just-finished step().
 		cudaMemcpy(fu_back_.data(), core_->u_dev(), sizeof(double) * fu_back_.size(), cudaMemcpyDeviceToHost);
 		cudaMemcpy(fv_back_.data(), core_->v_dev(), sizeof(double) * fv_back_.size(), cudaMemcpyDeviceToHost);
 		cudaMemcpy(fw_back_.data(), core_->w_dev(), sizeof(double) * fw_back_.size(), cudaMemcpyDeviceToHost);
@@ -312,13 +193,11 @@ namespace scour::gui
 		cudaMalloc(&dv_, sizeof(double) * (size_t)g.v_count());
 		cudaMalloc(&dw_, sizeof(double) * (size_t)g.w_count());
 		cudaMalloc(&dp_, sizeof(double) * (size_t)g.p_count());
-		cudaMalloc(&dc_, sizeof(double) * (size_t)g.p_count());
 		cudaMalloc(&ds_, (size_t)g.p_count());
 		cudaMemset(du_, 0, sizeof(double) * (size_t)g.u_count());
 		cudaMemset(dv_, 0, sizeof(double) * (size_t)g.v_count());
 		cudaMemset(dw_, 0, sizeof(double) * (size_t)g.w_count());
 		cudaMemset(dp_, 0, sizeof(double) * (size_t)g.p_count());
-		cudaMemset(dc_, 0, sizeof(double) * (size_t)g.p_count());
 		cudaMemset(ds_, 0, (size_t)g.p_count());
 	}
 
@@ -328,9 +207,8 @@ namespace scour::gui
 		if (dv_) cudaFree(dv_);
 		if (dw_) cudaFree(dw_);
 		if (dp_) cudaFree(dp_);
-		if (dc_) cudaFree(dc_);
 		if (ds_) cudaFree(ds_);
-		du_ = dv_ = dw_ = dp_ = dc_ = nullptr;
+		du_ = dv_ = dw_ = dp_ = nullptr;
 		ds_ = nullptr;
 	}
 
@@ -343,13 +221,6 @@ namespace scour::gui
 		cudaMemcpy(dw_, core_->w_dev(), sizeof(double) * (size_t)g.w_count(), cudaMemcpyDeviceToDevice);
 		cudaMemcpy(dp_, core_->p_dev(), sizeof(double) * (size_t)g.p_count(), cudaMemcpyDeviceToDevice);
 		cudaMemcpy(ds_, core_->solid_dev(), (size_t)g.p_count(), cudaMemcpyDeviceToDevice); // solid mask for auto-range
-		if (morpho_)
-		{
-			cudaMemcpy(dc_, morpho_->c_device(), sizeof(double) * (size_t)g.p_count(), cudaMemcpyDeviceToDevice); // suspended c
-			morpho_->copy_zb_host(disp_zb_); // per-column bed elevation for the bed viz
-			morpho_->copy_exchange_host(disp_exch_); // per-column net exchange rate for the bed-colour viz
-			bed_gen_.fetch_add(1); // signal the GUI recorder that the bed snapshot advanced
-		}
 		cudaStreamSynchronize(0); // ensure snapshots complete before a render can read them
 		disp_ready_.store(true);
 	}
@@ -360,11 +231,11 @@ namespace scour::gui
 		publish_display(); // show the initial condition before the first step
 
 		// Publish the initial flow solid mask once (a single D2H) so the voxel overlay shows the
-		// starting bed/structure/obstacle; thereafter it is republished only on a mask change.
+		// starting obstacle; thereafter it is republished only on a mask change.
 		{
 			std::vector<unsigned char> m0((size_t)core_->grid().p_count());
 			cudaMemcpy(m0.data(), core_->solid_dev(), m0.size(), cudaMemcpyDeviceToHost);
-			publish_solid_kind(m0);
+			publish_mask(m0);
 		}
 
 		int since_stats = 0;
@@ -380,19 +251,10 @@ namespace scour::gui
 			// paused viewer still picks up the new mask (and never races the main/GL thread).
 			if (rebuild_pending_.load()) apply_pending_rebuild();
 
-			// Live "Add sand": convert a running fluid viewer to a seabed run in place (flow preserved).
-			if (convert_pending_.load()) apply_seabed_conversion();
-
-			// Live structure update (G3.3 sink coupling): install the re-settled pile + re-mask the flow.
-			if (structure_pending_.load()) apply_structure_update();
-
 			// Live current change (GUI "Input speed"): update the running core's inlet before stepping.
 			// A paused viewer picks it up too (the wake evolves on the next play/step).
 			if (inlet_speed_dirty_.exchange(false) && inlet_override_.load())
-			{
 				core_->set_inlet_speed(inlet_speed_.load());
-				if (morpho_) morpho_->set_inlet_speed(inlet_speed_.load()); // re-derive the open-sea equilibrium inflow
-			}
 
 			// Live inlet-profile switch (GUI "Inlet profile": uniform ↔ boundary-layer).
 			if (inlet_prof_dirty_.exchange(false))
@@ -401,14 +263,6 @@ namespace scour::gui
 				{ std::lock_guard<std::mutex> lk(inlet_prof_mtx_); loglaw = inlet_prof_loglaw_; z0 = inlet_prof_z0_; datum = inlet_prof_datum_; }
 				core_->set_inlet_profile(loglaw, z0, datum);
 			}
-
-			// Live suspended-sediment boundary switch (GUI "Sediment BC": open-sea / recycle / closed).
-			if (sed_bc_dirty_.exchange(false) && morpho_) morpho_->set_boundary_mode(sed_bc_.load());
-
-			// Live MORFAC change (GUI "Bed speed-up"): retune the morpho engine's acceleration so the bed
-			// catches up faster. The `morpho_ &&` short-circuit keeps the flag pending until a bed exists,
-			// so a value dialed in before "Add sand" still lands once the engine attaches this same iteration.
-			if (morpho_ && morfac_dirty_.exchange(false)) morpho_->set_morfac(morfac_.load());
 
 			// Live tidal reversal (GUI "Tidal reversal"): an enable/disable/param change restarts the tide
 			// clock; on DISABLE, restore steady forward flow at the manual inlet speed (so the view returns
@@ -421,7 +275,6 @@ namespace scour::gui
 					core_->set_flow_direction(1);
 					double U = inlet_override_.load() ? inlet_speed_.load() : tidal_umax_.load();
 					core_->set_inlet_speed(U);
-					if (morpho_) morpho_->set_inlet_speed(U);
 					tide_phase_.store(0.0);
 				}
 			}
@@ -451,32 +304,12 @@ namespace scour::gui
 				double Ud = tide_u_signed(tide_clock_, tidal_umax_.load(), tidal_plateau_.load(), tidal_ramp_.load());
 				core_->set_inlet_speed(std::fabs(Ud));
 				core_->set_flow_direction(Ud >= 0.0 ? 1 : -1);
-				if (morpho_) morpho_->set_inlet_speed(std::fabs(Ud));
 				tide_phase_.store(Ud);
 			}
 
 			last_dt = core_->step(); // heavy CUDA work — NOT under the display lock
 			if (tidal_on_.load()) tide_clock_ += last_dt; // advance the tide by the flow-time actually stepped
 
-			// Erodible seabed: after the flow spins up, advance the morphodynamic loop and re-mask the
-			// flow core in place as the bed moves (flow preserved). NOT under the display lock.
-			long long n = steps_.load();
-			if (morpho_ && n >= morpho_spinup_)
-			{
-				if (morpho_->step(core_->u_dev(), core_->v_dev(), core_->w_dev(), core_->nut_dev(), last_dt, &morpho_solid_))
-				{
-					core_->update_solid(morpho_solid_);
-					publish_solid_kind(morpho_solid_); // overlay follows the scouring bed's re-mask (sand/structure split)
-				}
-				if (n % 200 == 0)
-				{
-					double V = morpho_->bed_volume() + morpho_->susp_volume();
-					double bin = morpho_->boundary_sand_in();  // net open-sea sand import [m³] (0 when CLOSED)
-					double err = morpho_V0_ > 0 ? std::fabs(V - morpho_V0_ - bin) / morpho_V0_ : 0.0; // budget incl. boundary
-					std::fprintf(stderr, "[seabed] step %lld: z_b[min=%.4f max=%.4f] (z_b0=%.3f) | max_ustar=%.4f | "
-						"boundary sand=%.3e m3 | budget err=%.2e\n", n, morpho_->zb_min(), morpho_->zb_max(), bed_z0_, morpho_->max_ustar(), bin, err);
-				}
-			}
 			// Display snapshot — throttled by the GUI "Fast sim" interval. publish_display() copies the
 			// fields and hard-syncs the device; at a few steps/s that overhead is pure waste when the
 			// interval says nobody is watching. Off (0) ⇒ every step (byte-identical to G1). A manual Step

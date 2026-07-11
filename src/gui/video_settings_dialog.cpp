@@ -1,9 +1,7 @@
 // video_settings_dialog.cpp — see video_settings_dialog.h.
 #include "gui/video_settings_dialog.h"
 
-#include <QCheckBox>
 #include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -26,7 +24,7 @@ namespace scour::gui
 		: QDialog(parent)
 	{
 		setWindowTitle("Record Video — settings");
-		setModal(false); // non-modal: the sim keeps running (and the bed keeps evolving) while this is open
+		setModal(false); // non-modal: the sim keeps running while this is open
 
 		QVBoxLayout* col = new QVBoxLayout(this);
 		QFormLayout* form = new QFormLayout;
@@ -43,13 +41,13 @@ namespace scour::gui
 		pathRow->addWidget(browse_btn_);
 		form->addRow("File", pathRow);
 
-		// Capture cadence — sim-steps per captured frame. It is a TIME-LAPSE: lower = more frames = smoother
-		// but a longer clip; higher = fewer frames = a shorter, faster-moving clip.
+		// Capture cadence — one frame is captured every N simulation steps. It is a TIME-LAPSE: lower = more
+		// frames = smoother but a longer clip; higher = fewer frames = a shorter, faster-moving clip.
 		cadence_spin_ = new QSpinBox;
 		cadence_spin_->setRange(1, 100000);
 		cadence_spin_->setSingleStep(5);
 		cadence_spin_->setSuffix(" steps/frame");
-		cadence_spin_->setToolTip("How many simulation steps elapse per captured frame (a time-lapse). Lower = more, smoother frames but a longer clip; higher = fewer frames, a shorter clip.");
+		cadence_spin_->setToolTip("Capture one frame every N simulation steps (a time-lapse). Lower = more, smoother frames but a longer clip; higher = fewer frames, a shorter clip.");
 		form->addRow("Cadence", cadence_spin_);
 
 		// CRF — H.264 quality: 0 lossless … 51 worst; 17 ≈ visually lossless. Lower = better + bigger.
@@ -71,22 +69,7 @@ namespace scour::gui
 		fps_spin_->setToolTip("Playback frame rate the captured frames are muxed at (independent of the capture cadence).");
 		form->addRow("Playback fps", fps_spin_);
 
-		// Dead-period threshold — skip a frame unless the bed moved > this since the last one (skips spin-up /
-		// equilibrium). Millimetre-scale; shown in mm for readability but stored/returned in metres.
-		eps_spin_ = new QDoubleSpinBox;
-		eps_spin_->setRange(0.0, 100.0);
-		eps_spin_->setDecimals(2);
-		eps_spin_->setSingleStep(0.1);
-		eps_spin_->setSuffix(" mm");
-		eps_spin_->setToolTip("Skip capturing a frame unless the sand bed moved more than this since the last frame — skips dead periods (spin-up, near-equilibrium, paused) so a static bed writes nothing. 0 = capture every cadence tick.");
-		form->addRow("Dead-period skip", eps_spin_);
-
 		col->addLayout(form);
-
-		auto_chk_ = new QCheckBox("Auto-record when a seabed / drop run begins");
-		auto_chk_->setToolTip("Automatically start recording (to the path above) whenever a morphodynamic run starts — a scenario load, Add sand, or a settled drop. Needs a file path set.");
-		connect(auto_chk_, &QCheckBox::toggled, this, [this](bool on) { emit autoRecordToggled(on); });
-		col->addWidget(auto_chk_);
 
 		QFrame* line = new QFrame; line->setFrameShape(QFrame::HLine); line->setEnabled(false);
 		col->addWidget(line);
@@ -118,8 +101,7 @@ namespace scour::gui
 		if (!fn.isEmpty()) path_edit_->setText(fn);
 	}
 
-	void VideoSettingsDialog::setValues(const QString& path, int cadenceSteps, int crf, const QString& preset,
-		int fps, double bedEps, bool autoRecord)
+	void VideoSettingsDialog::setValues(const QString& path, int cadenceSteps, int crf, const QString& preset, int fps)
 	{
 		if (!path.isEmpty()) path_edit_->setText(path);
 		cadence_spin_->setValue(cadenceSteps);
@@ -127,11 +109,6 @@ namespace scour::gui
 		int pi = preset_box_->findText(preset);
 		preset_box_->setCurrentIndex(pi >= 0 ? pi : preset_box_->findText("fast"));
 		fps_spin_->setValue(fps);
-		eps_spin_->setValue(bedEps * 1000.0); // m → mm for display
-		{
-			QSignalBlocker b(auto_chk_); // seeding the checkbox must not re-emit autoRecordToggled
-			auto_chk_->setChecked(autoRecord);
-		}
 	}
 
 	QString VideoSettingsDialog::path() const { return path_edit_->text(); }
@@ -139,8 +116,6 @@ namespace scour::gui
 	int VideoSettingsDialog::crf() const { return crf_spin_->value(); }
 	QString VideoSettingsDialog::preset() const { return preset_box_->currentText(); }
 	int VideoSettingsDialog::fps() const { return fps_spin_->value(); }
-	double VideoSettingsDialog::bedEps() const { return eps_spin_->value() / 1000.0; } // mm → m
-	bool VideoSettingsDialog::autoRecord() const { return auto_chk_->isChecked(); }
 
 	void VideoSettingsDialog::setRecordingStatus(bool recording, long long framesWritten)
 	{
@@ -153,7 +128,6 @@ namespace scour::gui
 		crf_spin_->setEnabled(!recording);
 		preset_box_->setEnabled(!recording);
 		fps_spin_->setEnabled(!recording);
-		eps_spin_->setEnabled(!recording);
 		if (recording)
 		{
 			status_->setText(QString("<b><span style='color:#e44;'>●</span> REC</b> — %1 frames").arg(framesWritten));

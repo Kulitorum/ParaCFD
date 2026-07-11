@@ -64,29 +64,17 @@ namespace scour::gui
 		// --- Layer visibility toggles (feature 2) --------------------------------
 		void setShowSlice(bool on) { show_slice_ = on; update(); }
 		void setShowModel(bool on) { show_model_ = on; update(); }
-		// The voxel-mask overlay is split by kind: rigid SOLID voxels (structure / obstacle, dark-blue)
-		// and erodible SEDIMENT voxels (sand bed, orange), each independently toggleable.
+		// The voxel-mask overlay is the exposed-face staircase of the rigid solid mask (obstacle).
 		void setShowSolidVoxels(bool on) { show_solid_vox_ = on; update(); }
-		void setShowSedimentVoxels(bool on) { show_sediment_vox_ = on; update(); }
 		void setShowAxes(bool on) { show_axes_ = on; update(); }
-		// Erodible seabed surface (the height-coloured z_b polygon + its Δz_b legend). Hiding it also
-		// skips the per-paint bed fill/range work (like Show slice skips its CUDA fill). Seabed only.
-		void setShowBed(bool on) { show_bed_ = on; update(); }
-		// Bed-surface colour SOURCE (seabed only): 0 = elevation (Δz_b diverging map, the default),
-		// 1 = net exchange rate (delivery − pickup) — blue where sand is being lifted (pickup/erosion),
-		// red where it is landing (delivery/deposition), on the SAME surface geometry. Re-snaps the range.
-		void setBedColorMode(int mode) { bed_color_mode_ = (mode == 1) ? 1 : 0; bed_exch_range_valid_ = false; update(); }
-		int bedColorMode() const { return bed_color_mode_; }
 		bool showSlice() const { return show_slice_; }
 		bool showModel() const { return show_model_; }
 		bool showSolidVoxels() const { return show_solid_vox_; }
-		bool showSedimentVoxels() const { return show_sediment_vox_; }
 		bool showAxes() const { return show_axes_; }
-		bool showBed() const { return show_bed_; }
 
 		// --- Clip plane (see inside hollow structures) ---------------------------
-		// A single movable plane that hides SOLIDS on the camera side — the STEP mesh, the voxel-solid
-		// staircase and the seabed surface — so the interior of a hollow structure is exposed. The flow
+		// A single movable plane that hides SOLIDS on the camera side — the STEP mesh and the voxel-solid
+		// staircase — so the interior of a hollow structure is exposed. The flow
 		// slice and the arrows are NEVER clipped, so the flow field inside the revealed cavity stays on
 		// screen. Modes: axis-aligned X/Y/Z (the position slider shifts it along that axis, auto-oriented
 		// to hide the camera side) or "Face camera" (normal = view direction; the slider pushes it into
@@ -146,8 +134,6 @@ namespace scour::gui
 		Field field() const { return field_; }
 		float fieldMin() const { return vmin_; }
 		float fieldMax() const { return vmax_; }
-		bool hasBed() const { return has_bed_; }
-		double bedZ0() const { return bed_z0_; }
 
 		// Loaded STEP model (metres). setMesh takes ownership; the GL upload is deferred to
 		// the next paint (main thread) so it is safe to call before the context exists (CLI
@@ -163,24 +149,11 @@ namespace scour::gui
 		void setVoxelOverlay(const std::vector<unsigned char>& solid, scour::core::MacGrid grid);
 		void clearVoxelOverlay();
 
-		// Erodible-bed surface: a per-column height field z_b(x,y) coloured by elevation (blue =
-		// scoured, warm = deposited). Enabled for the seabed scenario; the positions/colours are
-		// refreshed each paint from the worker's bed snapshot. z0 is the reference (initial) bed
-		// elevation for the diverging colour map.
-		void setBedSurface(int nx, int ny, double z0);
-		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement —
-		// used by the seabed scenario to seat the structure on top of the sand reservoir.
+		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement.
 		void setMeshTranslate(double tx, double ty, double tz);
 		// Draw the loaded model under an explicit AFFINE placement (rotation·scale + translation),
-		// overriding the gizmo transform. Used by the seabed scenario to seat a placed structure.
+		// overriding the gizmo transform.
 		void setMeshPlacement(const scour::core::ModelPlacement& p);
-
-		// Draw the loaded mesh at MANY placements at once — the drop/settle pile (PLAN G3.2). While the
-		// list is non-empty it REPLACES the single-model draw: the same mesh is rendered once per
-		// placement (live during the animated settle, then the committed resting pile). Empty ⇒ back to
-		// the single-model/gizmo draw. Main thread; cheap repeat-draw of the existing mesh VAO.
-		void setBlockPlacements(const std::vector<scour::core::ModelPlacement>& placements) { block_placements_ = placements; update(); }
-		void clearBlockPlacements() { block_placements_.clear(); update(); }
 
 		// --- Interactive model-placement gizmo -----------------------------------
 		// A single UNIFIED 3D manipulator: all handles are drawn at once — 3 translate arrows, 3 rotate
@@ -198,7 +171,7 @@ namespace scour::gui
 		void setGizmoEnabled(bool on);
 		bool gizmoEnabled() const { return gizmo_on_; }
 		bool gizmoEditable() const { return has_mesh_ && gz_valid_ && !mesh_override_; }
-		// True once a gizmo placement exists (a model is loaded and not seated by a seabed override) —
+		// True once a gizmo placement exists (a model is loaded and not seated by an override) —
 		// so the voxelizer can use modelPlacement() instead of the default place_model_on_bed, even
 		// before the first paint (the CLI --load-step path voxelizes immediately). Unlike gizmoEditable
 		// it does not require the GL upload to have happened.
@@ -233,8 +206,6 @@ namespace scour::gui
 		void buildBoxGeometry();
 		void uploadMesh();        // push pending_mesh_ into GL buffers (main thread)
 		void uploadVoxelOverlay(); // build exposed voxel-surface faces into GL (main thread)
-		void buildBedIndices();   // static (nx-1)x(ny-1) triangulation of the bed height field
-		void updateBedSurface();  // refresh bed positions+colours from the worker (main thread)
 		void updateRange();
 		void applyAutoRange(const FieldRange& fr); // EMA-fold a live reduction into [vmin_,vmax_]+speed scale
 		void setDefaultPlane();
@@ -318,14 +289,10 @@ namespace scour::gui
 		bool mesh_upload_pending_ = false;
 		scour::core::TriMesh pending_mesh_;
 
-		// Model transform. In a fluid viewer the model matrix comes from the gizmo TRS (gz_* below);
-		// the seabed scenario instead seats the structure with an explicit override matrix.
-		QMatrix4x4 mesh_override_mat_; // explicit model matrix (seabed structure seating)
+		// Model transform. The model matrix comes from the gizmo TRS (gz_* below); an optional explicit
+		// override matrix can seat the model directly instead.
+		QMatrix4x4 mesh_override_mat_; // explicit model matrix (override seating)
 		bool mesh_override_ = false;   // true ⇒ use mesh_override_mat_ instead of the gizmo transform
-
-		// Drop/settle pile (PLAN G3.2): when non-empty, the mesh is drawn once per placement instead of
-		// the single model transform (the falling blocks during the settle, then the committed pile).
-		std::vector<scour::core::ModelPlacement> block_placements_;
 
 		// Interactive gizmo state: world(v) = t + rot·(scale ⊙ (v − pivot)). gz_bbox_* is the model-local
 		// bounding box kept so a "reset placement" can recompute the centre-on-bed default without the mesh
@@ -345,12 +312,9 @@ namespace scour::gui
 		float gz_rot_last_ang_ = 0.0f;
 		unsigned int gizmo_vao_ = 0, gizmo_vbo_ = 0; // dynamic manipulator line geometry
 
-		// Voxel-overlay (staircase mask) GL objects. Exposed solid-cell faces, lit shader. One buffer
-		// holds SEDIMENT faces first (kind 1, orange) then SOLID faces (kind 2, dark-blue); the split
-		// index vox_sed_vertex_count_ lets each be drawn/toggled independently with its own colour.
+		// Voxel-overlay (staircase mask) GL objects. Exposed solid-cell faces, lit shader.
 		unsigned int vox_vao_ = 0, vox_pos_vbo_ = 0, vox_norm_vbo_ = 0;
-		int vox_vertex_count_ = 0;     // total vertices (sediment + solid)
-		int vox_sed_vertex_count_ = 0; // sediment vertices [0,this); solid = [this, vox_vertex_count_)
+		int vox_vertex_count_ = 0;     // total exposed-face vertices
 		bool has_vox_ = false;
 		bool vox_upload_pending_ = false;
 		std::vector<unsigned char> pending_vox_solid_;
@@ -359,44 +323,12 @@ namespace scour::gui
 		// re-extracted (exposed faces only) whenever the worker republishes a changed mask.
 		std::uint64_t vox_mask_gen_ = 0;
 
-		// Erodible-bed height field (per-column z_b coloured by elevation). Reuses the slice shader
-		// (per-vertex colour). Positions + colours refreshed each paint from the worker's bed snapshot.
-		unsigned int bed_vao_ = 0, bed_pos_vbo_ = 0, bed_col_vbo_ = 0, bed_idx_ebo_ = 0;
-		int bed_nx_ = 0, bed_ny_ = 0, bed_index_count_ = 0;
-		bool has_bed_ = false, bed_indices_ready_ = false;
-		double bed_z0_ = 0.0;
-		std::vector<float> bed_zb_; // scratch host copy of the latest z_b
-
-		// Auto-scaling diverging-map half-range about z0 [m], SHARED by the bed-surface colouring and the
-		// Δz_b legend so tiny EARLY scour/deposition already fills the ramp instead of vanishing against a
-		// fixed ±25 cm band. Auto-range ON ⇒ it tracks the live peak |z_b − z0| (expand-fast / shrink-slow
-		// EMA, floored at a mm so a near-flat bed doesn't over-amplify sub-mm churn); OFF ⇒ kBedFixedRange.
-		// bed_range_valid_ forces a re-snap on a new bed or an auto-range toggle.
-		float bed_half_range_ = 0.25f;
-		bool bed_range_valid_ = false;
-		static constexpr float kBedFixedRange = 0.25f;  // fixed half-range when auto-range is off [m]
-		static constexpr float kBedRangeFloor = 0.001f; // 1 mm floor so early sub-mm moves are visible
-
-		// Bed-surface colour SOURCE: 0 = elevation (Δz_b), 1 = net exchange rate. In rate mode the surface
-		// geometry is still z_b, only the colour changes; the rate has its OWN diverging half-range [m/s]
-		// (auto: tracks live peak |rate|, same expand-fast/shrink-slow; OFF ⇒ kBedExchFixed). bed_showing_rate_
-		// records what was ACTUALLY drawn last paint (rate data may be absent for a frame) so the legend agrees.
-		int bed_color_mode_ = 0;
-		std::vector<float> bed_exch_; // scratch host copy of the latest net exchange rate [m/s]
-		float bed_exch_half_range_ = 0.0f;
-		bool bed_exch_range_valid_ = false;
-		bool bed_showing_rate_ = false;
-		static constexpr float kBedExchFixed = 5.0e-5f; // fixed half-range when auto-range is off [m/s] (~180 mm/hr)
-		static constexpr float kBedExchFloor = 1.0e-6f; // ~3.6 mm/hr floor so early sub-mm/hr rates still show
-
 		// Layer visibility (feature 2). All default ON.
 		bool show_slice_ = true;
 		bool show_model_ = true;
-		bool show_solid_vox_ = true;    // rigid solid voxels (structure/obstacle, dark-blue)
-		bool show_sediment_vox_ = true; // erodible sediment voxels (sand bed, orange)
-		bool show_bed_ = true; // erodible seabed surface (z_b polygon + Δz_b legend); seabed scenario only
+		bool show_solid_vox_ = true; // rigid solid voxels (obstacle, dark-blue)
 
-		// Clip plane (see inside hollow structures). Cuts SOLIDS only (mesh + voxel solids + bed); the
+		// Clip plane (see inside hollow structures). Cuts SOLIDS only (mesh + voxel solids); the
 		// flow slice + arrows stay visible. clip_mode_: 0=X 1=Y 2=Z 3=Camera-facing; clip_frac_ ∈ [0,1]
 		// sweeps the plane (axis position, or view-depth about the camera target); clip_flip_ swaps the
 		// hidden side. clip_vao_/vbo_ hold the translucent plane-visualisation quad (4 corners, per-paint).

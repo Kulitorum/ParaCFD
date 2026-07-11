@@ -280,9 +280,6 @@ void main()
 		if (mesh_idx_ebo_) glDeleteBuffers(1, &mesh_idx_ebo_);
 		if (vox_pos_vbo_) glDeleteBuffers(1, &vox_pos_vbo_);
 		if (vox_norm_vbo_) glDeleteBuffers(1, &vox_norm_vbo_);
-		if (bed_pos_vbo_) glDeleteBuffers(1, &bed_pos_vbo_);
-		if (bed_col_vbo_) glDeleteBuffers(1, &bed_col_vbo_);
-		if (bed_idx_ebo_) glDeleteBuffers(1, &bed_idx_ebo_);
 		if (arrow_glyph_vbo_) glDeleteBuffers(1, &arrow_glyph_vbo_);
 		if (arrow_inst_vbo_) glDeleteBuffers(1, &arrow_inst_vbo_);
 		if (tracer_vbo_) glDeleteBuffers(1, &tracer_vbo_);
@@ -294,7 +291,6 @@ void main()
 		if (box_vao_) glDeleteVertexArrays(1, &box_vao_);
 		if (mesh_vao_) glDeleteVertexArrays(1, &mesh_vao_);
 		if (vox_vao_) glDeleteVertexArrays(1, &vox_vao_);
-		if (bed_vao_) glDeleteVertexArrays(1, &bed_vao_);
 		if (arrow_vao_) glDeleteVertexArrays(1, &arrow_vao_);
 		if (tracer_vao_) glDeleteVertexArrays(1, &tracer_vao_);
 		if (axis_vao_) glDeleteVertexArrays(1, &axis_vao_);
@@ -316,7 +312,7 @@ void main()
 		geometry_dirty_ = true;
 		axes_dirty_ = true; // rebuild the world triad + ticks for the new domain extents
 		// Base arrow length ~2% of the domain diagonal (a few cells) — visible over both the wake
-		// slice and the seabed without cluttering. Re-seed the tracers for the new domain.
+		// slice and the model without cluttering. Re-seed the tracers for the new domain.
 		float diag = std::sqrt((float)(info.Lx * info.Lx + info.Ly * info.Ly + info.Lz * info.Lz));
 		arrow_len_ = std::max(4.0f * (float)info.h, 0.02f * diag);
 		arrows_.reset();
@@ -347,8 +343,7 @@ void main()
 	{
 		// Seed the gizmo transform (centre-on-bed default) from the model bbox NOW — host-side, so
 		// modelPlacement() is valid even before the first paint (the CLI --load-step path voxelizes
-		// immediately). The GL upload is still deferred to uploadMesh(). setMeshTranslate/Placement,
-		// if the caller used them (seabed structure), keep mesh_override_ set so the gizmo stays off.
+		// immediately). The GL upload is still deferred to uploadMesh().
 		gz_bbox_min_ = QVector3D(mesh.bbox_min[0], mesh.bbox_min[1], mesh.bbox_min[2]);
 		gz_bbox_max_ = QVector3D(mesh.bbox_max[0], mesh.bbox_max[1], mesh.bbox_max[2]);
 		computeDefaultXform();
@@ -386,17 +381,6 @@ void main()
 		vox_upload_pending_ = false;
 		pending_vox_solid_.clear();
 		vox_vertex_count_ = 0;
-		vox_sed_vertex_count_ = 0;
-		update();
-	}
-
-	void SliceViewer::setBedSurface(int nx, int ny, double z0)
-	{
-		bed_nx_ = nx; bed_ny_ = ny; bed_z0_ = z0;
-		has_bed_ = (nx > 1 && ny > 1);
-		bed_indices_ready_ = false; // rebuilt on the next paint (main thread, context current)
-		bed_range_valid_ = false;   // re-snap the auto z_b range tight to the fresh (flat) bed
-		bed_half_range_ = kBedRangeFloor;
 		update();
 	}
 
@@ -488,7 +472,7 @@ void main()
 	{
 		if (!x.valid) return;
 		gz_pivot_ = x.pivot; gz_t_ = x.t; gz_scale_ = x.scale; gz_rot_ = x.rot; gz_valid_ = true;
-		mesh_override_ = false; // an explicit gizmo state supersedes any prior seabed override
+		mesh_override_ = false; // an explicit gizmo state supersedes any prior override
 		update();
 	}
 
@@ -825,119 +809,6 @@ void main()
 		glEnable(GL_DEPTH_TEST);
 	}
 
-	void SliceViewer::buildBedIndices()
-	{
-		SCOUR_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !has_bed_) return;
-		std::vector<unsigned int> idx;
-		idx.reserve((size_t)(bed_nx_ - 1) * (bed_ny_ - 1) * 6);
-		for (int j = 0; j < bed_ny_ - 1; ++j)
-			for (int i = 0; i < bed_nx_ - 1; ++i)
-			{
-				unsigned int v00 = j * bed_nx_ + i, v10 = v00 + 1, v01 = v00 + bed_nx_, v11 = v01 + 1;
-				idx.push_back(v00); idx.push_back(v10); idx.push_back(v11);
-				idx.push_back(v00); idx.push_back(v11); idx.push_back(v01);
-			}
-		bed_index_count_ = (int)idx.size();
-		glBindVertexArray(bed_vao_);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bed_idx_ebo_);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, bed_pos_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, (size_t)bed_nx_ * bed_ny_ * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-		glEnableVertexAttribArray(0);
-		glBindBuffer(GL_ARRAY_BUFFER, bed_col_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, (size_t)bed_nx_ * bed_ny_ * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-		glEnableVertexAttribArray(1);
-		glBindVertexArray(0);
-		bed_indices_ready_ = true;
-	}
-
-	void SliceViewer::updateBedSurface()
-	{
-		SCOUR_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !has_bed_ || !worker_ || !have_info_) return;
-		if (!bed_indices_ready_) buildBedIndices();
-		if (!worker_->copyBed(bed_zb_)) return;            // z_b drives the surface GEOMETRY in both modes
-		if ((int)bed_zb_.size() != bed_nx_ * bed_ny_) return;
-
-		// Colour SOURCE. Rate mode needs the exchange-rate snapshot; if it isn't published yet, fall back
-		// to elevation colouring for this frame (bed_showing_rate_ records what was actually drawn so the
-		// legend matches). Geometry (positions) always uses z_b.
-		bool colour_by_rate = false;
-		if (bed_color_mode_ == 1 && worker_->copyBedExchange(bed_exch_) && (int)bed_exch_.size() == bed_nx_ * bed_ny_)
-			colour_by_rate = true;
-		bed_showing_rate_ = colour_by_rate;
-
-		const float h = (float)info_.h;
-
-		// Auto-scale the active diverging map so even sub-mm early moves are visible: track the live peak
-		// deviation and fold it EXPAND-FAST (snap up so the extreme stays saturated) / SHRINK-SLOW (light
-		// EMA, no flicker), floored so a near-flat/quiescent bed doesn't over-amplify noise. Fixed range
-		// when auto-range is off. SHARED with the bed legend (drawLegendWith) via bed_*_half_range_ so the
-		// bar and the surface always agree. Elevation: about z0, |z_b − z0|. Rate: about 0, |rate|.
-		float inv_hr;
-		if (colour_by_rate)
-		{
-			float target = kBedExchFixed;
-			if (auto_range_)
-			{
-				float dmax = 0.0f;
-				for (float r : bed_exch_) { float d = std::fabs(r); if (d > dmax) dmax = d; }
-				target = std::max(dmax, kBedExchFloor);
-			}
-			if (!bed_exch_range_valid_ || target >= bed_exch_half_range_)
-				bed_exch_half_range_ = target;
-			else
-				bed_exch_half_range_ += (target - bed_exch_half_range_) * 0.02f;
-			bed_exch_range_valid_ = true;
-			inv_hr = 1.0f / std::max(bed_exch_half_range_, 1e-12f);
-		}
-		else
-		{
-			float target = kBedFixedRange;
-			if (auto_range_)
-			{
-				float dmax = 0.0f;
-				for (float z : bed_zb_) { float d = std::fabs(z - (float)bed_z0_); if (d > dmax) dmax = d; }
-				target = std::max(dmax, kBedRangeFloor);
-			}
-			if (!bed_range_valid_ || target >= bed_half_range_)
-				bed_half_range_ = target;                       // first sample / growth: snap
-			else
-				bed_half_range_ += (target - bed_half_range_) * 0.02f; // ~0.8 s contraction
-			bed_range_valid_ = true;
-			inv_hr = 1.0f / std::max(bed_half_range_, 1e-6f);
-		}
-
-		// One diverging ramp shared by both modes so the visual language is consistent: cool (blue) = the
-		// bed is LOSING sand (scour / pickup), warm (orange-red) = GAINING sand (deposition / delivery),
-		// neutral tan at the centre. t ∈ [−1,+1] is the signed deviation over the active half-range.
-		auto diverging = [](float t, float* c)
-		{
-			if (t < -1) t = -1; if (t > 1) t = 1;
-			if (t < 0) { float a = -t; c[0] = 0.20f + 0.10f * (1 - a); c[1] = 0.45f + 0.25f * (1 - a); c[2] = 0.65f + 0.30f * a; }
-			else { c[0] = 0.72f + 0.23f * t; c[1] = 0.58f - 0.30f * t; c[2] = 0.42f - 0.30f * t; }
-			c[3] = 1.0f;
-		};
-
-		std::vector<float> pos((size_t)bed_nx_ * bed_ny_ * 3), col((size_t)bed_nx_ * bed_ny_ * 4);
-		for (int j = 0; j < bed_ny_; ++j)
-			for (int i = 0; i < bed_nx_; ++i)
-			{
-				int n = j * bed_nx_ + i;
-				float z = bed_zb_[n];
-				pos[n * 3 + 0] = (i + 0.5f) * h; pos[n * 3 + 1] = (j + 0.5f) * h; pos[n * 3 + 2] = z;
-				float t = colour_by_rate ? (bed_exch_[n] * inv_hr) : ((z - (float)bed_z0_) * inv_hr);
-				diverging(t, &col[n * 4]);
-			}
-		glBindBuffer(GL_ARRAY_BUFFER, bed_pos_vbo_);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, pos.size() * sizeof(float), pos.data());
-		glBindBuffer(GL_ARRAY_BUFFER, bed_col_vbo_);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, col.size() * sizeof(float), col.data());
-	}
-
 	void SliceViewer::updateRange()
 	{
 		float U = have_info_ ? (float)info_.U : 1.0f;
@@ -949,7 +820,6 @@ void main()
 		case Field::VelV: vmin_ = -0.9f * U; vmax_ = 0.9f * U; break;
 		case Field::VelW: vmin_ = -0.9f * U; vmax_ = 0.9f * U; break;
 		case Field::Pressure: vmin_ = -0.7f * rhoU2; vmax_ = 0.7f * rhoU2; break;
-		case Field::Concentration: vmin_ = 0.0f; vmax_ = 0.02f; break; // volumetric conc (auto-range usually on)
 		}
 		if (vmax_ <= vmin_) vmax_ = vmin_ + 1.0f;
 	}
@@ -958,7 +828,6 @@ void main()
 	{
 		auto_range_ = on;
 		range_valid_ = false;     // re-snap when toggled back on
-		bed_range_valid_ = false; // re-snap the bed z_b range too (auto ⇄ fixed ±kBedFixedRange)
 		if (!on) updateRange();   // restore the fixed per-field colour range
 		update();
 	}
@@ -972,7 +841,7 @@ void main()
 	{
 		if (!fr.valid || !std::isfinite(fr.field_min) || !std::isfinite(fr.field_max)) return;
 
-		float tmin = (field_ == Field::SpeedMag || field_ == Field::Concentration) ? 0.0f : fr.field_min;
+		float tmin = (field_ == Field::SpeedMag) ? 0.0f : fr.field_min;
 		float tmax = fr.field_max;
 		if (tmax - tmin < 1e-6f) tmax = tmin + 1e-6f;
 		float tspd = std::isfinite(fr.speed_max) ? std::max(fr.speed_max, 1e-3f) : auto_speed_max_;
@@ -996,7 +865,7 @@ void main()
 		{
 			range_log_ctr_ = 0;
 			const char* fn = (field_ == Field::SpeedMag) ? "|u|" : (field_ == Field::VelU) ? "u"
-				: (field_ == Field::VelV) ? "v" : (field_ == Field::VelW) ? "w" : (field_ == Field::Pressure) ? "p" : "c";
+				: (field_ == Field::VelV) ? "v" : (field_ == Field::VelW) ? "w" : "p";
 			std::fprintf(stderr, "[G1] auto-range %s: vmin=%.4g vmax=%.4g (raw[%.4g,%.4g]) speed_max=%.4g\n",
 				fn, vmin_, vmax_, fr.field_min, fr.field_max, auto_speed_max_);
 		}
@@ -1058,7 +927,6 @@ void main()
 		glGenVertexArrays(1, &box_vao_);
 		glGenVertexArrays(1, &mesh_vao_);
 		glGenVertexArrays(1, &vox_vao_);
-		glGenVertexArrays(1, &bed_vao_);
 		glGenVertexArrays(1, &arrow_vao_);
 		glGenVertexArrays(1, &tracer_vao_);
 		glGenVertexArrays(1, &axis_vao_);
@@ -1073,9 +941,6 @@ void main()
 		glGenBuffers(1, &mesh_idx_ebo_);
 		glGenBuffers(1, &vox_pos_vbo_);
 		glGenBuffers(1, &vox_norm_vbo_);
-		glGenBuffers(1, &bed_pos_vbo_);
-		glGenBuffers(1, &bed_col_vbo_);
-		glGenBuffers(1, &bed_idx_ebo_);
 		glGenBuffers(1, &arrow_glyph_vbo_);
 		glGenBuffers(1, &arrow_inst_vbo_);
 		glGenBuffers(1, &tracer_vbo_);
@@ -1121,7 +986,6 @@ void main()
 		buildTracerBuffers();
 		buildCornerGizmo();
 		if (have_info_) { buildSliceGeometry(); buildAxesGeometry(); }
-		if (has_bed_) buildBedIndices();
 		fps_timer_.start();
 	}
 
@@ -1520,46 +1384,9 @@ void main()
 		case Field::VelV: title = "v"; units = "m/s"; break;
 		case Field::VelW: title = "w"; units = "m/s"; break;
 		case Field::Pressure: title = "p"; units = "Pa"; break;
-		case Field::Concentration: title = "c"; units = "m3/m3"; break; // suspended-sediment volume fraction
 		}
 		draw_bar(barX, barY, barW, barH, title, vmin_, vmax_, units,
 			[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
-
-		// --- Erodible-bed ramp (seabed scenario only) — mirrors updateBedSurface() -----------------
-		if (has_bed_ && show_bed_) // the bed legend describes the bed surface, so hide it with the bed
-		{
-			int by = barY + barH + 46;
-			int bh = std::min(150, height() - by - 30);
-			if (bh > 40)
-			{
-				// The SAME diverging ramp as the surface: t∈[0,1] bottom→top, blue (loses sand) → tan →
-				// red (gains sand). Elevation mode: scour → deposit. Rate mode: pickup → delivery.
-				auto bedcol = [](float t)
-				{
-					float sgn = 2.0f * t - 1.0f; // -1 (blue: lose) .. +1 (red: gain)
-					float c[3];
-					if (sgn < 0) { float a = -sgn; c[0] = 0.20f + 0.10f * (1 - a); c[1] = 0.45f + 0.25f * (1 - a); c[2] = 0.65f + 0.30f * a; }
-					else { c[0] = 0.72f + 0.23f * sgn; c[1] = 0.58f - 0.30f * sgn; c[2] = 0.42f - 0.30f * sgn; }
-					return QColor::fromRgbF(std::clamp(c[0], 0.0f, 1.0f), std::clamp(c[1], 0.0f, 1.0f), std::clamp(c[2], 0.0f, 1.0f));
-				};
-				if (bed_showing_rate_)
-				{
-					// Net bed-exchange rate = delivery − pickup, PHYSICAL (MORFAC-divided) bed-elevation
-					// velocity. Shown in mm/hr (m/s ×3.6e6) for readable numbers. +ve (red) = depositing,
-					// −ve (blue) = eroding. ±bed_exch_half_range_ (auto-scaled, shared with the surface).
-					const double hr = (double)bed_exch_half_range_ * 3.6e6; // m/s → mm/hr
-					draw_bar(barX, by, barW, bh, "bed rate", -hr, hr, "mm/hr", bedcol);
-				}
-				else
-				{
-					// Label RELATIVE deviation Δz_b = z_b − z0 (±bed_half_range_, the auto-scaled range shared
-					// with the bed surface): absolute z_b ≈ z0 would round away at 3 sig-figs, hiding mm moves.
-					const double hr = (double)bed_half_range_;
-					const QString dz = QChar(0x0394) + QString("z_b"); // "Δz_b"
-					draw_bar(barX, by, barW, bh, dz, -hr, hr, "m", bedcol);
-				}
-			}
-		}
 	}
 
 	void SliceViewer::buildSliceGeometry()
@@ -1792,9 +1619,9 @@ void main()
 		glBindVertexArray(0);
 		mesh_index_count_ = (int)m.indices.size();
 
-		// The model transform is the gizmo TRS (seeded centre-on-bed in setMesh) or, in the seabed
-		// scenario, the explicit override matrix (setMeshTranslate/Placement) — both are already set,
-		// so uploadMesh only pushes the geometry. modelMatrix() supplies the placement at draw time.
+		// The model transform is the gizmo TRS (seeded centre-on-bed in setMesh) or an explicit override
+		// matrix (setMeshTranslate/Placement) — both are already set, so uploadMesh only pushes the
+		// geometry. modelMatrix() supplies the placement at draw time.
 
 		has_mesh_ = true;
 		pending_mesh_ = scour::core::TriMesh{}; // free CPU copy; it lives in GL now
@@ -1812,27 +1639,19 @@ void main()
 		{
 			has_vox_ = false;
 			vox_vertex_count_ = 0;
-			vox_sed_vertex_count_ = 0;
 			pending_vox_solid_.clear();
 			return;
 		}
 
-		// The mask is a KIND field (0=fluid, 1=sediment/sand, 2=rigid solid). Faces are extracted
-		// PER KIND: a cell of kind `want` emits a face wherever its across-neighbour is a DIFFERENT
-		// kind (fluid OR the other solid kind). So each kind is its own CLOSED surface — the rigid
-		// structure keeps its full skin where it is buried in sand, and hiding one kind reveals the
-		// other's complete surface at the sand/structure seam instead of a hollow shell. (A union
-		// test would suppress the seam faces, so a solid voxel buried in sand would vanish when the
-		// sediment layer is hidden — the artefact this replaces.)
-		auto kind_at = [&](int i, int j, int k) -> unsigned char
+		// The mask is the flow solid mask (0 = fluid, nonzero = solid). Emit the exposed voxel-surface
+		// faces — a face wherever a solid cell's across-neighbour is fluid or outside the domain — i.e.
+		// the solid staircase skin, not its interior. Each face = 2 triangles, each vertex = 3 pos + 3 nrm.
+		auto solid_at = [&](int i, int j, int k) -> bool
 		{
-			if (i < 0 || i >= g.nx || j < 0 || j >= g.ny || k < 0 || k >= g.nz) return 0; // out of domain = fluid
-			return s[(std::size_t)g.pidx(i, j, k)];
+			if (i < 0 || i >= g.nx || j < 0 || j >= g.ny || k < 0 || k >= g.nz) return false; // out of domain = fluid
+			return s[(std::size_t)g.pidx(i, j, k)] != 0;
 		};
 
-		// Emit the boundary faces of cells of a given kind (a face whose across-neighbour is a
-		// different kind, i.e. fluid or the other solid kind). This draws that kind's voxel-surface
-		// staircase, not its interior. Each face = 2 triangles, each vertex = 3 pos + 3 normal floats.
 		std::vector<float> pos, nrm;
 		const float h = (float)g.h;
 		auto quad = [&](float ox, float oy, float oz, float ux, float uy, float uz, float vx, float vy, float vz, float nx, float ny, float nz)
@@ -1848,30 +1667,22 @@ void main()
 				nrm.push_back(nx); nrm.push_back(ny); nrm.push_back(nz);
 			}
 		};
-		// Emit the boundary faces of every cell whose kind == `want`. Called first for sediment (1) then
-		// rigid solid (2) so the buffer is [sediment faces | solid faces] with vox_sed_vertex_count_ split.
-		auto emit_kind = [&](unsigned char want)
-		{
-			for (int k = 0; k < g.nz; ++k)
-				for (int j = 0; j < g.ny; ++j)
-					for (int i = 0; i < g.nx; ++i)
-					{
-						if (s[(std::size_t)g.pidx(i, j, k)] != want) continue;
-						const float x0 = i * h, y0 = j * h, z0 = k * h;
-						if (kind_at(i - 1, j, k) != want) quad(x0, y0, z0, 0, h, 0, 0, 0, h, -1, 0, 0); // -x
-						if (kind_at(i + 1, j, k) != want) quad(x0 + h, y0, z0, 0, 0, h, 0, h, 0, 1, 0, 0); // +x
-						if (kind_at(i, j - 1, k) != want) quad(x0, y0, z0, 0, 0, h, h, 0, 0, 0, -1, 0); // -y
-						if (kind_at(i, j + 1, k) != want) quad(x0, y0 + h, z0, h, 0, 0, 0, 0, h, 0, 1, 0); // +y
-						if (kind_at(i, j, k - 1) != want) quad(x0, y0, z0, h, 0, 0, 0, h, 0, 0, 0, -1); // -z
-						if (kind_at(i, j, k + 1) != want) quad(x0, y0, z0 + h, 0, h, 0, h, 0, 0, 0, 0, 1); // +z
-					}
-		};
-		emit_kind(1); // erodible sediment (sand) — orange
-		vox_sed_vertex_count_ = (int)(pos.size() / 3);
-		emit_kind(2); // rigid solid (structure / obstacle) — dark-blue
+		for (int k = 0; k < g.nz; ++k)
+			for (int j = 0; j < g.ny; ++j)
+				for (int i = 0; i < g.nx; ++i)
+				{
+					if (!solid_at(i, j, k)) continue;
+					const float x0 = i * h, y0 = j * h, z0 = k * h;
+					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, h, 0, 0, 0, h, -1, 0, 0); // -x
+					if (!solid_at(i + 1, j, k)) quad(x0 + h, y0, z0, 0, 0, h, 0, h, 0, 1, 0, 0); // +x
+					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, h, h, 0, 0, 0, -1, 0); // -y
+					if (!solid_at(i, j + 1, k)) quad(x0, y0 + h, z0, h, 0, 0, 0, 0, h, 0, 1, 0); // +y
+					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, h, 0, 0, 0, h, 0, 0, 0, -1); // -z
+					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + h, 0, h, 0, h, 0, 0, 0, 0, 1); // +z
+				}
 
 		vox_vertex_count_ = (int)(pos.size() / 3);
-		if (vox_vertex_count_ == 0) { has_vox_ = false; vox_sed_vertex_count_ = 0; pending_vox_solid_.clear(); return; }
+		if (vox_vertex_count_ == 0) { has_vox_ = false; pending_vox_solid_.clear(); return; }
 
 		glBindVertexArray(vox_vao_);
 		glBindBuffer(GL_ARRAY_BUFFER, vox_pos_vbo_);
@@ -1886,8 +1697,7 @@ void main()
 
 		has_vox_ = true;
 		pending_vox_solid_.clear(); // lives in GL now
-		std::fprintf(stderr, "[G1] voxel overlay: %d sediment + %d solid exposed-face triangles\n",
-			vox_sed_vertex_count_ / 3, (vox_vertex_count_ - vox_sed_vertex_count_) / 3);
+		std::fprintf(stderr, "[G1] voxel overlay: %d solid exposed-face triangles\n", vox_vertex_count_ / 3);
 	}
 
 	void SliceViewer::resizeGL(int w, int h)
@@ -1908,8 +1718,8 @@ void main()
 
 		if (geometry_dirty_) { buildSliceGeometry(); buildBoxGeometry(); } // both track info_.Lx/Ly/Lz — rebuild together on a domain resize
 
-		// Sync the voxel overlay to the live flow solid mask (structure ∪ sand ∪ obstacle ∪ any
-		// runtime-marked solid) so EVERY cell the fluid treats as solid is drawn — a mis-placed solid
+		// Sync the voxel overlay to the live flow solid mask (obstacle ∪ any runtime-marked solid) so
+		// EVERY cell the fluid treats as solid is drawn — a mis-placed solid
 		// voxel becomes visible. The worker bumps its mask generation only on a mask change (load /
 		// obstacle rebuild / bed re-mask), so this copies the host mask + rebuilds the exposed-face
 		// geometry ONLY then (no per-frame mask D2H). uploadVoxelOverlay() (below) does the extraction.
@@ -1939,17 +1749,16 @@ void main()
 			{
 				FieldRange fr;
 				if (slice_gl_reduce(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(),
-					worker_->disp_p(), worker_->disp_c(), worker_->disp_solid(), currentParams().grid, field_, &fr))
+					worker_->disp_p(), worker_->disp_solid(), currentParams().grid, field_, &fr))
 					applyAutoRange(fr);
 			}
 			if (show_slice_) // slice fill skipped when hidden (no fill, no draw)
 			{
 				SliceParams sp = currentParams();
-				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), worker_->disp_c(), sp);
+				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), sp);
 			}
 		}
 
-		if (has_bed_ && show_bed_) updateBedSurface(); // hidden ⇒ skip the fill + range work
 		updateArrows(); // advect the arrow tracers + upload instance data (reads the worker's host flow)
 		updateTracers(); // advect the streaklines + upload line geometry (same host-flow snapshot)
 
@@ -1970,7 +1779,7 @@ void main()
 
 		// Clip plane (see inside hollow structures): the KEPT half-space is dot(pos,n)+d ≥ 0. Every scene
 		// vertex shader writes gl_ClipDistance[0] = dot(pos, uClipPlane), but it only cuts geometry while
-		// GL_CLIP_DISTANCE0 is enabled — enabled per SOLID draw below (mesh, voxels, bed) and left OFF for
+		// GL_CLIP_DISTANCE0 is enabled — enabled per SOLID draw below (mesh, voxels) and left OFF for
 		// the flow slice + arrows + reference geometry, so the flow field inside the cavity stays visible.
 		const QVector4D clipPlane = computeClipPlane();
 		prog_.setUniformValue("uClipPlane", clipPlane);
@@ -1984,19 +1793,6 @@ void main()
 			glDrawElements(GL_TRIANGLES, index_count_, GL_UNSIGNED_INT, (void*)0);
 		}
 
-		// Erodible-bed surface (per-vertex elevation colours; same flat shader as the slice). MUST set
-		// uFlat=0 itself — it is NOT nested in the show_slice_ block above, so when the slice is hidden the
-		// program would otherwise still carry uFlat=1 + uColor from the previous frame's flat draws (the
-		// blue Z-axis / grey wireframe), painting the whole bed one solid colour regardless of elevation.
-		if (has_bed_ && show_bed_ && bed_index_count_ > 0)
-		{
-			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // the seabed surface is a SOLID ⇒ clipped
-			prog_.setUniformValue("uFlat", 0);
-			glBindVertexArray(bed_vao_);
-			glDrawElements(GL_TRIANGLES, bed_index_count_, GL_UNSIGNED_INT, (void*)0);
-			glDisable(GL_CLIP_DISTANCE0);
-		}
-
 		// Domain wireframe (flat grey).
 		prog_.setUniformValue("uFlat", 1);
 		prog_.setUniformValue("uColor", QVector4D(0.55f, 0.58f, 0.62f, 1.0f));
@@ -2007,52 +1803,26 @@ void main()
 		prog_.release();
 
 		// Loaded STEP model (lit, its own shader + model transform). Hidden by the "Show model" toggle.
-		// With a drop/settle pile set (block_placements_), the same mesh is drawn once PER placement (the
-		// falling then settled blocks) instead of the single gizmo/override transform.
 		if (show_model_ && has_mesh_ && mesh_index_count_ > 0)
 		{
-			auto placement_matrix = [](const scour::core::ModelPlacement& p) {
-				return QMatrix4x4(
-					(float)p.m[0], (float)p.m[1], (float)p.m[2], (float)p.tx,
-					(float)p.m[3], (float)p.m[4], (float)p.m[5], (float)p.ty,
-					(float)p.m[6], (float)p.m[7], (float)p.m[8], (float)p.tz,
-					0.0f, 0.0f, 0.0f, 1.0f);
-			};
 			mesh_prog_.bind();
 			mesh_prog_.setUniformValue("uEye", camera_.eye());
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
 			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.74f, 0.71f, 0.66f, 1.0f));
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // the STEP model is a SOLID ⇒ clipped
 			glBindVertexArray(mesh_vao_);
-			if (!block_placements_.empty())
-			{
-				for (const scour::core::ModelPlacement& bp : block_placements_)
-				{
-					const QMatrix4x4 model = placement_matrix(bp);
-					mesh_prog_.setUniformValue("uMVP", mvp * model);
-					mesh_prog_.setUniformValue("uModel", model);
-					glDrawElements(GL_TRIANGLES, mesh_index_count_, GL_UNSIGNED_INT, (void*)0);
-				}
-			}
-			else
-			{
-				const QMatrix4x4 model = modelMatrix();
-				mesh_prog_.setUniformValue("uMVP", mvp * model);
-				mesh_prog_.setUniformValue("uModel", model);
-				glDrawElements(GL_TRIANGLES, mesh_index_count_, GL_UNSIGNED_INT, (void*)0);
-			}
+			const QMatrix4x4 model = modelMatrix();
+			mesh_prog_.setUniformValue("uMVP", mvp * model);
+			mesh_prog_.setUniformValue("uModel", model);
+			glDrawElements(GL_TRIANGLES, mesh_index_count_, GL_UNSIGNED_INT, (void*)0);
 			glBindVertexArray(0);
 			glDisable(GL_CLIP_DISTANCE0);
 			mesh_prog_.release();
 		}
 
-		// Voxelization overlay (exposed staircase faces). Split by kind so each reads apart and toggles
-		// independently: erodible SEDIMENT (sand, orange) in [0, vox_sed_vertex_count_) and rigid SOLID
-		// (structure/obstacle, dark-blue) in the remainder. Reuses the lit mesh shader (identity model).
-		const int vox_solid_count = vox_vertex_count_ - vox_sed_vertex_count_;
-		const bool draw_sed = show_sediment_vox_ && vox_sed_vertex_count_ > 0;
-		const bool draw_sol = show_solid_vox_ && vox_solid_count > 0;
-		if (has_vox_ && (draw_sed || draw_sol))
+		// Voxelization overlay (exposed staircase faces) of the rigid solid mask (obstacle, dark-blue).
+		// Reuses the lit mesh shader (identity model).
+		if (has_vox_ && show_solid_vox_ && vox_vertex_count_ > 0)
 		{
 			QMatrix4x4 ident;
 			mesh_prog_.bind();
@@ -2062,16 +1832,8 @@ void main()
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // voxel solids ⇒ clipped
 			glBindVertexArray(vox_vao_);
-			if (draw_sed)
-			{
-				mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.95f, 0.55f, 0.15f, 1.0f)); // orange sediment
-				glDrawArrays(GL_TRIANGLES, 0, vox_sed_vertex_count_);
-			}
-			if (draw_sol)
-			{
-				mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid
-				glDrawArrays(GL_TRIANGLES, vox_sed_vertex_count_, vox_solid_count);
-			}
+			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid
+			glDrawArrays(GL_TRIANGLES, 0, vox_vertex_count_);
 			glBindVertexArray(0);
 			glDisable(GL_CLIP_DISTANCE0);
 			mesh_prog_.release();

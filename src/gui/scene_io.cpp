@@ -1,5 +1,5 @@
 // scene_io.cpp — see scene_io.h. Binary .scn container: an 8-byte magic, a version, a JSON
-// metadata block, then TLV field blobs. Big arrays are stored float32; the tiny bed columns f64.
+// metadata block, then TLV field blobs. Big arrays are stored float32.
 #include "gui/scene_io.h"
 
 #include <nlohmann/json.hpp>
@@ -188,24 +188,6 @@ namespace scour::gui
 			s.cylinder = j.value("cylinder", s.cylinder); s.name = j.value("name", s.name);
 			return s;
 		}
-		nlohmann::json sp_json(const SeabedParams& p)
-		{
-			return { {"sand_depth", p.sand_depth}, {"d50", p.d50}, {"rho", p.rho}, {"rho_s", p.rho_s},
-				{"nu", p.nu}, {"Cs", p.Cs}, {"alpha", p.alpha}, {"morfac", p.morfac}, {"sigma_s", p.sigma_s},
-				{"bedload_formula", p.bedload_formula}, {"diffusion_on", p.diffusion_on}, {"remask_frac", p.remask_frac} };
-		}
-		SeabedParams sp_from(const nlohmann::json& j)
-		{
-			SeabedParams p;
-			if (j.is_null()) return p;
-			p.sand_depth = j.value("sand_depth", p.sand_depth); p.d50 = j.value("d50", p.d50);
-			p.rho = j.value("rho", p.rho); p.rho_s = j.value("rho_s", p.rho_s); p.nu = j.value("nu", p.nu);
-			p.Cs = j.value("Cs", p.Cs); p.alpha = j.value("alpha", p.alpha); p.morfac = j.value("morfac", p.morfac);
-			p.sigma_s = j.value("sigma_s", p.sigma_s); p.bedload_formula = j.value("bedload_formula", p.bedload_formula);
-			p.diffusion_on = j.value("diffusion_on", p.diffusion_on); p.remask_frac = j.value("remask_frac", p.remask_frac);
-			return p;
-		}
-
 		// --- path helpers --------------------------------------------------------------
 		bool ends_with_ci(const std::string& s, const std::string& suf)
 		{
@@ -247,16 +229,11 @@ namespace scour::gui
 		j["recipe"] = {
 			{"base_solid_mode", d.recipe.base_solid_mode}, {"init_u", d.recipe.init_u},
 			{"init_v_blip", d.recipe.init_v_blip}, {"source_config", d.recipe.source_config},
-			{"is_scenario", d.recipe.is_scenario}, {"bc", bc_json(d.recipe.bc)},
+			{"bc", bc_json(d.recipe.bc)},
 			{"pr", pr_json(d.recipe.pr)}, {"info", info_json(d.recipe.info)} };
 		j["state_bc"] = bc_json(s.bc);
 		j["solid_mode"] = s.solid_mode;
 		j["bed_inlet_mask"] = s.bed_inlet_mask;
-		j["has_bed"] = s.has_bed;
-		j["spinup"] = d.spinup;
-		j["bed_z0"] = d.bed_z0;
-		j["morpho_steps"] = s.morpho_steps;
-		if (s.has_bed) j["sp"] = sp_json(s.sp);
 		j["has_mesh"] = d.has_mesh;
 		if (d.has_mesh)
 		{
@@ -284,14 +261,6 @@ namespace scour::gui
 			write_f32raw(out, "mesh_pos", d.mesh.positions);
 			write_f32raw(out, "mesh_norm", d.mesh.normals);
 			write_u32(out, "mesh_idx", d.mesh.indices);
-		}
-		if (s.has_bed)
-		{
-			write_f64(out, "bed_G", s.bed_G);
-			write_f32(out, "susp_c", s.susp_c);
-			write_f64(out, "bed_emax", s.bed_emax);
-			write_f64(out, "bed_emay", s.bed_emay);
-			write_u8(out, "structure", s.structure);
 		}
 		if (!out) { warn = "write error on '" + path + "' (disk full?)"; return false; }
 		return true;
@@ -327,7 +296,6 @@ namespace scour::gui
 		hdr.name = j.value("name", std::string());
 		hdr.steps = j.value("steps", (long long)0);
 		hdr.sim_time = j.value("sim_time", 0.0);
-		hdr.has_bed = j.value("has_bed", false);
 		hdr.has_mesh = j.value("has_mesh", false);
 		if (j.contains("grid"))
 		{
@@ -366,7 +334,6 @@ namespace scour::gui
 			d.recipe.init_u = r.value("init_u", 1.0);
 			d.recipe.init_v_blip = r.value("init_v_blip", 0.0);
 			d.recipe.source_config = r.value("source_config", std::string());
-			d.recipe.is_scenario = r.value("is_scenario", false);
 			d.recipe.bc = bc_from(r.contains("bc") ? r.at("bc") : nlohmann::json());
 			d.recipe.pr = pr_from(r.contains("pr") ? r.at("pr") : nlohmann::json());
 			d.recipe.info = info_from(r.contains("info") ? r.at("info") : nlohmann::json());
@@ -379,23 +346,8 @@ namespace scour::gui
 		s.bc = bc_from(j.contains("state_bc") ? j.at("state_bc") : nlohmann::json());
 		s.solid_mode = j.value("solid_mode", (int)SOLID_NOSLIP);
 		s.bed_inlet_mask = j.value("bed_inlet_mask", false);
-		s.has_bed = j.value("has_bed", false);
-		s.morpho_steps = j.value("morpho_steps", (long long)0);
 		s.u = as_f64(blobs, "u"); s.v = as_f64(blobs, "v"); s.w = as_f64(blobs, "w"); s.p = as_f64(blobs, "p");
 		s.solid = as_u8(blobs, "solid");
-
-		d.has_bed = s.has_bed;
-		d.spinup = j.value("spinup", 200);
-		d.bed_z0 = j.value("bed_z0", 1.0);
-		if (s.has_bed)
-		{
-			s.sp = sp_from(j.contains("sp") ? j.at("sp") : nlohmann::json());
-			s.bed_G = as_f64(blobs, "bed_G");
-			s.susp_c = as_f64(blobs, "susp_c");
-			s.bed_emax = as_f64(blobs, "bed_emax");
-			s.bed_emay = as_f64(blobs, "bed_emay");
-			s.structure = as_u8(blobs, "structure");
-		}
 
 		// display mesh
 		d.has_mesh = j.value("has_mesh", false);

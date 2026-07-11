@@ -2,11 +2,9 @@
 //
 // A .scn is EVERYTHING needed to reconstruct AND continue a run: the setup (grid, BCs, params,
 // the config obstacle, provenance), the loaded STEP model (embedded triangle mesh, display-only),
-// and all live field DATA at the saved step (velocities, pressure, the flow solid mask, and — for a
-// seabed run — the bed grain field G, suspended concentration c, the EMA-filtered near-bed shear
-// and the rigid structure mask). Loading a .scn tears the sim down and rebuilds it through the SAME
-// build path (sim_setup make_core / SeabedMorpho), then injects the saved fields — so the flow and
-// bed resume exactly where they were, not from t=0.
+// and all live field DATA at the saved step (velocities, pressure, the flow solid mask). Loading a
+// .scn tears the sim down and rebuilds it through the SAME build path (sim_setup make_core), then
+// injects the saved fields — so the flow resumes exactly where it was, not from t=0.
 //
 // Two uses of the ONE format:
 //   * a user "Save Scene As" writes  <name>.scn                     (added to Recent Files)
@@ -19,17 +17,16 @@
 //   uint64 json_len ; json_len bytes of UTF-8 metadata (all scalars/structs + blob directory flags)
 //   then a sequence of TLV blobs until EOF, each:
 //     uint32 key_len ; key bytes ; uint8 dtype (0=f32,1=f64,2=u8,3=u32) ; uint64 count ; count*sz data
-// Big arrays (u/v/w/p/c, mesh positions/normals) are stored as float32 (the user-chosen precision);
-// G/emax/emay as f64 (tiny); masks/indices as u8/u32. Qt-free (std streams + nlohmann json) so it is
-// unit-testable and never pulls Qt into the physics libs.
+// Big arrays (u/v/w/p, mesh positions/normals) are stored as float32 (the user-chosen precision);
+// masks/indices as u8/u32. Qt-free (std streams + nlohmann json) so it is unit-testable and never
+// pulls Qt into the physics libs.
 #pragma once
 
 #include "core/fluid/channel_bc.h"
 #include "core/fluid/mac_grid.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/tri_mesh.h"
-#include "core/sediment/seabed_engine.h" // SeabedParams
-#include "gui/sim_setup.h"               // SimRecipe
+#include "gui/sim_setup.h" // SimRecipe
 
 #include <cstdint>
 #include <memory>
@@ -38,7 +35,7 @@
 
 namespace scour::gui
 {
-	// The live DYNAMIC state at a saved step, gathered from the core (+ engine) on the worker thread.
+	// The live DYNAMIC state at a saved step, gathered from the core on the worker thread.
 	// Field arrays are host DOUBLE here (as read from the device); the writer downcasts the big ones.
 	struct CheckpointState
 	{
@@ -51,14 +48,6 @@ namespace scour::gui
 
 		std::vector<double> u, v, w, p;                // MAC face velocities + cell pressure
 		std::vector<unsigned char> solid;              // live flow solid mask (p_count, 1=solid)
-
-		bool has_bed = false;
-		scour::core::SeabedParams sp;
-		std::vector<double> bed_G;                     // grain thickness per column (ncol)
-		std::vector<double> susp_c;                    // suspended concentration per cell (np)
-		std::vector<double> bed_emax, bed_emay;        // EMA-filtered near-bed shear (ncol)
-		long long morpho_steps = 0;
-		std::vector<unsigned char> structure;          // rigid structure mask (p_count; empty ⇒ none)
 	};
 	using CheckpointStatePtr = std::shared_ptr<CheckpointState>;
 
@@ -66,9 +55,6 @@ namespace scour::gui
 	struct SceneDefinition
 	{
 		SimRecipe recipe;                              // grid, bc, pr, base_solid, init, provenance, info
-		bool has_bed = false;
-		int spinup = 200;
-		double bed_z0 = 1.0;
 		bool has_mesh = false;
 		scour::core::TriMesh mesh;                     // display STEP mesh (metres); empty ⇒ none
 		scour::core::ModelPlacement place;             // where the mesh sits (display translate)
@@ -90,7 +76,6 @@ namespace scour::gui
 		double sim_time = 0.0;
 		int nx = 0, ny = 0, nz = 0;
 		double h = 0.0;
-		bool has_bed = false;
 		bool has_mesh = false;
 	};
 

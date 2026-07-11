@@ -28,6 +28,11 @@ if(NOT _is_multi_config AND NOT CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# CUDA toolkit headers (cuda_runtime.h) for the host .cpp TUs that include them.
+# nvcc adds these implicitly for .cu sources, but MSVC compiling our .cpp needs the
+# path explicitly; exported PUBLIC from libscour so all consumers pick it up.
+find_package(CUDAToolkit REQUIRED)
+
 # --- libscour (static core, no Qt) -----------------------------------------
 add_library(libscour STATIC
 	src/core/config.cpp
@@ -75,6 +80,7 @@ endif()
 target_include_directories(libscour PUBLIC
 	${CMAKE_CURRENT_SOURCE_DIR}/src
 	${CMAKE_CURRENT_SOURCE_DIR}/src/3rdparty
+	${CUDAToolkit_INCLUDE_DIRS}
 )
 
 # --- scour_geometry (STEP import via OpenCascade; isolates OCC from the core) -

@@ -30,7 +30,7 @@ namespace scour::gui
 		}
 
 		// Cell-centred scalar of the chosen field at MAC cell (i,j,k).
-		SCOUR_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p, const double* c,
+		SCOUR_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
 			MacGrid g, Field field, int i, int j, int k)
 		{
 			switch (field)
@@ -43,8 +43,6 @@ namespace scour::gui
 				return (float)(0.5 * (w[g.widx(i, j, k)] + w[g.widx(i, j, k + 1)]));
 			case Field::Pressure:
 				return p ? (float)p[g.pidx(i, j, k)] : 0.0f;
-			case Field::Concentration:
-				return c ? (float)c[g.pidx(i, j, k)] : 0.0f;
 			case Field::SpeedMag:
 			default:
 			{
@@ -67,7 +65,7 @@ namespace scour::gui
 		}
 
 		// Full per-vertex evaluation: world position -> nearest cell -> scalar -> colour.
-		SCOUR_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p, const double* c,
+		SCOUR_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p,
 			const SliceParams& sp, int a, int b)
 		{
 			float x, y, z;
@@ -77,19 +75,19 @@ namespace scour::gui
 			int i = clampi((int)floorf(x * invh), 0, g.nx - 1);
 			int j = clampi((int)floorf(y * invh), 0, g.ny - 1);
 			int k = clampi((int)floorf(z * invh), 0, g.nz - 1);
-			float s = sample_scalar(u, v, w, p, c, g, sp.field, i, j, k);
+			float s = sample_scalar(u, v, w, p, g, sp.field, i, j, k);
 			float denom = (sp.vmax > sp.vmin) ? (sp.vmax - sp.vmin) : 1.0f;
 			return colormap((s - sp.vmin) / denom);
 		}
 
-		__global__ void k_slice(const double* u, const double* v, const double* w, const double* p, const double* c,
+		__global__ void k_slice(const double* u, const double* v, const double* w, const double* p,
 			SliceParams sp, float4* out)
 		{
 			int idx = blockIdx.x * blockDim.x + threadIdx.x;
 			int n = sp.nu * sp.nv;
 			if (idx >= n) return;
 			int a = idx % sp.nu, b = idx / sp.nu;
-			out[idx] = eval_vertex(u, v, w, p, c, sp, a, b);
+			out[idx] = eval_vertex(u, v, w, p, sp, a, b);
 		}
 
 		// --- Auto-range reduction ------------------------------------------------------------
@@ -127,7 +125,7 @@ namespace scour::gui
 
 		// One block-reduced min/max/speed-max over a grid-stride slice of the pressure-cell index
 		// space (cell == pidx(i,j,k) by construction of the MAC layout), then a single atomic per value.
-		__global__ void k_range_reduce(const double* u, const double* v, const double* w, const double* p, const double* c,
+		__global__ void k_range_reduce(const double* u, const double* v, const double* w, const double* p,
 			const unsigned char* solid, MacGrid g, Field field, float* out3)
 		{
 			__shared__ float smin[256];
@@ -139,11 +137,11 @@ namespace scour::gui
 			float lmin = FLT_MAX, lmax = -FLT_MAX, lspd = 0.0f;
 			for (int cell = blockIdx.x * blockDim.x + tid; cell < ncell; cell += gridDim.x * blockDim.x)
 			{
-				if (solid && solid[cell]) continue; // fluid cells only (obstacle/bed/structure excluded)
+				if (solid && solid[cell]) continue; // fluid cells only (obstacle/structure excluded)
 				const int i = cell % g.nx;
 				const int j = (cell / g.nx) % g.ny;
 				const int k = cell / nxy;
-				float s = sample_scalar(u, v, w, p, c, g, field, i, j, k);
+				float s = sample_scalar(u, v, w, p, g, field, i, j, k);
 				float sp = cell_speed(u, v, w, g, i, j, k);
 				if (isfinite(s)) { lmin = fminf(lmin, s); lmax = fmaxf(lmax, s); }
 				if (isfinite(sp)) lspd = fmaxf(lspd, sp);
@@ -169,24 +167,24 @@ namespace scour::gui
 		}
 	} // namespace
 
-	void slice_fill_gpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	void slice_fill_gpu(const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp, float4* out, cudaStream_t stream)
 	{
 		int n = sp.nu * sp.nv;
 		if (n <= 0) return;
 		int block = 256, grid = (n + block - 1) / block;
-		k_slice<<<grid, block, 0, stream>>>(u, v, w, p, c, sp, out);
+		k_slice<<<grid, block, 0, stream>>>(u, v, w, p, sp, out);
 	}
 
-	void slice_fill_cpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	void slice_fill_cpu(const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp, float4* out)
 	{
 		for (int b = 0; b < sp.nv; ++b)
 			for (int a = 0; a < sp.nu; ++a)
-				out[b * sp.nu + a] = eval_vertex(u, v, w, p, c, sp, a, b);
+				out[b * sp.nu + a] = eval_vertex(u, v, w, p, sp, a, b);
 	}
 
-	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, MacGrid g, Field field, float* out3_dev, cudaStream_t stream)
 	{
 		int ncell = g.p_count();
@@ -195,10 +193,10 @@ namespace scour::gui
 		const int block = 256;
 		int grid = (ncell + block - 1) / block;
 		if (grid > 1024) grid = 1024; // grid-stride covers the remainder; caps atomic contention
-		k_range_reduce<<<grid, block, 0, stream>>>(u, v, w, p, c, solid, g, field, out3_dev);
+		k_range_reduce<<<grid, block, 0, stream>>>(u, v, w, p, solid, g, field, out3_dev);
 	}
 
-	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, MacGrid g, Field field, float out3[3])
 	{
 		float fmin = FLT_MAX, fmax = -FLT_MAX, smax = 0.0f;
@@ -207,7 +205,7 @@ namespace scour::gui
 				for (int i = 0; i < g.nx; ++i)
 				{
 					if (solid && solid[g.pidx(i, j, k)]) continue;
-					float s = sample_scalar(u, v, w, p, c, g, field, i, j, k);
+					float s = sample_scalar(u, v, w, p, g, field, i, j, k);
 					float sp = cell_speed(u, v, w, g, i, j, k);
 					if (std::isfinite(s)) { fmin = std::min(fmin, s); fmax = std::max(fmax, s); }
 					if (std::isfinite(sp)) smax = std::max(smax, sp);

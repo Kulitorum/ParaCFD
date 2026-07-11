@@ -21,15 +21,9 @@
 //   --apply-domain Lx Ly Lz  pair with --apply-h to also change the domain on the Apply
 //   --set-u <U>            after startup, set the inlet current speed U [m/s] LIVE (no reset) —
 //                          headless smoke of the "Input speed" control
-//   --add-sand <m>         after startup, fill the lower <m> metres with sand (around any solid) and
-//                          continue as a sediment run PRESERVING the developed flow — headless smoke
-//                          of the "Add sand" control
 //   --model-place dx,dy,dz[,rz[,scale]]  after --load-step, move the model by (dx,dy,dz) m, rotate rz
 //                          deg about +Z, scale by a uniform factor, then re-voxelize it as the obstacle —
 //                          headless smoke of the placement gizmo + "voxelize where placed"
-//   --morfac <M>           after startup, set MORFAC (morphological acceleration) live — the bed evolves
-//                          M× faster than the flow clock. Headless smoke of the "MORFAC" control (a no-op
-//                          without an active seabed run; pair with --scenario or --add-sand)
 //   --display-interval <s> throttle graphics updates to every <s> wall-seconds (the "Fast sim" combo):
 //                          the sim keeps stepping at full rate; the view + per-step snapshot refresh
 //                          less often. 0 = live (default). Headless smoke of the Fast-sim control.
@@ -42,19 +36,9 @@
 //   --tracers [density]    enable the grid-seeded streakline tracers at startup (headless smoke of the
 //                          "Show tracers" controls): long lines that warp with the flow, coloured by
 //                          speed. Optional density = seeds along the longest axis (default 10).
-//   --bed-colour <src>     seabed surface colour source: elevation (default) | rate (net exchange =
-//                          deposition − pickup); headless smoke of the "Bed colour" selector
-//   --drop-step <path>     STEP protection unit (e.g. XStone_Decomposed.stp) for the drop/settle phase
-//   --drop <count>,<seed>[,smin,smax,sand]  drop/settle PREPARATION PHASE (PLAN G3.2): scatter `count`
-//                          scaled copies of --drop-step above a `sand`-m bed, settle them under gravity
-//                          (Jolt), then start the morphodynamic run with the settled pile as structure.
-//                          scale ∈ [smin,smax] (default 0.6..1.0), sand default 0.5 m. Give a generous
-//                          --autoclose-ms so the settle animation + commit complete (needs a domain
-//                          sized for the units, e.g. g1_viewer_full's 10x10x5 m)
-//   --record <path.mp4>    record an MP4 of the run: a frame is captured whenever the sand bed changes
-//                          and H.264-encoded via ffmpeg (QProcess pipe, no libav linkage). Finalized on
-//                          close. Pair with --drop / a seabed run so there is an evolving bed to capture.
-//                          Needs ffmpeg on PATH or via the SCOUR_FFMPEG env override.
+//   --record <path.mp4>    record an MP4 of the run: one frame is captured every N sim steps and
+//                          H.264-encoded via ffmpeg (QProcess pipe, no libav linkage). Finalized on
+//                          close. Needs ffmpeg on PATH or via the SCOUR_FFMPEG env override.
 //   --autosave <n>         auto-save a checkpoint (<scene>.<step>.scn) every n steps (0 = off)
 //   --load-scene <path>    at startup, restore a saved .scn (setup + all data) — resumes from its step
 //   --save-scene <path>    after startup, save the full scene to <path> (.scn) — headless save smoke
@@ -88,7 +72,6 @@ int main(int argc, char** argv)
 	// --- Parse our flags (leave the rest for QApplication, e.g. -platform) ------
 	std::string config;
 	std::string step_path;
-	std::string scenario_path;
 	int autoclose_ms = 0;
 	bool offscreen = false;
 	bool voxelize = false;
@@ -96,24 +79,19 @@ int main(int argc, char** argv)
 	bool apply_grid = false;
 	double apply_h = 0.0, apply_lx = 0.0, apply_ly = 0.0, apply_lz = 0.0;
 	double set_u = 0.0;
-	double add_sand = 0.0;
-	double morfac = 0.0;
 	double display_interval = 0.0;
 	std::string tidal_arg;
 	std::string clip_arg;
 	bool tracers_on = false;
 	int tracers_density = 0;
-	std::string bed_colour_arg;
 	std::string save_scene, load_scene;
 	std::string model_place_arg;
-	std::string drop_step_path, drop_arg;
 	std::string record_path, record_selftest;
 	int autosave = 0;
 	for (int i = 1; i < argc; ++i)
 	{
 		std::string a = argv[i];
 		if (a == "--config" && i + 1 < argc) config = argv[++i];
-		else if (a == "--scenario" && i + 1 < argc) scenario_path = argv[++i];
 		else if (a == "--autoclose-ms" && i + 1 < argc) autoclose_ms = std::atoi(argv[++i]);
 		else if (a == "--load-step" && i + 1 < argc) step_path = argv[++i];
 		else if (a == "--offscreen") offscreen = true;
@@ -122,33 +100,17 @@ int main(int argc, char** argv)
 		else if (a == "--apply-h" && i + 1 < argc) { apply_h = std::atof(argv[++i]); apply_grid = true; }
 		else if (a == "--apply-domain" && i + 3 < argc) { apply_lx = std::atof(argv[++i]); apply_ly = std::atof(argv[++i]); apply_lz = std::atof(argv[++i]); apply_grid = true; }
 		else if (a == "--set-u" && i + 1 < argc) set_u = std::atof(argv[++i]);
-		else if (a == "--add-sand" && i + 1 < argc) add_sand = std::atof(argv[++i]);
 		else if (a == "--model-place" && i + 1 < argc) model_place_arg = argv[++i];
-		else if (a == "--morfac" && i + 1 < argc) morfac = std::atof(argv[++i]);
 		else if (a == "--display-interval" && i + 1 < argc) display_interval = std::atof(argv[++i]);
 		else if (a == "--tidal" && i + 1 < argc) tidal_arg = argv[++i];
 		else if (a == "--clip" && i + 1 < argc) clip_arg = argv[++i];
 		else if (a == "--tracers") { tracers_on = true; if (i + 1 < argc && argv[i + 1][0] != '-') tracers_density = std::atoi(argv[++i]); }
-		else if (a == "--bed-colour" && i + 1 < argc) bed_colour_arg = argv[++i];
 		else if (a == "--autosave" && i + 1 < argc) autosave = std::atoi(argv[++i]);
 		else if (a == "--load-scene" && i + 1 < argc) load_scene = argv[++i];
 		else if (a == "--save-scene" && i + 1 < argc) save_scene = argv[++i];
-		else if (a == "--drop-step" && i + 1 < argc) drop_step_path = argv[++i];
-		else if (a == "--drop" && i + 1 < argc) drop_arg = argv[++i];
 		else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
 		else if (a == "--record-selftest" && i + 1 < argc) record_selftest = argv[++i];
 		else if (!a.empty() && a[0] != '-') config = a; // positional config path
-	}
-	// A positional/--config file with a "sand_depth" key is a seabed scenario (unless --scenario set).
-	if (scenario_path.empty() && !config.empty())
-	{
-		try
-		{
-			std::ifstream in(config); std::ostringstream ss; ss << in.rdbuf();
-			auto j = nlohmann::json::parse(ss.str());
-			if (j.contains("sand_depth") || j.contains("structure_step")) scenario_path = config;
-		}
-		catch (...) {}
 	}
 	if (config.empty()) config = "configs/g1_viewer.json";
 	if (offscreen) qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -257,19 +219,14 @@ int main(int argc, char** argv)
 	// --- Build the simulation ---------------------------------------------------
 	SimRecipe recipe;
 	std::string warn;
-	SeabedScenario scen;
-	std::unique_ptr<scour::core::ChannelFluidCore> core;
-	if (!scenario_path.empty())
-		core = build_seabed_sim(scenario_path, recipe, scen, warn);
-	else
-		core = build_sim(config, recipe, warn);
+	std::unique_ptr<scour::core::ChannelFluidCore> core = build_sim(config, recipe, warn);
 	const SimInfo& info = recipe.info;
 	if (!warn.empty()) std::fprintf(stderr, "[G1] %s\n", warn.c_str());
 	std::fprintf(stderr, "[G1] sim '%s': %dx%dx%d cells, h=%.3f m, U=%.3f m/s, nu=%.3e, %s\n",
 		info.name.c_str(), info.nx, info.ny, info.nz, info.h, info.U, info.nu,
-		scen.active ? "SEABED (morphodynamic)" : (info.cylinder ? "cylinder" : "empty channel"));
+		info.cylinder ? "cylinder" : "empty channel");
 
-	MainWindow win(std::move(core), recipe, std::move(scen));
+	MainWindow win(std::move(core), recipe);
 	win.show();
 
 	// Optional auto-save cadence (applies to this and any rebuilt/restored worker).
@@ -288,29 +245,8 @@ int main(int argc, char** argv)
 			std::fprintf(stderr, "[G1] scene restore failed\n");
 	}
 
-	// Optional drop/settle PREPARATION PHASE (PLAN G3.2): scatter + settle N STEP units above the sand
-	// bed, then start the morphodynamic run with the settled pile as the rigid structure. The settle
-	// animates during the event loop, so give a generous --autoclose-ms for the headless smoke.
-#ifdef SCOUR_HAVE_JOLT
-	if (!drop_arg.empty() && !drop_step_path.empty())
-	{
-		double c = 12, s = 1234, smin = 0.6, smax = 1.0, sand = 0.5;
-		std::sscanf(drop_arg.c_str(), "%lf,%lf,%lf,%lf,%lf", &c, &s, &smin, &smax, &sand);
-		const int count = (int)c;
-		const unsigned seed = (unsigned)s;
-		std::fprintf(stderr, "[G1] --drop: %d units of '%s' seed=%u scale=[%.2f,%.2f] sand=%.2f m\n",
-			count, drop_step_path.c_str(), seed, smin, smax, sand);
-		win.dropBlocks(QString::fromStdString(drop_step_path), count, seed, smin, smax, sand);
-	}
-	else if (!drop_arg.empty() || !drop_step_path.empty())
-		std::fprintf(stderr, "[G1] --drop needs BOTH --drop-step <path> and --drop <count>,<seed>[,smin,smax,sand]\n");
-#else
-	if (!drop_arg.empty() || !drop_step_path.empty())
-		std::fprintf(stderr, "[G1] --drop: built without Jolt (SCOUR_HAVE_JOLT off); drop/settle unavailable\n");
-#endif
-
-	// Optional MP4 recording of the run (frames captured on each sand-bed change; ffmpeg spawns on the
-	// first captured frame). Armed before the event loop — pair with --drop / a seabed run to record.
+	// Optional MP4 recording of the run (one frame every N sim steps; ffmpeg spawns on the first captured
+	// frame). Armed before the event loop.
 	if (!record_path.empty())
 	{
 		std::fprintf(stderr, "[G1] --record: recording to '%s'\n", record_path.c_str());
@@ -329,8 +265,8 @@ int main(int argc, char** argv)
 	}
 
 	// Optional headless smoke of the placement gizmo: move/rotate/scale the loaded model, then re-voxelize
-	// it as the obstacle (what a gizmo drag + Apply do). Applied after --load-step, before --add-sand and
-	// --apply-grid so `--load-step … --model-place dx,dy,dz,rz,scale --apply-h …` exercises placed-voxelize.
+	// it as the obstacle (what a gizmo drag + Apply do). Applied after --load-step, before --apply-grid so
+	// `--load-step … --model-place dx,dy,dz,rz,scale --apply-h …` exercises placed-voxelize.
 	if (!model_place_arg.empty())
 	{
 		double dx = 0, dy = 0, dz = 0, rz = 0, sc = 0;
@@ -338,23 +274,6 @@ int main(int argc, char** argv)
 		std::fprintf(stderr, "[G1] --model-place: nudge t=(%.3f %.3f %.3f) rz=%.1f scale=%.3f, then re-voxelize\n",
 			dx, dy, dz, rz, sc);
 		win.nudgeModelPlacement(dx, dy, dz, rz, sc);
-	}
-
-	// Optional headless smoke of the "Add sand" control: convert to a sediment run with <m> m of sand.
-	// Applied BEFORE --apply-grid so `--add-sand X --apply-domain …` exercises the converted-seabed resize
-	// (a runtime seabed conversion re-voxelizing the model as the structure + re-applying the sand).
-	if (add_sand > 0.0)
-	{
-		std::fprintf(stderr, "[G1] --add-sand: adding %.3f m of sand (flow preserved, sediment run continues)\n", add_sand);
-		win.addSandMeters(add_sand);
-	}
-
-	// Optional headless smoke of the "MORFAC" control: accelerate the bed live (applied after --add-sand so
-	// the engine exists; a no-op for a fluid-only viewer).
-	if (morfac > 0.0)
-	{
-		std::fprintf(stderr, "[G1] --morfac: setting MORFAC to %.2fx (live; no-op without a bed)\n", morfac);
-		win.setMorfacValue(morfac);
 	}
 
 	// Optional headless smoke of the dock's Apply: rebuild+reset at a new grid (domain + voxel size).
@@ -410,14 +329,6 @@ int main(int argc, char** argv)
 		win.viewer()->setTracerGridDensity(dens);
 		win.viewer()->setTracerMode3D(true);
 		win.viewer()->setShowTracers(true);
-	}
-
-	// Optional headless smoke of the bed-surface colour source (elevation vs net exchange rate).
-	if (!bed_colour_arg.empty() && win.viewer())
-	{
-		int mode = (bed_colour_arg == "rate" || bed_colour_arg == "exchange" || bed_colour_arg == "1") ? 1 : 0;
-		std::fprintf(stderr, "[G1] --bed-colour: bed colour source = %s\n", mode == 1 ? "exchange rate" : "elevation");
-		win.viewer()->setBedColorMode(mode);
 	}
 
 	// Optional headless smoke of the "Fast sim" graphics throttle (worker snapshot + repaint cadence).

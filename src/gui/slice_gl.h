@@ -17,19 +17,18 @@ namespace scour::gui
 	void slice_gl_unregister(void* handle);
 
 	// Map the registered VBO, run the slice colour kernel reading the device MAC fields,
-	// then unmap. `p` (pressure) and `c` (suspended-sediment concentration) may each be null
-	// (⇒ their field renders as 0). Must run on the main (GL) thread; the caller is
-	// responsible for serialising against the simulation worker's step(). Returns false
-	// on a CUDA/interop error.
-	bool slice_gl_fill(void* handle, const double* u, const double* v, const double* w, const double* p, const double* c,
+	// then unmap. `p` (pressure) may be null (⇒ Pressure renders as 0). Must run on the main
+	// (GL) thread; the caller is responsible for serialising against the simulation worker's
+	// step(). Returns false on a CUDA/interop error.
+	bool slice_gl_fill(void* handle, const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp);
 
 	// GPU-reduce the live [min,max] of `field` (+ max speed) over the device snapshot, fluid cells
 	// only (`solid` may be null). Runs on the resource's own stream + a persistent 3-float scratch;
 	// copies back ONLY the 3 scalars (never the whole field), so the auto colour-range stays off the
-	// PCIe/critical path. `p`/`c` may be null (⇒ Pressure/Concentration sample as 0). Main (GL) thread;
-	// serialise vs the worker like slice_gl_fill. Returns false on error or when no fluid cell
-	// contributed (out->valid is set accordingly).
-	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p, const double* c,
+	// PCIe/critical path. `p` may be null (⇒ Pressure samples as 0). Main (GL) thread; serialise vs
+	// the worker like slice_gl_fill. Returns false on error or when no fluid cell contributed
+	// (out->valid is set accordingly).
+	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, scour::core::MacGrid g, Field field, FieldRange* out);
 }

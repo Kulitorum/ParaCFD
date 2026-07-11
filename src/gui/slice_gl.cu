@@ -57,7 +57,7 @@ namespace scour::gui
 		delete h;
 	}
 
-	bool slice_gl_fill(void* handle, const double* u, const double* v, const double* w, const double* p, const double* c,
+	bool slice_gl_fill(void* handle, const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp)
 	{
 		if (!handle) return false;
@@ -79,7 +79,7 @@ namespace scour::gui
 		}
 		size_t need = (size_t)sp.nu * (size_t)sp.nv * sizeof(float4);
 		if (bytes >= need)
-			slice_fill_gpu(u, v, w, p, c, sp, dptr, h->stream);
+			slice_fill_gpu(u, v, w, p, sp, dptr, h->stream);
 		cudaError_t k = cudaGetLastError();
 		cudaGraphicsUnmapResources(1, &h->res, h->stream); // stream-ordered: writes visible to GL after this
 		if (k != cudaSuccess)
@@ -90,14 +90,14 @@ namespace scour::gui
 		return bytes >= need;
 	}
 
-	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p, const double* c,
+	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, scour::core::MacGrid g, Field field, FieldRange* out)
 	{
 		if (!handle || !out) return false;
 		SliceResource* h = reinterpret_cast<SliceResource*>(handle);
 		if (!h->range_dev) return false;
 
-		slice_reduce_gpu(u, v, w, p, c, solid, g, field, h->range_dev, h->stream);
+		slice_reduce_gpu(u, v, w, p, solid, g, field, h->range_dev, h->stream);
 		float host3[3] = { 0.0f, 0.0f, 0.0f };
 		cudaError_t e = cudaMemcpyAsync(host3, h->range_dev, 3 * sizeof(float), cudaMemcpyDeviceToHost, h->stream);
 		if (e == cudaSuccess) e = cudaStreamSynchronize(h->stream); // waits ONLY on the interop stream

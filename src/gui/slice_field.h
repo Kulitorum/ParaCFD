@@ -18,15 +18,14 @@
 
 namespace scour::gui
 {
-	// Which scalar of the {u,v,w,p,c} state to colour.
+	// Which scalar of the {u,v,w,p} state to colour.
 	enum class Field : int
 	{
-		SpeedMag = 0,     // |(u,v,w)| at the cell centre
-		VelU = 1,         // x-velocity (cell centre)
-		VelV = 2,         // y-velocity
-		VelW = 3,         // z-velocity
-		Pressure = 4,     // cell pressure
-		Concentration = 5 // cell-centred suspended-sediment concentration
+		SpeedMag = 0, // |(u,v,w)| at the cell centre
+		VelU = 1,     // x-velocity (cell centre)
+		VelV = 2,     // y-velocity
+		VelW = 3,     // z-velocity
+		Pressure = 4  // cell pressure
 	};
 
 	// Plane normal axis.
@@ -68,16 +67,13 @@ namespace scour::gui
 	}
 
 	// Fill `out` (device, nu*nv float4 RGBA in [0,1]) from the device MAC fields. `p` may
-	// be null (then Pressure renders as 0); `c` (cell-centred suspended-sediment
-	// concentration, same pidx layout as `p`) may be null too (then Concentration renders
-	// as 0). Launches on `stream` (0 = default).
-	void slice_fill_gpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	// be null (then Pressure renders as 0). Launches on `stream` (0 = default).
+	void slice_fill_gpu(const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp, float4* out, cudaStream_t stream);
 
 	// CPU reference: identical arithmetic on HOST copies of the fields. `out` is host,
-	// nu*nv float4. `c` may be null (⇒ Concentration renders as 0). Used by the GPU-vs-CPU
-	// parity test.
-	void slice_fill_cpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	// nu*nv float4. Used by the GPU-vs-CPU parity test.
+	void slice_fill_cpu(const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp, float4* out);
 
 	// --- Auto-range reduction (GUI colour-scale follows the live data) -----------------------
@@ -96,12 +92,11 @@ namespace scour::gui
 	// over cells where `solid` is 0 (null ⇒ all fluid); non-finite cells are skipped so a NaN blow-up
 	// never poisons the scale. Initialises out3_dev itself; launches on `stream`. `field` selects the
 	// scalar (same cell-centred sampling as the slice fill), so the reduced range matches the display.
-	// `p`/`c` may be null (⇒ Pressure/Concentration sample as 0), matching the slice fill.
-	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	// `p` may be null (⇒ Pressure samples as 0), matching the slice fill.
+	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, scour::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
 
-	// CPU reference (host fields → out3[3]) with identical arithmetic. `c` may be null. Used by the
-	// GPU-vs-CPU test.
-	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p, const double* c,
+	// CPU reference (host fields → out3[3]) with identical arithmetic. Used by the GPU-vs-CPU test.
+	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
 		const unsigned char* solid, scour::core::MacGrid g, Field field, float out3[3]);
 }

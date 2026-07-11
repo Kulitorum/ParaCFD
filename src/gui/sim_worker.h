@@ -11,7 +11,6 @@
 #pragma once
 
 #include "core/fluid/channel_core.h"
-#include "core/sediment/seabed_engine.h"
 #include "gui/flow_particles.h" // FlowField
 #include "gui/scene_io.h"       // CheckpointState / CheckpointStatePtr
 
@@ -54,57 +53,18 @@ namespace scour::gui
 		const double* disp_v() const { return dv_; }
 		const double* disp_w() const { return dw_; }
 		const double* disp_p() const { return dp_; }
-		const double* disp_c() const { return dc_; } // suspended concentration snapshot (0 when no sediment)
 		const unsigned char* disp_solid() const { return ds_; } // solid mask snapshot (auto-range excludes it)
 
 		bool playing() const { return playing_.load(); }
 		long long steps() const { return steps_.load(); }
 		double sim_time() const { return sim_time_.load(); }
 
-		// --- Erodible seabed (the morphodynamic loop) ----------------------------------------
-		// Attach the morphodynamic engine; the worker then runs the FULL loop (fluid → τ_b →
-		// suspended → Exner → avalanche) after `spinup` flow-only steps, and re-masks the flow core
-		// in place as the bed moves. Set ONCE before the thread starts. Owned by the worker.
-		void setMorpho(std::unique_ptr<scour::core::SeabedMorpho> m, int spinup);
-		bool hasBed() const { return morpho_ != nullptr; }
-
-		// Convert a RUNNING fluid viewer into an erodible-seabed run IN PLACE, preserving the developed
-		// flow (the GUI "Add sand"). Thread-safe from the main thread; applied on the worker thread at the
-		// top of its next loop: the pre-built engine is attached and the initial sand+structure mask is
-		// installed via ChannelFluidCore::update_solid (untouched cells keep their {u,v,w,p}; the now-solid
-		// cells are zeroed) — NO factory rebuild, NO init_uniform, NO t=0 reset. The bed-inlet mask is
-		// enabled and (loglaw) the inlet switches to the log-law BL profile (z0/bed_datum), as a seabed run
-		// needs. Morphology begins `spinup` steps later so the re-masked flow settles first. Replaces any
-		// current engine (re-adding sand). The engine must be pre-built on the caller's grid.
-		void requestSeabedConversion(std::unique_ptr<scour::core::SeabedMorpho> engine,
-			std::vector<unsigned char> initial_solid, int spinup, bool loglaw, double z0, double bed_datum);
-		// Live structure update (PLAN G3.3 SINK coupling): after the main thread re-settles the dropped
-		// pile against the eroded bed and re-voxelizes it, hand the new rigid structure mask here; the
-		// worker installs it into the morpho engine (SeabedMorpho::set_structure) and re-masks the flow in
-		// place (update_solid), preserving the developed flow. Thread-safe; applied at the loop top. A
-		// no-op without a bed (the flag stays pending, harmless).
-		void requestStructureUpdate(std::vector<unsigned char> structure)
-		{
-			{ std::lock_guard<std::mutex> lk(structure_mtx_); pending_structure_ = std::move(structure); }
-			structure_pending_.store(true);
-		}
-		double bedZ0() const { return bed_z0_; }
-		// Bumped every time the worker republishes the bed elevation (a morphology step). Lets the GUI
-		// video recorder capture a frame only when the sand has actually moved (mirrors maskGeneration).
-		std::uint64_t bedGeneration() const { return bed_gen_.load(); }
-		// Copy the latest per-column bed elevation z_b [m] (main-thread render). Returns false if no
-		// bed. Takes display_mutex() internally. `zb` is nx·ny, row-major (j·nx+i).
-		bool copyBed(std::vector<float>& zb);
-		// Copy the latest per-column NET bed-exchange rate [m/s] (delivery − pickup) for the bed-surface
-		// "Exchange rate" colouring. Returns false if no bed / not yet published. Same nx·ny layout as zb.
-		bool copyBedExchange(std::vector<float>& rate);
-
 		// --- Live flow solid-mask snapshot (for the "Show voxels" overlay) -----------------------
-		// The worker publishes the CURRENT flow solid mask (structure ∪ sand ∪ obstacle ∪ any
-		// runtime-marked solid, g.p_count() bytes, 1=solid, g.pidx order) whenever it CHANGES: at
-		// load, on an obstacle rebuild, and on each bed re-mask (update_solid). maskGeneration() bumps
-		// on every publish so the viewer re-extracts the overlay geometry only then — never a per-frame
-		// mask copy. copyMask() (main thread) returns the latest mask + its grid, or false if none.
+		// The worker publishes the CURRENT flow solid mask (obstacle ∪ any runtime-marked solid,
+		// g.p_count() bytes, 1=solid, g.pidx order) whenever it CHANGES: at load and on an obstacle
+		// rebuild. maskGeneration() bumps on every publish so the viewer re-extracts the overlay
+		// geometry only then — never a per-frame mask copy. copyMask() (main thread) returns the
+		// latest mask + its grid, or false if none.
 		std::uint64_t maskGeneration() const { return mask_gen_.load(); }
 		bool copyMask(std::vector<unsigned char>& mask, scour::core::MacGrid& grid);
 
@@ -123,19 +83,11 @@ namespace scour::gui
 		// any obstacle rebuild so a re-inject keeps the chosen current. The developing flow evolves
 		// toward the new inlet speed. Used by the GUI "Input speed" control to test different currents.
 		void setInletSpeed(double U) { inlet_speed_.store(U); inlet_override_.store(true); inlet_speed_dirty_.store(true); }
-		void setSedBoundary(int mode) { sed_bc_.store(mode); sed_bc_dirty_.store(true); } // suspended x-BC (SedBoundary)
-
-		// Live MORFAC (morphological acceleration) change (GUI "Bed speed-up"): applied on the worker thread
-		// to the morpho engine. MORFAC multiplies morphological time only, so the bed evolves M× faster than
-		// the flow clock — the "catch up faster" knob. A no-op without a bed, but the flag stays pending (the
-		// apply short-circuits on a null engine) so a value dialed in before "Add sand" lands once the engine
-		// attaches. ⚠ Physically M≤10 steady / ≤5 reversing (RESEARCH §7) — a value choice, not enforced here.
-		void setMorfac(double m) { morfac_.store(m); morfac_dirty_.store(true); }
 
 		// Live-switch the inlet profile between uniform (top-hat) and a log-law boundary-layer profile
-		// (near-bed u→0 at the bed top, removing the top-hat leading-edge over-erosion). Applied on the
-		// worker thread and re-applied after a rebuild. `z0` = grain roughness, `bed_datum` = inlet bed
-		// elevation [m]. Used by the GUI "Inlet profile" toggle.
+		// (near-bed u→0 at the domain floor, a thinner wall-bounded inflow). Applied on the worker thread
+		// and re-applied after a rebuild. `z0` = wall roughness, `bed_datum` = inlet floor elevation [m].
+		// Used by the GUI "Inlet profile" toggle.
 		void setInletProfile(bool loglaw, double z0, double bed_datum)
 		{
 			{ std::lock_guard<std::mutex> lk(inlet_prof_mtx_); inlet_prof_loglaw_ = loglaw; inlet_prof_z0_ = z0; inlet_prof_datum_ = bed_datum; }
@@ -145,11 +97,10 @@ namespace scour::gui
 
 		// Live TIDAL REVERSAL driver (M9, RESEARCH §8). When `on`, the worker drives the inlet each step
 		// with a reversing tide U_d(t) = U_max·s(t) (s: +1 plateau → cosine slack ramp → −1 plateau → …)
-		// via ChannelFluidCore::set_inlet_speed(|U_d|) + set_flow_direction(sign) (+ engine inlet speed),
-		// face-swapping the inlet/outlet at slack where |U_d|→0. It takes over the manual "Input speed"
-		// while active. `plateau_s`/`ramp_s` are the hold and compressed-slack durations [s]. Disabling
-		// restores steady forward flow. Applied on the worker thread; no reset. (⚠ MORFAC ≤ 5 in reversing
-		// flow — RESEARCH §7; that is a run-setup choice, not enforced here.)
+		// via ChannelFluidCore::set_inlet_speed(|U_d|) + set_flow_direction(sign), face-swapping the
+		// inlet/outlet at slack where |U_d|→0. It takes over the manual "Input speed" while active.
+		// `plateau_s`/`ramp_s` are the hold and compressed-slack durations [s]. Disabling restores steady
+		// forward flow. Applied on the worker thread; no reset.
 		void setTidalReversal(bool on, double Umax, double plateau_s, double ramp_s)
 		{
 			tidal_umax_.store(Umax); tidal_plateau_.store(plateau_s); tidal_ramp_.store(ramp_s);
@@ -164,7 +115,7 @@ namespace scour::gui
 
 		// --- Checkpoint / auto-save (scene_io) ---------------------------------------------------
 		// Prime the step / sim-time counters before the thread starts (a scene restore continues from
-		// the saved step, not t=0). Call BEFORE moveToThread/start, like setMorpho/setRebuildFactory.
+		// the saved step, not t=0). Call BEFORE moveToThread/start, like setRebuildFactory.
 		void primeCounters(long long steps, double sim_time) { steps_.store(steps); sim_time_.store(sim_time); }
 		// Auto-save cadence: with n>0 the worker gathers a checkpoint and emits checkpointReady every n
 		// steps (0 = off). Thread-safe; picked up at the next step boundary.
@@ -217,33 +168,17 @@ namespace scour::gui
 		void publish_display();   // copy core fields -> snapshots (under disp_mtx_)
 		void free_display();
 		void apply_pending_rebuild(); // worker-thread: swap in a new core if one was requested
-		void apply_seabed_conversion(); // worker-thread: attach engine + update_solid, flow preserved
-		void apply_structure_update();  // worker-thread: swap the rigid structure + re-mask (G3.3 sink)
 		void maybe_publish_host_flow(); // worker-thread: throttled D2H of {u,v,w,solid} for arrows
 		void emit_checkpoint(long long tag); // worker-thread: gather full state → emit checkpointReady
 		void publish_mask(const std::vector<unsigned char>& mask); // worker-thread: snapshot the mask + bump gen
-		// Classify a flow solid mask into a KIND mask (0=fluid, 1=erodible sediment/sand, 2=rigid solid:
-		// structure/obstacle) and publish it, so the GUI voxel overlay can colour the two apart. With a
-		// morpho engine, sand = solid AND NOT structure; without one (fluid viewer) every solid is rigid.
-		void publish_solid_kind(const std::vector<unsigned char>& solid); // worker-thread
 
 		std::unique_ptr<scour::core::ChannelFluidCore> core_;
-
-		// Erodible seabed morphodynamic engine (null ⇒ fluid-only viewer, G1 unchanged). Stepped on
-		// the worker thread after the flow spin-up; its bed elevation snapshot feeds the bed viz.
-		std::unique_ptr<scour::core::SeabedMorpho> morpho_;
-		int morpho_spinup_ = 0;
-		double bed_z0_ = 0.0, morpho_V0_ = 0.0;
-		std::vector<unsigned char> morpho_solid_; // remask scratch (worker thread)
-		std::vector<float> disp_zb_;              // published bed elevation (under disp_mtx_)
-		std::vector<float> disp_exch_;            // published net bed-exchange rate [m/s] (under disp_mtx_)
 
 		// Live flow solid-mask snapshot (host), republished only when the mask changes (see above).
 		std::mutex mask_mtx_;
 		std::vector<unsigned char> mask_snapshot_;
 		scour::core::MacGrid mask_grid_{};
 		std::atomic<std::uint64_t> mask_gen_{ 0 };
-		std::atomic<std::uint64_t> bed_gen_{ 0 }; // bumped on each bed-elevation republish (video capture trigger)
 
 		// Pending core rebuild (obstacle re-injection). Guarded by rebuild_mtx_; flagged atomic.
 		std::function<std::unique_ptr<scour::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;
@@ -251,21 +186,6 @@ namespace scour::gui
 		std::vector<unsigned char> pending_mask_;
 		int pending_mode_ = 0;
 		std::atomic<bool> rebuild_pending_{ false };
-
-		// Pending live seabed conversion (GUI "Add sand" — preserves the running flow). Guarded by
-		// convert_mtx_; flagged atomic. Applied on the worker thread by apply_seabed_conversion().
-		std::mutex convert_mtx_;
-		std::unique_ptr<scour::core::SeabedMorpho> pending_engine_;
-		std::vector<unsigned char> pending_convert_solid_;
-		int pending_convert_spinup_ = 0;
-		bool pending_convert_loglaw_ = false;
-		double pending_convert_z0_ = 0.0, pending_convert_datum_ = 0.0;
-		std::atomic<bool> convert_pending_{ false };
-
-		// Pending live structure update (G3.3 sink coupling). Guarded by structure_mtx_; flagged atomic.
-		std::mutex structure_mtx_;
-		std::vector<unsigned char> pending_structure_;
-		std::atomic<bool> structure_pending_{ false };
 
 		// Live inlet-speed override (GUI "Input speed"): applied on the worker thread at the top of the
 		// loop and re-applied after a rebuild. inlet_override_ latches once the user has changed it, so
@@ -281,17 +201,6 @@ namespace scour::gui
 		double inlet_prof_z0_ = 0.0, inlet_prof_datum_ = 0.0;
 		std::atomic<bool> inlet_prof_override_{ false };
 		std::atomic<bool> inlet_prof_dirty_{ false };
-
-		// Live suspended-sediment boundary switch (GUI "Sediment BC"): applied on the worker thread to the
-		// morpho engine. Default OPEN (open-sea equilibrium inflow); a no-op when no bed is active.
-		std::atomic<int> sed_bc_{ scour::core::SED_BC_OPEN };
-		std::atomic<bool> sed_bc_dirty_{ false };
-
-		// Live MORFAC override (GUI "Bed speed-up"): applied on the worker thread to the morpho engine. Held
-		// dirty until a bed is active (the apply short-circuits on a null engine), so a value chosen before
-		// "Add sand" lands the step morphology attaches. morfac_ = 0 ⇒ never set (engine keeps its config M).
-		std::atomic<double> morfac_{ 0.0 };
-		std::atomic<bool> morfac_dirty_{ false };
 
 		// Live tidal-reversal driver (GUI "Tidal reversal"). Params are atomics; tidal_dirty_ flags an
 		// enable/disable/param change (the worker resets its tide clock and, on disable, restores steady
@@ -309,8 +218,7 @@ namespace scour::gui
 		double* dv_ = nullptr;
 		double* dw_ = nullptr;
 		double* dp_ = nullptr;
-		double* dc_ = nullptr; // suspended-sediment concentration snapshot (seabed runs; 0 otherwise)
-		unsigned char* ds_ = nullptr; // solid-cell snapshot (bed + structure + obstacle), for auto-range
+		unsigned char* ds_ = nullptr; // solid-cell snapshot (obstacle), for auto-range
 		std::atomic<bool> disp_ready_{ false };
 
 		// Display-snapshot throttle (GUI "Fast sim"): 0 ⇒ publish every step. When > 0 the worker skips
