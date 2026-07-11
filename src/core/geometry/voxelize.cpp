@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <limits>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{

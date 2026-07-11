@@ -12,9 +12,9 @@
 #include <fstream>
 #include <sstream>
 
-namespace scour::gui
+namespace windcfd::gui
 {
-	using namespace scour::core;
+	using namespace windcfd::core;
 
 	namespace
 	{

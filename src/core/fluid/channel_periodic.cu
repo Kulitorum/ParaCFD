@@ -29,26 +29,26 @@
 #include <cstdio>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{
 		inline int gsz(int n, int b = 256) { return (n + b - 1) / b; }
 
-		SCOUR_HD inline double ucenter(const double* u, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double ucenter(const double* u, MacGrid g, int i, int j, int k)
 		{ return 0.5 * (u[g.uidx(i, j, k)] + u[g.uidx(i + 1, j, k)]); }
-		SCOUR_HD inline double vcenter(const double* v, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double vcenter(const double* v, MacGrid g, int i, int j, int k)
 		{ return 0.5 * (v[g.vidx(i, j, k)] + v[g.vidx(i, j + 1, k)]); }
 
 		// horizontal speed magnitude at cell (i,j,k) with free-slip mirror in z.
-		SCOUR_HD inline double hspeed(const double* u, const double* v, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double hspeed(const double* u, const double* v, MacGrid g, int i, int j, int k)
 		{
 			int kk = k < 0 ? 0 : (k > g.nz - 1 ? g.nz - 1 : k);
 			double uc = ucenter(u, g, i, j, kk), vc = vcenter(v, g, i, j, kk);
 			return sqrt(uc * uc + vc * vc);
 		}
 
-		SCOUR_HD inline double mixlen_cell(const double* u, const double* v, MacGrid g, double kappa, double Lz, int i, int j, int k)
+		WINDCFD_HD inline double mixlen_cell(const double* u, const double* v, MacGrid g, double kappa, double Lz, int i, int j, int k)
 		{
 			double z = (k + 0.5) * g.h;
 			double wake = 1.0 - z / Lz; if (wake < 0.0) wake = 0.0;
@@ -68,7 +68,7 @@ namespace scour::core
 		}
 
 		// z-diffusion of one face component; icol maps a face's x/y index to a cell column.
-		SCOUR_HD inline double zdiff_u(const double* uIn, const double* nut, MacGrid g, double dt, double nu, int i, int j, int k)
+		WINDCFD_HD inline double zdiff_u(const double* uIn, const double* nut, MacGrid g, double dt, double nu, int i, int j, int k)
 		{
 			int ic = i < g.nx ? i : g.nx - 1; // face i∈[0,nx] → cell column
 			double f = uIn[g.uidx(i, j, k)];
@@ -85,7 +85,7 @@ namespace scour::core
 			}
 			return f + dt / (g.h * g.h) * (fup - fdn);
 		}
-		SCOUR_HD inline double zdiff_v(const double* vIn, const double* nut, MacGrid g, double dt, double nu, int i, int j, int k)
+		WINDCFD_HD inline double zdiff_v(const double* vIn, const double* nut, MacGrid g, double dt, double nu, int i, int j, int k)
 		{
 			int jc = j < g.ny ? j : g.ny - 1;
 			double f = vIn[g.vidx(i, j, k)];

@@ -3,7 +3,7 @@
 
 #include <cmath>
 
-namespace scour::core
+namespace windcfd::core
 {
 	int build_cylinder_mask(MacGrid g, double xc, double yc, double R, std::vector<unsigned char>& solid)
 	{

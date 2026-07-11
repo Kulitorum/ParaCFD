@@ -12,7 +12,7 @@
 
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// ---- Advection (MacCormack semi-Lagrangian, RK2 backtrace) ------------------
 	// Advect (uIn,vIn,wIn) by its own velocity into (uOut,vOut,wOut). scratch must

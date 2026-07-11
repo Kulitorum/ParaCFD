@@ -1,6 +1,6 @@
 // shape_masks.h — procedural reference-shape voxel masks for the M8 shape-ranking harness
 // (PLAN M8: "reference shapes generated procedurally … no CAD input needed"). OCC-free (in
-// libscour): a shape is a cell solid-mask (1=solid, size p_count, same format as build_cylinder_mask
+// libwindcfd): a shape is a cell solid-mask (1=solid, size p_count, same format as build_cylinder_mask
 // / voxelize_mesh) so it drops straight into SeabedMorpho as the rigid `structure`. Each builder
 // seats the shape ON the bed (z from bed_top upward), returns the solid-cell count, and centres it
 // in x/y by argument. Shapes are sized to a common footprint so a ranking compares like with like.
@@ -16,7 +16,7 @@
 #include <cmath>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace shape_detail
 	{

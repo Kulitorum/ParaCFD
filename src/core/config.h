@@ -6,7 +6,7 @@
 #include <string>
 #include <cstdint>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Run configuration. Defaults are the canonical parameters of RESEARCH.md §1.
 	// NOTE (RESEARCH §1): rho and nu MUST be config parameters — the physics is

@@ -164,7 +164,7 @@
 > `--retention` output as washout resistance until that setup is added.
 
 ## Your role
-Lead **orchestrator** of ScourProtection (`C:/CODE/ScourProtection`). You do not write most code
+Lead **orchestrator** of WindCFD (`C:/CODE/WindCFD`). You do not write most code
 yourself: you launch/verify **Opus 4.8** implementation agents (Agent tool for one feature,
 Workflow for multi-step), verify **every** change yourself (rebuild + `ctest` + read the diff —
 an agent's "passed" is a claim, not a fact), and apply judgment where agents must not (physics
@@ -180,7 +180,7 @@ to him as a peer.
    `mh-forms-visual-hypotheses`.
 
 ## First actions
-1. Assess ground truth: `git -C C:/CODE/ScourProtection log --oneline -20` (feature tip is **`ebe2d2c`**,
+1. Assess ground truth: `git -C C:/CODE/WindCFD log --oneline -20` (feature tip is **`ebe2d2c`**,
    the model-placement gizmo + arrow-width slider — see the latest summary; the bed-exchange-rate, clip-plane
    /MORFAC, and M9 blocks precede it); `git status` (**clean**); build + run the fast suite:
    `cmake --build build --config Release` then
@@ -195,14 +195,14 @@ to him as a peer.
 
 ## State at handover (2026-07-08 — historical; see the latest summary at top for current state)
 Everything below is **committed and pushed** to `origin/master`
-(github.com/COBOD-International/ScourProtection, default branch **master**), tip **`c6377dc`**:
+(github.com/COBOD-International/WindCFD, default branch **master**), tip **`c6377dc`**:
 - **M0–M5 physics + G1 GUI** — all gate-verified (unchanged): MAC/MacCormack/MGPCG/Smagorinsky
   fluid; open channel + cylinder Cd/St; log-law bed-shear wall model + Jarrin SEM; suspended
   sediment (van Rijn pickup, w_s·c_b deposition, Rouse); bed morphodynamics (f_pack,
   Winterwerp/bedload, avalanche, Exner); Qt6 + GL 4.3 slice viewer.
 - **Geometry pipeline in the GUI** (unchanged): STEP loading (OpenCascade → mesh); STEP → fluid
   **voxelization** (majority ray-parity fill, thin-wall safeguard); live obstacle via `--voxelize`
-  / "Model as obstacle". Real unit: `Experiments/V000 Code tests/ScourProtection V000_001.stp`.
+  / "Model as obstacle". Real unit: `Experiments/V000 Code tests/WindCFD V000_001.stp`.
 - **Erodible-seabed live scenario** (`--scenario configs/seabed_v000.json`): the FULL live loop
   fluid→τ_b→suspended→bed→avalanche around the voxelized V000. **Still PRE-CALIBRATION / qualitative**
   (artificial low-Re `nu_fluid`, uncalibrated α/Cs, MORFAC=5) — NOT a measurement; real numbers = M6.

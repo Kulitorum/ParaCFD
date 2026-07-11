@@ -9,19 +9,19 @@
 #include <cfloat>
 #include <cmath>
 
-namespace scour::gui
+namespace windcfd::gui
 {
-	using scour::core::MacGrid;
+	using windcfd::core::MacGrid;
 
 	namespace
 	{
-		SCOUR_HD inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
-		SCOUR_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
+		WINDCFD_HD inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+		WINDCFD_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 		// Perceptual 5-stop gradient blue->cyan->green->yellow->red over t in [0,1]. Delegates to
 		// the SHARED ramp (gui/colormap.h) so the slice, the flow arrows and the legend agree, and
 		// so the GPU kernel and its CPU reference stay bit-for-bit identical (plain float lerps).
-		SCOUR_HD inline float4 colormap(float t)
+		WINDCFD_HD inline float4 colormap(float t)
 		{
 			float4 c;
 			scour_colormap(t, c.x, c.y, c.z);
@@ -30,7 +30,7 @@ namespace scour::gui
 		}
 
 		// Cell-centred scalar of the chosen field at MAC cell (i,j,k).
-		SCOUR_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
+		WINDCFD_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
 			MacGrid g, Field field, int i, int j, int k)
 		{
 			switch (field)
@@ -56,7 +56,7 @@ namespace scour::gui
 
 		// Cell-centred speed magnitude |(u,v,w)| at MAC cell (i,j,k). Shared by the auto-range
 		// reduction's GPU kernel and CPU reference so the arrow colour scale matches exactly.
-		SCOUR_HD inline float cell_speed(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline float cell_speed(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
 			double uc = 0.5 * (u[g.uidx(i, j, k)] + u[g.uidx(i + 1, j, k)]);
 			double vc = 0.5 * (v[g.vidx(i, j, k)] + v[g.vidx(i, j + 1, k)]);
@@ -65,7 +65,7 @@ namespace scour::gui
 		}
 
 		// Full per-vertex evaluation: world position -> nearest cell -> scalar -> colour.
-		SCOUR_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p,
+		WINDCFD_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p,
 			const SliceParams& sp, int a, int b)
 		{
 			float x, y, z;

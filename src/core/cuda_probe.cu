@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	void saxpy_cpu(float a, const std::vector<float>& x, const std::vector<float>& y, std::vector<float>& out)
 	{

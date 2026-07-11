@@ -8,7 +8,7 @@
 
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Circular cylinder of radius R (m) centred at (xc,yc) in the x-y plane, extruded
 	// through the full z extent (axis along z). Cell (i,j,k) solid iff its centre lies

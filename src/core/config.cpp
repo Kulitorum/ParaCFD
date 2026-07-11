@@ -10,7 +10,7 @@
 #include <string>
 #include <set>
 
-namespace scour::core
+namespace windcfd::core
 {
 	using nlohmann::json;
 

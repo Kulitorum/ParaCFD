@@ -3,7 +3,7 @@
 
 #include <cuda_runtime.h>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{

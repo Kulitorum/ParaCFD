@@ -8,16 +8,16 @@
 #include <cmath>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{
 		inline int gsz(int n, int b = 256) { return (n + b - 1) / b; }
-		SCOUR_HD inline int pl(MacGrid g, int i, int j) { return j * g.nx + i; }
-		SCOUR_HD inline int wrap(int i, int n) { int r = i % n; return r < 0 ? r + n : r; }
+		WINDCFD_HD inline int pl(MacGrid g, int i, int j) { return j * g.nx + i; }
+		WINDCFD_HD inline int wrap(int i, int n) { int r = i % n; return r < 0 ? r + n : r; }
 
 		// ---- raw τ_b from the field (probe → u* → τ) --------------------------
-		SCOUR_HD inline void bedshear_cell(const double* u, const double* v, MacGrid g, WallParams wp,
+		WINDCFD_HD inline void bedshear_cell(const double* u, const double* v, MacGrid g, WallParams wp,
 			int i, int j, double& taux, double& tauy, double& us)
 		{
 			double ks = wall_ks(wp.d50);
@@ -41,7 +41,7 @@ namespace scour::core
 		}
 
 		// ---- 3×3 tangential box smooth (one pass, Neumann edges) --------------
-		SCOUR_HD inline double smooth_cell(const double* f, MacGrid g, int i, int j)
+		WINDCFD_HD inline double smooth_cell(const double* f, MacGrid g, int i, int j)
 		{
 			double s = 0.0; int c = 0;
 			for (int dj = -1; dj <= 1; ++dj) for (int di = -1; di <= 1; ++di)
@@ -60,7 +60,7 @@ namespace scour::core
 		}
 
 		// ---- rate-limit + EMA ------------------------------------------------
-		SCOUR_HD inline void filter_cell(double tx, double ty, double& ex, double& ey, WallParams wp, double dt, int first)
+		WINDCFD_HD inline void filter_cell(double tx, double ty, double& ex, double& ey, WallParams wp, double dt, int first)
 		{
 			if (first) { ex = tx; ey = ty; return; }
 			double mnew = sqrt(tx * tx + ty * ty);

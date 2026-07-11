@@ -3,25 +3,25 @@
 
 #include <cuda_runtime.h>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{
 		// k for a face = max porous-k of the two cells it separates (a face gets a screen if either
 		// neighbour is porous). Out-of-domain neighbours contribute 0 (open).
-		SCOUR_HD inline double kface_u(const double* pk, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double kface_u(const double* pk, MacGrid g, int i, int j, int k)
 		{
 			double a = (i - 1 >= 0 && i - 1 < g.nx) ? pk[g.pidx(i - 1, j, k)] : 0.0;
 			double b = (i >= 0 && i < g.nx) ? pk[g.pidx(i, j, k)] : 0.0;
 			return a > b ? a : b;
 		}
-		SCOUR_HD inline double kface_v(const double* pk, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double kface_v(const double* pk, MacGrid g, int i, int j, int k)
 		{
 			double a = (j - 1 >= 0 && j - 1 < g.ny) ? pk[g.pidx(i, j - 1, k)] : 0.0;
 			double b = (j >= 0 && j < g.ny) ? pk[g.pidx(i, j, k)] : 0.0;
 			return a > b ? a : b;
 		}
-		SCOUR_HD inline double kface_w(const double* pk, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double kface_w(const double* pk, MacGrid g, int i, int j, int k)
 		{
 			double a = (k - 1 >= 0 && k - 1 < g.nz) ? pk[g.pidx(i, j, k - 1)] : 0.0;
 			double b = (k >= 0 && k < g.nz) ? pk[g.pidx(i, j, k)] : 0.0;

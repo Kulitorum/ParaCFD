@@ -16,7 +16,7 @@
 
 #include <cuda_runtime.h> // float4, cudaStream_t
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	// Which scalar of the {u,v,w,p} state to colour.
 	enum class Field : int
@@ -42,7 +42,7 @@ namespace scour::gui
 	// nearest MAC cell, reduced to the chosen scalar, and colour-mapped over [vmin,vmax].
 	struct SliceParams
 	{
-		scour::core::MacGrid grid; // MAC geometry (nx,ny,nz,h)
+		windcfd::core::MacGrid grid; // MAC geometry (nx,ny,nz,h)
 		Axis axis = Axis::Y;       // plane normal
 		float plane_pos = 0.0f;    // world coordinate [m] of the plane along `axis`
 		int nu = 128;              // mesh resolution along in-plane axis 1
@@ -55,9 +55,9 @@ namespace scour::gui
 	// World position of mesh vertex (a,b) on the slice plane. Shared by the colour path
 	// and the host that builds the static GL position buffer, so geometry and sampling
 	// agree exactly. Returns SI metres.
-	SCOUR_HD inline void slice_vertex_world(const SliceParams& sp, int a, int b, float& x, float& y, float& z)
+	WINDCFD_HD inline void slice_vertex_world(const SliceParams& sp, int a, int b, float& x, float& y, float& z)
 	{
-		const scour::core::MacGrid& g = sp.grid;
+		const windcfd::core::MacGrid& g = sp.grid;
 		float Lx = (float)(g.nx * g.h), Ly = (float)(g.ny * g.h), Lz = (float)(g.nz * g.h);
 		float s = (sp.nu > 1) ? (float)a / (float)(sp.nu - 1) : 0.0f;
 		float t = (sp.nv > 1) ? (float)b / (float)(sp.nv - 1) : 0.0f;
@@ -94,9 +94,9 @@ namespace scour::gui
 	// scalar (same cell-centred sampling as the slice fill), so the reduced range matches the display.
 	// `p` may be null (⇒ Pressure samples as 0), matching the slice fill.
 	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, scour::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
+		const unsigned char* solid, windcfd::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
 
 	// CPU reference (host fields → out3[3]) with identical arithmetic. Used by the GPU-vs-CPU test.
 	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, scour::core::MacGrid g, Field field, float out3[3]);
+		const unsigned char* solid, windcfd::core::MacGrid g, Field field, float out3[3]);
 }

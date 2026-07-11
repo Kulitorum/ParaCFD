@@ -8,18 +8,18 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{
-		SCOUR_HD inline double uc(const double* u, MacGrid g, BC bc, int i, int j, int k)
+		WINDCFD_HD inline double uc(const double* u, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_u(u, g, bc, i, j, k) + fetch_u(u, g, bc, i + 1, j, k)); }
-		SCOUR_HD inline double vc(const double* v, MacGrid g, BC bc, int i, int j, int k)
+		WINDCFD_HD inline double vc(const double* v, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_v(v, g, bc, i, j, k) + fetch_v(v, g, bc, i, j + 1, k)); }
-		SCOUR_HD inline double wc(const double* w, MacGrid g, BC bc, int i, int j, int k)
+		WINDCFD_HD inline double wc(const double* w, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_w(w, g, bc, i, j, k) + fetch_w(w, g, bc, i, j, k + 1)); }
 
-		SCOUR_HD inline double smag_nut(const double* u, const double* v, const double* w,
+		WINDCFD_HD inline double smag_nut(const double* u, const double* v, const double* w,
 			MacGrid g, BC bc, double Cs, int i, int j, int k)
 		{
 			double inv = 1.0 / g.h, inv2 = 0.5 / g.h;
@@ -48,7 +48,7 @@ namespace scour::core
 		}
 
 		// diffuse one component (comp: 0=u,1=v,2=w) into out.
-		SCOUR_HD inline void diffuse_node(int comp, const double* field, const double* nut,
+		WINDCFD_HD inline void diffuse_node(int comp, const double* field, const double* nut,
 			double* out, MacGrid g, BC bc, double dt, double nu, int i, int j, int k)
 		{
 			int idx; // interior test inlined per comp

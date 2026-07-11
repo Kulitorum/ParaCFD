@@ -7,7 +7,7 @@
 
 #include <cmath>
 
-namespace scour::core
+namespace windcfd::core
 {
 	PrecursorLibrary::PrecursorLibrary(MacGrid g, double record_hz) : g_(g)
 	{

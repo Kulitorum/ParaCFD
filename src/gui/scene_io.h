@@ -33,17 +33,17 @@
 #include <string>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	// The live DYNAMIC state at a saved step, gathered from the core on the worker thread.
 	// Field arrays are host DOUBLE here (as read from the device); the writer downcasts the big ones.
 	struct CheckpointState
 	{
-		scour::core::MacGrid grid;
+		windcfd::core::MacGrid grid;
 		long long steps = 0;
 		double sim_time = 0.0;
-		scour::core::ChannelBC bc;                     // live inlet speed/profile at save time
-		int solid_mode = scour::core::SOLID_NOSLIP;    // interior-obstacle surface mode (= bc.solid_mode)
+		windcfd::core::ChannelBC bc;                     // live inlet speed/profile at save time
+		int solid_mode = windcfd::core::SOLID_NOSLIP;    // interior-obstacle surface mode (= bc.solid_mode)
 		bool bed_inlet_mask = false;
 
 		std::vector<double> u, v, w, p;                // MAC face velocities + cell pressure
@@ -56,8 +56,8 @@ namespace scour::gui
 	{
 		SimRecipe recipe;                              // grid, bc, pr, base_solid, init, provenance, info
 		bool has_mesh = false;
-		scour::core::TriMesh mesh;                     // display STEP mesh (metres); empty ⇒ none
-		scour::core::ModelPlacement place;             // where the mesh sits (display translate)
+		windcfd::core::TriMesh mesh;                     // display STEP mesh (metres); empty ⇒ none
+		windcfd::core::ModelPlacement place;             // where the mesh sits (display translate)
 	};
 
 	// A complete .scn = the static definition + the full dynamic state.

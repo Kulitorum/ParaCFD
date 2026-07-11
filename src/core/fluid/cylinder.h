@@ -9,7 +9,7 @@
 
 #include "core/fluid/channel_bc.h"
 
-namespace scour::core
+namespace windcfd::core
 {
 	struct CylinderConfig
 	{

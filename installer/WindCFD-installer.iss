@@ -1,7 +1,7 @@
 ; ============================================================================================
-; ScourProtection — Inno Setup installer (signed).
+; WindCFD — Inno Setup installer (signed).
 ;
-; Packs the CMake Release build of scour-gui.exe together with its full runtime closure:
+; Packs the CMake Release build of windcfd-gui.exe together with its full runtime closure:
 ;   - Qt 6.11 (windeployqt output: Qt6*.dll + the platforms/styles/imageformats/... plugin dirs)
 ;   - OpenCascade 8.0 STEP toolkits (TK*.dll) + their 3rdparty DLLs (freetype/brotli/bz2/png/zlib)
 ;   - Qt's software-GL + RHI shader-compiler DLLs (opengl32sw.dll, dxcompiler.dll, dxil.dll)
@@ -15,7 +15,7 @@
 ; machine (COBOD's Sectigo code-signing cert on a SafeNet eToken), identical to cobod-slicer:
 ;   signtool sign /n "COBOD International A/S" /tr http://timestamp.sectigo.com /td sha256 /fd sha256 $p
 ; The token must be plugged in (and its password entered when prompted) at COMPILE time. Both the
-; installed scour-gui.exe (Flags: sign), the uninstaller (SignedUninstaller) and the generated
+; installed windcfd-gui.exe (Flags: sign), the uninstaller (SignedUninstaller) and the generated
 ; setup .exe are signed. If you have no token, comment out SignTool + SignedUninstaller + the
 ; `sign` flag below to build an UNSIGNED installer.
 ;
@@ -35,7 +35,7 @@
 #endif
 
 [Setup]
-; A unique AppId for ScourProtection (distinct from cobod-slicer's).
+; A unique AppId for WindCFD (distinct from cobod-slicer's).
 AppId={{97A3AF63-1CBF-4E6A-84FC-05CA7C189F42}
 AppName={#TargetProduct}
 AppVerName={#TargetProduct} v{#VersionNumber}
@@ -114,7 +114,7 @@ Source: "{#ProjectDir}\Experiments\V000 Code tests\*.stp"; DestDir: "{app}\Exper
 
 ; --- Bundled ffmpeg for the MP4 recorder (VideoRecorder::findFfmpeg picks it up from {app}).
 ;     Comment out FFmpeg_Exe in setupvars.iss to skip bundling; a wrong path skips it too (the
-;     recorder then falls back to ffmpeg on PATH or the SCOUR_FFMPEG env var). ------------------
+;     recorder then falls back to ffmpeg on PATH or the WINDCFD_FFMPEG env var). ------------------
 #ifdef FFmpeg_Exe
 Source: "{#FFmpeg_Exe}"; DestDir: "{app}"; DestName: "ffmpeg.exe"; Flags: ignoreversion skipifsourcedoesntexist
 #endif

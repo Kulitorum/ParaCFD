@@ -18,7 +18,7 @@
 
 #include <cstdio>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	namespace
 	{
@@ -91,7 +91,7 @@ namespace scour::gui
 	}
 
 	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, scour::core::MacGrid g, Field field, FieldRange* out)
+		const unsigned char* solid, windcfd::core::MacGrid g, Field field, FieldRange* out)
 	{
 		if (!handle || !out) return false;
 		SliceResource* h = reinterpret_cast<SliceResource*>(handle);

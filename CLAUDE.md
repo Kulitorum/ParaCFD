@@ -1,4 +1,4 @@
-# CLAUDE.md — ScourProtection
+# CLAUDE.md — WindCFD
 
 3D morphodynamic simulator (C++/CUDA + Qt6) that ranks 3D-printed concrete scour-protection
 shapes by how much sand they trap from tidal flow. Owner: MH (COBOD).
@@ -145,25 +145,25 @@ ctest --test-dir build -C Release -L gate_M5 --output-on-failure
   1=Engelund–Fredsøe — the Roulund 2005 form for M6/M7), `morfac` M, `dz_limit_frac` (0.05·h),
   and per-process on/off. Sediment consumes only {u,v,w,ν_t,τ_b}: τ_b (grain-skin, per-column
   vector) is an INPUT here (synthesised in the gate; wired from `fluid/bedshear.cu` in M6).
-G1 GUI (`scour-gui`, Qt 6.11.1 + GL 4.3 core slice viewer). Verified working
-(G1, 2026-07-08). Qt is ON by default now (`-DSCOUR_ENABLE_QT=ON`); reconfigure once so
+G1 GUI (`windcfd-gui`, Qt 6.11.1 + GL 4.3 core slice viewer). Verified working
+(G1, 2026-07-08). Qt is ON by default now (`-DWINDCFD_ENABLE_QT=ON`); reconfigure once so
 CMake picks it up, then build the target. Running the exe needs the Qt bin dir + the
 `platforms` plugin on PATH (the VS build does not deploy them):
 ```
-cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DSCOUR_ENABLE_QT=ON   # arch default 75;86;89
-cmake --build build --config Release --target scour-gui
+cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DWINDCFD_ENABLE_QT=ON   # arch default 75;86;89
+cmake --build build --config Release --target windcfd-gui
 # run (PowerShell): put Qt on PATH so the DLLs + qwindows platform plugin resolve
 $env:Path = "C:\Qt\6.11.1\msvc2022_64\bin;" + $env:Path
 $env:QT_QPA_PLATFORM_PLUGIN_PATH = "C:\Qt\6.11.1\msvc2022_64\plugins\platforms"
-build/Release/scour-gui.exe configs/g1_viewer.json            # interactive
-build/Release/scour-gui.exe configs/g1_viewer_full.json       # full 10x10x5 m @ h=5cm (4M cells)
+build/Release/windcfd-gui.exe configs/g1_viewer.json            # interactive
+build/Release/windcfd-gui.exe configs/g1_viewer_full.json       # full 10x10x5 m @ h=5cm (4M cells)
 ```
 gate_G1 (automated half): launches offscreen-capable, runs configs/g1_viewer.json for
 10 s, exits 0 on scripted auto-close. ctest inherits your shell env, so set the Qt PATH
 first:
 ```
 ctest --test-dir build -C Release -L gate_G1 --output-on-failure
-# directly: build/Release/scour-gui.exe configs/g1_viewer.json --autoclose-ms 10000
+# directly: build/Release/windcfd-gui.exe configs/g1_viewer.json --autoclose-ms 10000
 ```
 - G1 viz add-ons (2026-07-08, GUI-only — all on the main thread, decoupled render/step untouched;
   verified 59–68 fps on the full 4M-cell fluid viewer AND the seabed scenario, gate_G1 + unit suite
@@ -288,7 +288,7 @@ ctest --test-dir build -C Release -L gate_G1 --output-on-failure
     signature), **sand mass err 5.2e-07**, 528 steps, exit 0). `main_window.cpp addSand`; `sim_worker.cpp
     requestSeabedConversion/apply_seabed_conversion`; `sim_setup.cpp build_seabed_from_structure/assemble_seabed`.
   - **Recent Files** submenu (last 8 STEP paths **and saved scenes**, MRU-first, persisted via
-    `QSettings("COBOD","ScourProtection")` key `recentStepFiles`; missing files pruned on open;
+    `QSettings("COBOD","WindCFD")` key `recentStepFiles`; missing files pruned on open;
     **Clear Recent**). A recent entry dispatches by extension: `.scn` → full scene restore, else a STEP
     load. Updated on every STEP open + on a manual **Save Scene** (numbered `.scn` checkpoints are NOT
     added). `main_window.cpp addRecentFile/rebuildRecentMenu`.
@@ -317,7 +317,7 @@ ctest --test-dir build -C Release -L gate_G1 --output-on-failure
     <path>` / `--autosave <n>` (verified: fluid save@417→restore continues to 945; seabed convert→save→restore
     resumes the scoured bed z_b∈[0.21,0.35] with mass err ~1e-6; auto-save series `rt_seabed.{1800,2100,…}.scn`;
     numbered-checkpoint load resumes at exactly its step). Qt-free `scene_io` (std streams + nlohmann) ⇒ no Qt
-    in the physics libs. **`scene_io.cpp` is a `scour-gui` source** (CMake).
+    in the physics libs. **`scene_io.cpp` is a `windcfd-gui` source** (CMake).
   - **Show slice / Show model / Show solid voxels / Show sediment voxels / Show bed** toggles
     (independent; default ON) — `SliceViewer::setShowSlice/setShowModel/setShowSolidVoxels/
     setShowSedimentVoxels/setShowBed` gate the coloured slice plane, the STEP-mesh, the two voxel
@@ -449,13 +449,13 @@ ctest --test-dir build -C Release -L gate_G1 --output-on-failure
 - GUI code is `src/gui/`: main.cpp (GL 4.3 `QSurfaceFormat` BEFORE `QApplication`,
   slicer main.cpp:474 pattern), camera.h (self-contained orbit/pan/zoom, QMatrix4x4),
   slice_viewer.{h,cpp} (`QOpenGLWidget`+`QOpenGLFunctions_4_3_Core`, ALL GL on the main
-  thread — every entry point guards `SCOUR_ASSERT_GL_THREAD()`, a Qt **debug** assertion),
+  thread — every entry point guards `WINDCFD_ASSERT_GL_THREAD()`, a Qt **debug** assertion),
   sim_worker.{h,cpp} (steps the M2 `ChannelFluidCore` on a QThread, NO GL), sim_setup.cpp
   (builds the sim from JSON — parses directly, not via the strict core Config loader, so
   viewer-only keys U/Re/cylinder are allowed), main_window.cpp (queued-signal hand-off,
-  cobod-slicer mainwindow.cpp:1691 pattern). main_stub.cpp is the `-DSCOUR_ENABLE_QT=OFF`
+  cobod-slicer mainwindow.cpp:1691 pattern). main_stub.cpp is the `-DWINDCFD_ENABLE_QT=OFF`
   fallback (Qt-less hosts).
-- CUDA-GL interop is split into a Qt-free static lib `scour_gui_cuda` so nvcc never sees
+- CUDA-GL interop is split into a Qt-free static lib `windcfd_gui_cuda` so nvcc never sees
   Qt host flags: slice_field.cu (pure sampler+colourmap kernel, one `__host__ __device__`
   evaluator ⇒ the GPU-vs-CPU parity test `tests/test_slice_field.cu` is exact, no GL/Qt
   needed) + slice_gl.cu (the ONLY GL-header TU: `cudaGraphicsGLRegisterBuffer`, zero-copy
@@ -474,21 +474,21 @@ ctest --test-dir build -C Release -L gate_G1 --output-on-failure
   divergence gate robust). Switch velocity to float for the 32M-cell hero grids later.
 - GPU-vs-CPU kernel parity tests: `tests/test_fluid_kernels.cu` (rel. max-norm 1e-5);
   MGPCG convergence/grid-independence: `tests/test_mgpcg.cu`.
-STEP model loading in scour-gui (OpenCascade; increment 1 = LOAD + DISPLAY ONLY, no
+STEP model loading in windcfd-gui (OpenCascade; increment 1 = LOAD + DISPLAY ONLY, no
 voxelization yet). File menu → "Open STEP…" (and "Close model"), or the CLI flag
 `--load-step <path>` (loads at startup; smoke-testable headlessly with `--offscreen`).
 Loads + triangulates the STEP into a lit GL mesh drawn in the domain (centred on x/y,
 sat on the bed z=0) over the live sim. Verified (2026-07-08): cube.step → 12 triangles,
-bbox 0.01 m cube; the V000 unit (`Experiments/…/ScourProtection V000_001.stp`) → 70
+bbox 0.01 m cube; the V000 unit (`Experiments/…/WindCFD V000_001.stp`) → 70
 triangles, bbox 7.2×7.2×2.0 m; both at ~60 fps, exit 0, double-clickable with NO OCC/Qt on
 PATH.
 ```
-build/Release/scour-gui.exe --load-step "C:/CODE/cobod-slicer/tests/inputs/cube.step" --offscreen --autoclose-ms 8000
+build/Release/windcfd-gui.exe --load-step "C:/CODE/cobod-slicer/tests/inputs/cube.step" --offscreen --autoclose-ms 8000
 ```
-- **`scour_geometry`** static lib (`src/core/geometry/step_import.{h,cpp}`) is the ONLY target
-  that links OpenCascade — it mirrors how `scour_gui_cuda` isolates the GL/CUDA interop, so
-  `libscour` and every physics gate test stay OCC-FREE. `step_import.h` is OCC-free (a plain
-  `TriMesh{positions,normals,indices,bbox}`); all OCC includes live in the .cpp. scour-gui
+- **`windcfd_geometry`** static lib (`src/core/geometry/step_import.{h,cpp}`) is the ONLY target
+  that links OpenCascade — it mirrors how `windcfd_gui_cuda` isolates the GL/CUDA interop, so
+  `libwindcfd` and every physics gate test stay OCC-FREE. `step_import.h` is OCC-free (a plain
+  `TriMesh{positions,normals,indices,bbox}`); all OCC includes live in the .cpp. windcfd-gui
   links it; the physics core does NOT depend on it.
 - OCC linkage (OpenCascade 8.0, `C:/OpenCASCADE-8.0/build2`): inc = `${OCC}/inc`, libs =
   `${OCC}/win64/vc14/lib`, DLLs = `${OCC}/win64/vc14/bin`. Minimal STEP+mesh toolkits linked:
@@ -496,7 +496,7 @@ build/Release/scour-gui.exe --load-step "C:/CODE/cobod-slicer/tests/inputs/cube.
   (PRIVATE on the static lib, but CMake still propagates them for the final link). Compile with
   `OCCT_NO_DEBUG OCCT_NO_DEPRECATED` (+ the 8.0 `NCollectionAliases` deprecated-typedef dir).
 - ⚠ **DLL deployment (double-clickable):** `windeployqt` handles ONLY Qt, so a CMake POST_BUILD
-  (`scour_deploy_occ_dlls()`) copies the OCC runtime **DLL closure** next to the exe: the 23-DLL
+  (`windcfd_deploy_occ_dlls()`) copies the OCC runtime **DLL closure** next to the exe: the 23-DLL
   transitive set of the link toolkits (dumpbin `/dependents` — `TKDESTEP.dll` pulls in
   `TKDE/TKXCAF/TKLCAF/TKShHealing → TKV3d/TKService`) **plus 6 3rdparty DLLs**
   (`freetype brotlicommon brotlidec bz2 libpng16 zlib1` — `freetype.dll` is a LOAD-TIME dep of
@@ -507,7 +507,7 @@ build/Release/scour-gui.exe --load-step "C:/CODE/cobod-slicer/tests/inputs/cube.
   to METRES; (b) **winding** — swap two triangle indices when `face.Orientation()==TopAbs_REVERSED`
   for OUTWARD normals (this is the OPPOSITE branch from cobod-slicer, whose meshes are globally
   inverted); (c) per-vertex normals = area-weighted average (sum of un-normalised face crosses).
-- The STEP loader has its OWN OCC-linked test exe **`scour_geometry_tests`** (`tests/test_step_import.cpp`,
+- The STEP loader has its OWN OCC-linked test exe **`windcfd_geometry_tests`** (`tests/test_step_import.cpp`,
   label `unit`, DISCOVERY_MODE PRE_TEST so discovery runs after the DLL deploy) loading the committed
   `tests/inputs/cube.step` — the physics `scour_tests` stays OCC-free. `74/74 unit` PASS incl. it.
 STEP → fluid VOXELIZATION (increment 2 — the STEP model becomes a live solid obstacle the flow
@@ -518,9 +518,9 @@ domain → **watertight, 53668 solid cells, vol err 0.021% (<2%), 0 thin cells**
 build/Release/scour_voxel_flow_gate.exe               # headless flow-diversion gate (PASS)
 ctest --test-dir build -C Release -L voxel_flow       # same, as ctest
 # GUI: File→Open STEP… — the loaded model IS the obstacle (auto-voxelized on load; no toggle); or headless:
-build/Release/scour-gui.exe --config configs/g1_viewer_full.json --load-step <model.stp> --autoclose-ms 9000
+build/Release/windcfd-gui.exe --config configs/g1_viewer_full.json --load-step <model.stp> --autoclose-ms 9000
 ```
-- **Voxelizer** (`src/core/geometry/voxelize.{h,cpp}`, in **libscour**, OCC-FREE — needs only the
+- **Voxelizer** (`src/core/geometry/voxelize.{h,cpp}`, in **libwindcfd**, OCC-FREE — needs only the
   mesh): `voxelize_mesh(TriMesh, MacGrid, ModelPlacement, …)` → the `ChannelBC` solid mask
   (`std::vector<unsigned char>`, 1=solid, `g.pidx`, same format as `build_cylinder_mask`). Watertight
   **ray-parity** (axis-aligned +z ray, even-odd triangle-crossing count) as the per-point inside test,
@@ -532,8 +532,8 @@ build/Release/scour-gui.exe --config configs/g1_viewer_full.json --load-step <mo
   ≈70 tris; voxelize runs ONCE at load, obstacle is rigid); only accel is a per-triangle xy-AABB cull.
   ⚠ TIE-BREAK: an asymmetric sub-cell nudge (ox≠oy) keeps sample points off axis-aligned edges/
   diagonals so a coplanar-triangle shared edge is owned by exactly one triangle (else parity flips).
-- **`TriMesh` moved to OCC-free `core/geometry/tri_mesh.h`** (libscour include path) so the voxelizer
-  consumes it with NO scour_geometry/OCC dependency; `step_import.h` includes it. **`ModelPlacement`
+- **`TriMesh` moved to OCC-free `core/geometry/tri_mesh.h`** (libwindcfd include path) so the voxelizer
+  consumes it with NO windcfd_geometry/OCC dependency; `step_import.h` includes it. **`ModelPlacement`
   (`core/geometry/model_placement.h`, `place_model_on_bed`)** is the ONE shared display+voxelize
   transform (centre x/y, sit min-z on the bed) — the mask lands exactly where the mesh is drawn.
 - **Live injection (cross-thread):** loading a STEP (File→Open STEP… / CLI `--load-step`, `--noslip`
@@ -579,7 +579,7 @@ high, rises where sheltered). V000 offscreen: 53668 structure cells seated at z=
 steps/s, z_b min 1.000→0.956 / max →1.010, max_ustar bounded (no blow-up).
 ```
 # GUI (windowed; offscreen has no GL so it steps but doesn't render):
-build/Release/scour-gui.exe --scenario configs/seabed_v000.json   # or pass the file positionally
+build/Release/windcfd-gui.exe --scenario configs/seabed_v000.json   # or pass the file positionally
 # File menu → "Load seabed scenario…" loads one at runtime (rebuilds core+engine on the worker).
 ctest --test-dir build -C Release -L seabed_flat --output-on-failure   # headless flat+box gate
 build/Release/scour_seabed_gate.exe                                    # same, directly
@@ -590,7 +590,7 @@ build/Release/scour_seabed_gate.exe                                    # same, d
   `core.update_solid()` re-masks the flow IN PLACE (flow preserved, unlike a factory rebuild). Decoupled
   render/step + `display_mutex` snapshot pattern intact; the worker also publishes a per-column z_b
   snapshot for the bed viz. NO GL off the main thread.
-- **Engine** (`src/core/sediment/seabed_engine.{h,cpp}`, Qt-free libscour) drives the gate-verified
+- **Engine** (`src/core/sediment/seabed_engine.{h,cpp}`, Qt-free libwindcfd) drives the gate-verified
   kernels UNCHANGED (`suspended.*`, `bedstate.*`, `avalanche.*`, `bedshear_*` smooth/EMA) + THREE thin
   bridge kernels (`src/core/sediment/seabed_morpho.{h,cu}`, GPU-vs-CPU parity `tests/test_seabed.cu`):
   (1) **seabed_bedshear** — τ_b probed at z_p ABOVE the CURRENT bed top z_b=G/c_pack (the gate wall model
@@ -756,7 +756,7 @@ python tools/gen_report.py out.csv -o m9_report.html               # ranked HTML
 - `SeabedMorpho` gained two pure DIAGNOSTICS (no physics feedback ⇒ existing gates unaffected):
   `clip_fraction()`/`reset_clip_stats()` (MORFAC hit-rate) and `structure_discard()` (sand removed by
   the bed clamp+pin, for the open-budget audit). `tests/gate_m9_main.cpp`, `configs/m9_tidal.json`.
-- **Interactive GUI driver (scour-gui, GUI-only — gate_G1 PASS, no physics change):** a **Tidal reversal
+- **Interactive GUI driver (windcfd-gui, GUI-only — gate_G1 PASS, no physics change):** a **Tidal reversal
   (live)** section in the Simulation dock (enable + Peak U_max / Plateau / Slack-ramp spins). When on, the
   worker drives `U_d(t)` each step via `core.set_inlet_speed(|U_d|)` + `core.set_flow_direction(sign)`
   (+ `engine.set_inlet_speed`), face-swapping at slack — so you can watch a scour hole reorganize as the
@@ -784,7 +784,7 @@ python tools/gen_report.py out.csv -o m9_report.html               # ranked HTML
 ## Style & conventions
 - `.clang-format` copied from cobod-slicer (Allman + IndentBraces, tabs, ColumnLimit 0).
 - Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`).
-- One class per file; snake_case filenames; namespaces `scour::core`, `scour::gui`.
+- One class per file; snake_case filenames; namespaces `windcfd::core`, `windcfd::gui`.
 - Units: SI everywhere in code (m, s, kg, Pa); document any field's units at declaration.
 
 ## Reference projects on this machine

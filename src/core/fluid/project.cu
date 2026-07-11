@@ -19,15 +19,15 @@
 #include <cstdio>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{
-		SCOUR_HD inline int nnb_count(MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline int nnb_count(MacGrid g, int i, int j, int k)
 		{
 			return (i > 0) + (i < g.nx - 1) + (j > 0) + (j < g.ny - 1) + (k > 0) + (k < g.nz - 1);
 		}
-		SCOUR_HD inline double nb_sum(const double* p, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double nb_sum(const double* p, MacGrid g, int i, int j, int k)
 		{
 			double s = 0.0;
 			if (i > 0) s += p[g.pidx(i - 1, j, k)];
@@ -39,7 +39,7 @@ namespace scour::core
 			return s;
 		}
 
-		SCOUR_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
+		WINDCFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
 			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]
 				+ v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]
@@ -86,7 +86,7 @@ namespace scour::core
 		}
 
 		// factor-2 transfer: fine cell fi maps to coarse index space cpos = fi/2 - 0.25.
-		SCOUR_HD inline void axis_stencil(int fi, int nc, int& C0, int& C1, double& w0, double& w1)
+		WINDCFD_HD inline void axis_stencil(int fi, int nc, int& C0, int& C1, double& w0, double& w1)
 		{
 			double cpos = (fi + 0.5) * 0.5 - 0.5;
 			int Cb = (int)floor(cpos); double t = cpos - Cb;

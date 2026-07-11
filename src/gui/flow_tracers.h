@@ -24,7 +24,7 @@
 #include <array>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	// Seed + integration settings. The inlet seed lattice is sized from `density` (count along the
 	// larger inlet dimension) so the spacing is isotropic. speed_scale maps |vel| to the hot end of

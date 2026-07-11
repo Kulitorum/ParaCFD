@@ -50,14 +50,14 @@
 #include <utility>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
-	MainWindow::MainWindow(std::unique_ptr<scour::core::ChannelFluidCore> core, const SimRecipe& recipe,
+	MainWindow::MainWindow(std::unique_ptr<windcfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
 		QWidget* parent)
 		: QMainWindow(parent), recipe_(recipe)
 	{
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
+		setWindowTitle(QString("WindCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
 			.arg(QString::fromStdString(info.name))
 			.arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
 
@@ -77,7 +77,7 @@ namespace scour::gui
 		QAction* closeStep = fileMenu->addAction("Close model");
 		connect(closeStep, &QAction::triggered, this, [this] {
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
-			model_mesh_ = scour::core::TriMesh{};
+			model_mesh_ = windcfd::core::TriMesh{};
 			if (viewer_) viewer_->clearMesh();
 			updateGizmoUi(); // no model ⇒ disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
@@ -540,12 +540,12 @@ namespace scour::gui
 		syncGridControls(); // seed the domain/h boxes + readout from the current sim
 	}
 
-	void MainWindow::spawnWorker(std::unique_ptr<scour::core::ChannelFluidCore> core,
+	void MainWindow::spawnWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core,
 		long long steps0, double t0)
 	{
 		// The checkpoint hand-off carries a shared_ptr across a queued connection — register it once.
 		static bool s_meta = false;
-		if (!s_meta) { qRegisterMetaType<scour::gui::CheckpointStatePtr>("scour::gui::CheckpointStatePtr"); s_meta = true; }
+		if (!s_meta) { qRegisterMetaType<windcfd::gui::CheckpointStatePtr>("windcfd::gui::CheckpointStatePtr"); s_meta = true; }
 
 		worker_ = new SimWorker(std::move(core)); // no parent: moved to worker_thread_
 		if (play_btn_) worker_->setPlaying(play_btn_->isChecked()); // honour the current play/pause state
@@ -674,7 +674,7 @@ namespace scour::gui
 		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
-			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == scour::core::INLET_LOGLAW ? 1 : 0);
+			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == windcfd::core::INLET_LOGLAW ? 1 : 0);
 		}
 		updateGridReadout();
 	}
@@ -756,7 +756,7 @@ namespace scour::gui
 		// re-voxelized as the obstacle at the new h if it was injected).
 		const std::string src = recipe_.source_config;
 		const bool had_model = !model_mesh_.empty();
-		scour::core::TriMesh keep_mesh = had_model ? model_mesh_ : scour::core::TriMesh{};
+		windcfd::core::TriMesh keep_mesh = had_model ? model_mesh_ : windcfd::core::TriMesh{};
 
 		// Preserve the user's gizmo placement (move/rotate/scale) across the rebuild so the model is
 		// re-voxelized WHERE IT WAS PLACED, not re-centred. The "Enable manipulator" state persists in the viewer.
@@ -765,7 +765,7 @@ namespace scour::gui
 		teardownWorkerForReload();
 
 		SimRecipe recipe; std::string warn;
-		std::unique_ptr<scour::core::ChannelFluidCore> core = build_sim(src, recipe, warn, &ov);
+		std::unique_ptr<windcfd::core::ChannelFluidCore> core = build_sim(src, recipe, warn, &ov);
 		if (!core)
 		{
 			statusBar()->showMessage(QString("apply failed: %1").arg(QString::fromStdString(warn)), 6000);
@@ -775,7 +775,7 @@ namespace scour::gui
 		recipe_ = recipe;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
+		setWindowTitle(QString("WindCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
 		if (viewer_)
 		{
@@ -790,7 +790,7 @@ namespace scour::gui
 		// IS the obstacle).
 		if (had_model && viewer_)
 		{
-			viewer_->setMesh(scour::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
+			viewer_->setMesh(windcfd::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);    // re-apply the user's placement (setMesh reset it)
 			setModelAsObstacle(true);                            // re-voxelizes at viewer_->modelPlacement()
 			updateGizmoUi();
@@ -836,7 +836,7 @@ namespace scour::gui
 		// from pruning it until the write lands (onCheckpointReady clears it). Numbered <name>.<step>.scn
 		// checkpoints are auto-saves, not user scenes — never added.
 		scene_base_path_ = path;
-		if (!scour::gui::is_numbered_checkpoint(path.toStdString()))
+		if (!windcfd::gui::is_numbered_checkpoint(path.toStdString()))
 		{
 			pending_recent_keep_ = QFileInfo(path).absoluteFilePath();
 			addRecentFile(path);
@@ -845,7 +845,7 @@ namespace scour::gui
 		return true;
 	}
 
-	void MainWindow::onCheckpointReady(scour::gui::CheckpointStatePtr state, qint64 tag)
+	void MainWindow::onCheckpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag)
 	{
 		if (!state) return;
 		SceneFile sf;
@@ -905,7 +905,7 @@ namespace scour::gui
 
 		// Offer sibling restart points (the base scene + its auto-saved checkpoints) so the user can pick
 		// a step to resume from, per "choose a restartpoint when loading".
-		auto cps = scour::gui::list_checkpoints(fn.toStdString());
+		auto cps = windcfd::gui::list_checkpoints(fn.toStdString());
 		if (cps.size() > 1)
 		{
 			QStringList items; int cur = 0;
@@ -928,7 +928,7 @@ namespace scour::gui
 	bool MainWindow::loadSceneFromPath(const QString& path)
 	{
 		SceneFile sf; std::string warn;
-		if (!scour::gui::read_scene(path.toStdString(), sf, warn))
+		if (!windcfd::gui::read_scene(path.toStdString(), sf, warn))
 		{
 			std::fprintf(stderr, "[scene] load FAILED (%s): %s\n", path.toUtf8().constData(), warn.c_str());
 			statusBar()->showMessage(QString("scene load failed: %1").arg(QString::fromStdString(warn)), 6000);
@@ -936,7 +936,7 @@ namespace scour::gui
 		}
 		restoreScene(sf);
 		scene_base_path_ = path;
-		if (!scour::gui::is_numbered_checkpoint(path.toStdString())) addRecentFile(path);
+		if (!windcfd::gui::is_numbered_checkpoint(path.toStdString())) addRecentFile(path);
 		statusBar()->showMessage(QString("scene restored: %1 @ step %2")
 			.arg(QFileInfo(path).fileName()).arg(sf.state.steps), 6000);
 		return true;
@@ -957,17 +957,17 @@ namespace scour::gui
 		if ((int)solid.size() != recipe_.grid.p_count()) solid = recipe_.base_solid;
 		auto core = make_core(recipe_, solid, st.solid_mode);
 		core->set_bed_inlet_mask(st.bed_inlet_mask);
-		if (st.bc.inlet_mode == scour::core::INLET_LOGLAW) core->set_inlet_profile(true, st.bc.z0, st.bc.bed_datum);
+		if (st.bc.inlet_mode == windcfd::core::INLET_LOGLAW) core->set_inlet_profile(true, st.bc.z0, st.bc.bed_datum);
 		core->set_inlet_speed(st.bc.U_inlet);
 		core->load_state_host(st.u, st.v, st.w, st.p);
 
 		// GUI-side provenance so a later Apply rebuilds correctly.
-		model_mesh_ = d.has_mesh ? d.mesh : scour::core::TriMesh{};
+		model_mesh_ = d.has_mesh ? d.mesh : windcfd::core::TriMesh{};
 		scene_mesh_ = model_mesh_;
 		scene_place_ = d.place;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("ScourProtection — restored [%1: %2x%3x%4, h=%5 m] @ step %6")
+		setWindowTitle(QString("WindCFD — restored [%1: %2x%3x%4, h=%5 m] @ step %6")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h).arg(st.steps));
 		if (viewer_)
 		{
@@ -982,7 +982,7 @@ namespace scour::gui
 		// solid mask — no re-voxelize).
 		if (d.has_mesh && viewer_)
 		{
-			viewer_->setMesh(scour::core::TriMesh(model_mesh_));
+			viewer_->setMesh(windcfd::core::TriMesh(model_mesh_));
 			viewer_->setModelPlacement(d.place); // restore the saved gizmo placement (move/rotate/scale)
 			model_injected_ = true;
 		}
@@ -1004,7 +1004,7 @@ namespace scour::gui
 	{
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
-		scour::core::TriMesh mesh = scour::core::load_step_mesh(path.toStdString(), 0.1, &err);
+		windcfd::core::TriMesh mesh = windcfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
 		QApplication::restoreOverrideCursor();
 
 		if (mesh.empty())
@@ -1025,7 +1025,7 @@ namespace scour::gui
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
-		scene_place_ = scour::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
+		scene_place_ = windcfd::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
 		if (viewer_) viewer_->setMesh(std::move(mesh));
 		addRecentFile(path);          // remember it in the Recent Files menu (feature 1)
 
@@ -1038,7 +1038,7 @@ namespace scour::gui
 
 	void MainWindow::addRecentFile(const QString& path)
 	{
-		QSettings s("COBOD", "ScourProtection");
+		QSettings s("COBOD", "WindCFD");
 		QStringList files = s.value("recentStepFiles").toStringList();
 		QString abs = QFileInfo(path).absoluteFilePath();
 		files.removeAll(abs);
@@ -1052,7 +1052,7 @@ namespace scour::gui
 	{
 		if (!recent_menu_) return;
 		recent_menu_->clear();
-		QSettings s("COBOD", "ScourProtection");
+		QSettings s("COBOD", "WindCFD");
 		QStringList files = s.value("recentStepFiles").toStringList();
 
 		// Prune entries whose file no longer exists (write the pruned list back). A scene that was just
@@ -1082,7 +1082,7 @@ namespace scour::gui
 		recent_menu_->addSeparator();
 		QAction* clear = recent_menu_->addAction("Clear Recent");
 		connect(clear, &QAction::triggered, this, [this] {
-			QSettings s2("COBOD", "ScourProtection");
+			QSettings s2("COBOD", "WindCFD");
 			s2.remove("recentStepFiles");
 			rebuildRecentMenu();
 		});
@@ -1099,7 +1099,7 @@ namespace scour::gui
 
 		if (on)
 		{
-			using namespace scour::core;
+			using namespace windcfd::core;
 			// Voxelize where the user placed it: use the gizmo's live placement (move/rotate/scale) when a
 			// model is loaded; otherwise the default centre-on-bed. The viewer's placement and its drawn mesh
 			// share one transform, so the solid mask lands exactly under the mesh.

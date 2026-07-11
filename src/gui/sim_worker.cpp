@@ -10,9 +10,9 @@
 #include <cstdio>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
-	using scour::core::MacGrid;
+	using windcfd::core::MacGrid;
 
 	namespace
 	{
@@ -41,7 +41,7 @@ namespace scour::gui
 		mask_gen_.fetch_add(1);
 	}
 
-	bool SimWorker::copyMask(std::vector<unsigned char>& mask, scour::core::MacGrid& grid)
+	bool SimWorker::copyMask(std::vector<unsigned char>& mask, windcfd::core::MacGrid& grid)
 	{
 		std::lock_guard<std::mutex> lk(mask_mtx_);
 		if (mask_snapshot_.empty()) return false;

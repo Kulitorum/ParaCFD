@@ -9,7 +9,7 @@
 
 #include <cmath>
 
-namespace scour::io
+namespace windcfd::io
 {
 	// Deterministic smooth analytic field evaluated at point (i,j,k).
 	// x=i*sx, y=j*sy, z=k*sz. Non-cubic dims are used on purpose to catch

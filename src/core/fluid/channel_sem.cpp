@@ -10,7 +10,7 @@
 #include <cmath>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	ChannelSemResult run_channel_sem(const ChannelSemConfig& cfg)
 	{

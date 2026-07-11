@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	ChannelEmptyResult run_channel_empty(const ChannelEmptyConfig& cfg)
 	{

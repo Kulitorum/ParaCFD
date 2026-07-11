@@ -14,7 +14,7 @@
 
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// ---- Advection (masked MacCormack, RK2 backtrace) ---------------------------
 	void ch_advect_gpu(const double* uIn, const double* vIn, const double* wIn,

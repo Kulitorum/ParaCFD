@@ -1,8 +1,8 @@
-# build_installer.ps1 - build the ScourProtection Release GUI (optional) and compile the signed
+# build_installer.ps1 - build the WindCFD Release GUI (optional) and compile the signed
 # Inno Setup installer. Run from anywhere; paths are resolved relative to this script / the repo.
 #
 #   .\installer\build_installer.ps1                 # compile the SIGNED installer (eToken must be plugged in)
-#   .\installer\build_installer.ps1 -Build          # (re)build scour-gui Release first, then compile
+#   .\installer\build_installer.ps1 -Build          # (re)build windcfd-gui Release first, then compile
 #   .\installer\build_installer.ps1 -NoSign         # compile an UNSIGNED installer (no token needed)
 #   .\installer\build_installer.ps1 -Build -NoSign  # both
 #
@@ -13,7 +13,7 @@
 # NOTE: kept ASCII-only on purpose so it parses under both Windows PowerShell 5.1 and pwsh 7.
 [CmdletBinding()]
 param(
-    [switch]$Build,   # (re)build scour-gui Release before packaging
+    [switch]$Build,   # (re)build windcfd-gui Release before packaging
     [switch]$NoSign   # compile an unsigned installer (passes /DSkipSign to ISCC)
 )
 $ErrorActionPreference = 'Stop'
@@ -28,22 +28,22 @@ $iscc = @(
 if (-not $iscc) { throw "ISCC.exe not found. Install Inno Setup 6." }
 
 if ($Build) {
-    Write-Host "==> Building scour-gui (Release) ..." -ForegroundColor Cyan
+    Write-Host "==> Building windcfd-gui (Release) ..." -ForegroundColor Cyan
     # Free the exe if a previous instance is holding it (it locks during a rebuild).
-    taskkill /F /IM scour-gui.exe 2>$null | Out-Null
-    & cmake --build "$repo\build" --config Release --target scour-gui
+    taskkill /F /IM windcfd-gui.exe 2>$null | Out-Null
+    & cmake --build "$repo\build" --config Release --target windcfd-gui
     if ($LASTEXITCODE -ne 0) { throw "cmake build failed (exit $LASTEXITCODE)" }
 }
 
 $rel = "$repo\build\Release"
-$exe = "$rel\scour-gui.exe"
+$exe = "$rel\windcfd-gui.exe"
 if (-not (Test-Path $exe)) {
-    throw "scour-gui.exe not found at $exe. Build it first (pass -Build, or run the CMake Release build)."
+    throw "windcfd-gui.exe not found at $exe. Build it first (pass -Build, or run the CMake Release build)."
 }
 
 # Preflight: the runtime closure must be present in build\Release, or the installer ships broken (e.g.
 # a missing OCC/Qt DLL = the app won't start on a clean machine). The OCC POST_BUILD deploy only re-runs
-# when scour-gui RELINKS, so build\Release can silently lack DLLs. If any are missing, -Build forces a
+# when windcfd-gui RELINKS, so build\Release can silently lack DLLs. If any are missing, -Build forces a
 # relink (which redeploys them). NB the 6 OCC 3rdparty DLLs are sourced from the OCC install in the .iss,
 # so they are NOT checked here.
 $need = @("TKDESTEP.dll","TKService.dll","Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll",
@@ -53,7 +53,7 @@ if ($missing) {
     throw ("build\Release is missing runtime files: {0}. Re-run with -Build to force a relink + redeploy." -f ($missing -join ", "))
 }
 
-$iss = "$here\ScourProtection-installer.iss"
+$iss = "$here\WindCFD-installer.iss"
 if ($NoSign) {
     Write-Host "==> Compiling UNSIGNED installer ..." -ForegroundColor Yellow
     & $iscc "/DSkipSign" $iss

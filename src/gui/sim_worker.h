@@ -24,7 +24,7 @@
 #include <mutex>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	// Flow-diversion metrics sampled from a settled voxelized-obstacle run (headless assertions
 	// for the --voxelize smoke path). Computed AFTER the worker thread has joined, so touching
@@ -42,7 +42,7 @@ namespace scour::gui
 	{
 		Q_OBJECT
 	public:
-		explicit SimWorker(std::unique_ptr<scour::core::ChannelFluidCore> core, QObject* parent = nullptr)
+		explicit SimWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core, QObject* parent = nullptr)
 			: QObject(parent), core_(std::move(core)) {}
 		~SimWorker() override;
 
@@ -66,11 +66,11 @@ namespace scour::gui
 		// geometry only then — never a per-frame mask copy. copyMask() (main thread) returns the
 		// latest mask + its grid, or false if none.
 		std::uint64_t maskGeneration() const { return mask_gen_.load(); }
-		bool copyMask(std::vector<unsigned char>& mask, scour::core::MacGrid& grid);
+		bool copyMask(std::vector<unsigned char>& mask, windcfd::core::MacGrid& grid);
 
 		// Factory that rebuilds the core with a given obstacle mask + surface mode. Set once
 		// (captures the immutable SimRecipe). Invoked ONLY on the worker thread by run().
-		void setRebuildFactory(std::function<std::unique_ptr<scour::core::ChannelFluidCore>(
+		void setRebuildFactory(std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(
 			const std::vector<unsigned char>&, int)> f) { factory_ = std::move(f); }
 
 		// Queue a core rebuild with a new obstacle mask (thread-safe from the main thread). The
@@ -161,7 +161,7 @@ namespace scour::gui
 		// A checkpoint was gathered on the worker thread (queued → the GUI writes it to disk on the main
 		// thread). `tag` < 0 = manual save; >= 0 = the step count of an auto-save. The shared_ptr keeps the
 		// (large) host state alive until the writer is done; no big copy crosses the connection.
-		void checkpointReady(scour::gui::CheckpointStatePtr state, qint64 tag);
+		void checkpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag);
 
 	private:
 		void alloc_display();     // lazy device snapshot buffers (needs the grid)
@@ -172,16 +172,16 @@ namespace scour::gui
 		void emit_checkpoint(long long tag); // worker-thread: gather full state → emit checkpointReady
 		void publish_mask(const std::vector<unsigned char>& mask); // worker-thread: snapshot the mask + bump gen
 
-		std::unique_ptr<scour::core::ChannelFluidCore> core_;
+		std::unique_ptr<windcfd::core::ChannelFluidCore> core_;
 
 		// Live flow solid-mask snapshot (host), republished only when the mask changes (see above).
 		std::mutex mask_mtx_;
 		std::vector<unsigned char> mask_snapshot_;
-		scour::core::MacGrid mask_grid_{};
+		windcfd::core::MacGrid mask_grid_{};
 		std::atomic<std::uint64_t> mask_gen_{ 0 };
 
 		// Pending core rebuild (obstacle re-injection). Guarded by rebuild_mtx_; flagged atomic.
-		std::function<std::unique_ptr<scour::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;
+		std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;
 		std::mutex rebuild_mtx_;
 		std::vector<unsigned char> pending_mask_;
 		int pending_mode_ = 0;
@@ -247,7 +247,7 @@ namespace scour::gui
 		std::mutex flow_mtx_;
 		std::vector<double> fu_front_, fv_front_, fw_front_, fu_back_, fv_back_, fw_back_;
 		std::vector<unsigned char> fs_front_, fs_back_;
-		scour::core::MacGrid flow_grid_front_{};
+		windcfd::core::MacGrid flow_grid_front_{};
 		int flow_sign_front_ = 1; // current inlet direction snapshotted with the flow (guarded by flow_mtx_)
 		std::chrono::steady_clock::time_point last_flow_pub_{};
 	};

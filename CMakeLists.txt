@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ScourProtection — 3D morphodynamic scour-protection simulator (C++/CUDA + Qt6).
-# Milestone M0: scaffold. Three targets (libscour, scour CLI, scour-gui stub),
+# WindCFD — 3D morphodynamic scour-protection simulator (C++/CUDA + Qt6).
+# Milestone M0: scaffold. Three targets (libwindcfd, scour CLI, windcfd-gui stub),
 # GoogleTest via FetchContent, ctest wiring, JSON config loader, VTI writer.
-project(ScourProtection LANGUAGES CXX CUDA)
+project(WindCFD LANGUAGES CXX CUDA)
 
 # --- Global standards -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -30,11 +30,11 @@ endif()
 
 # CUDA toolkit headers (cuda_runtime.h) for the host .cpp TUs that include them.
 # nvcc adds these implicitly for .cu sources, but MSVC compiling our .cpp needs the
-# path explicitly; exported PUBLIC from libscour so all consumers pick it up.
+# path explicitly; exported PUBLIC from libwindcfd so all consumers pick it up.
 find_package(CUDAToolkit REQUIRED)
 
-# --- libscour (static core, no Qt) -----------------------------------------
-add_library(libscour STATIC
+# --- libwindcfd (static core, no Qt) -----------------------------------------
+add_library(libwindcfd STATIC
 	src/core/config.cpp
 	src/core/vti_writer.cpp
 	src/core/vti_reader.cpp
@@ -65,28 +65,28 @@ add_library(libscour STATIC
 	# (needs only the mesh); the shared model placement + TriMesh headers live in core/geometry/.
 	src/core/geometry/voxelize.cpp
 )
-set_target_properties(libscour PROPERTIES
+set_target_properties(libwindcfd PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
 	CUDA_SEPARABLE_COMPILATION OFF
 	POSITION_INDEPENDENT_CODE ON
 )
-target_compile_features(libscour PUBLIC cxx_std_20)
+target_compile_features(libwindcfd PUBLIC cxx_std_20)
 # cudart_static is built against the static CRT; the rest of the build is /MD.
 # Prefer the dynamic CRT (MSVCRT) everywhere to silence the benign LNK4098.
 if(MSVC)
-	target_link_options(libscour INTERFACE /NODEFAULTLIB:LIBCMT)
+	target_link_options(libwindcfd INTERFACE /NODEFAULTLIB:LIBCMT)
 endif()
 # Public: our own headers (include as "core/...") and the vendored single header.
-target_include_directories(libscour PUBLIC
+target_include_directories(libwindcfd PUBLIC
 	${CMAKE_CURRENT_SOURCE_DIR}/src
 	${CMAKE_CURRENT_SOURCE_DIR}/src/3rdparty
 	${CUDAToolkit_INCLUDE_DIRS}
 )
 
-# --- scour_geometry (STEP import via OpenCascade; isolates OCC from the core) -
-# Qt-free static lib that mirrors how scour_gui_cuda splits out the GL/CUDA interop:
-# it is the ONLY target that links OpenCascade, so libscour and every physics gate
-# test stay OCC-free. Only scour-gui and the geometry unit test link it. STEP files
+# --- windcfd_geometry (STEP import via OpenCascade; isolates OCC from the core) -
+# Qt-free static lib that mirrors how windcfd_gui_cuda splits out the GL/CUDA interop:
+# it is the ONLY target that links OpenCascade, so libwindcfd and every physics gate
+# test stay OCC-free. Only windcfd-gui and the geometry unit test link it. STEP files
 # arrive in millimetres and are scaled to metres inside step_import.cpp (PLAN §3).
 set(OPENCASCADE_DIR "C:/OpenCASCADE-8.0/build2" CACHE PATH "OpenCascade 8.0 install root")
 set(OCC_INCLUDE_DIR "${OPENCASCADE_DIR}/inc")
@@ -95,13 +95,13 @@ set(OCC_BIN_DIR "${OPENCASCADE_DIR}/win64/vc14/bin")
 
 # Minimal toolkits needed to READ + TRIANGULATE a STEP shape (PLAN §3). These are the
 # .lib import libs we link; being PRIVATE on a STATIC lib, CMake still propagates them
-# (as $<LINK_ONLY>) to scour-gui / the geometry test so their final link resolves.
+# (as $<LINK_ONLY>) to windcfd-gui / the geometry test so their final link resolves.
 set(OCC_LINK_TOOLKITS
 	TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKXSBase TKDESTEP)
 
 # Full transitive runtime DLL closure of the link set (computed via dumpbin /dependents:
 # TKDESTEP.dll pulls in TKDE/TKXCAF/TKLCAF/TKShHealing → TKV3d/TKService → freetype, etc.).
-# These + the 3rdparty DLLs must sit next to any exe that loads scour_geometry so it stays
+# These + the 3rdparty DLLs must sit next to any exe that loads windcfd_geometry so it stays
 # double-clickable with NO OpenCascade on PATH (see CLAUDE.md).
 set(OCC_RUNTIME_TOOLKITS
 	TKBO TKBRep TKCAF TKCDF TKDE TKDESTEP TKernel TKG2d TKG3d TKGeomAlgo TKGeomBase
@@ -109,8 +109,8 @@ set(OCC_RUNTIME_TOOLKITS
 set(OCC_3RDPARTY_DLLS freetype brotlicommon brotlidec bz2 libpng16 zlib1)
 
 # Copy the OpenCascade runtime DLLs next to a target's exe (POST_BUILD, copy_if_different so
-# it is a no-op once deployed). Called for both scour-gui and the geometry test exe.
-function(scour_deploy_occ_dlls target)
+# it is a no-op once deployed). Called for both windcfd-gui and the geometry test exe.
+function(windcfd_deploy_occ_dlls target)
 	if(NOT WIN32)
 		return()
 	endif()
@@ -120,7 +120,7 @@ function(scour_deploy_occ_dlls target)
 		if(EXISTS "${_p}")
 			list(APPEND _paths "${_p}")
 		else()
-			message(WARNING "scour_deploy_occ_dlls(${target}): OCC DLL not found: ${_p}")
+			message(WARNING "windcfd_deploy_occ_dlls(${target}): OCC DLL not found: ${_p}")
 		endif()
 	endforeach()
 	add_custom_command(TARGET ${target} POST_BUILD
@@ -129,47 +129,47 @@ function(scour_deploy_occ_dlls target)
 		VERBATIM)
 endfunction()
 
-add_library(scour_geometry STATIC src/core/geometry/step_import.cpp)
-set_target_properties(scour_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_compile_features(scour_geometry PUBLIC cxx_std_20)
+add_library(windcfd_geometry STATIC src/core/geometry/step_import.cpp)
+set_target_properties(windcfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_features(windcfd_geometry PUBLIC cxx_std_20)
 # OCC headers are PRIVATE — consumers include only the OCC-free step_import.h.
-target_include_directories(scour_geometry
+target_include_directories(windcfd_geometry
 	PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 	PRIVATE ${OCC_INCLUDE_DIR})
 # OCCT 8.0 moved some typedefs into a Deprecated/NCollectionAliases dir; include it +
 # silence the deprecation notices (matches the OCC 8.0 usage in cobod-slicer).
 set(OCC_DEPRECATED_DIR "${OPENCASCADE_DIR}/../OCCT/src/Deprecated/NCollectionAliases")
 if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(scour_geometry PRIVATE ${OCC_DEPRECATED_DIR})
+	target_include_directories(windcfd_geometry PRIVATE ${OCC_DEPRECATED_DIR})
 endif()
-target_compile_definitions(scour_geometry PRIVATE OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_compile_definitions(windcfd_geometry PRIVATE OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
 foreach(_tk ${OCC_LINK_TOOLKITS})
 	if(NOT EXISTS "${OCC_LIB_DIR}/${_tk}.lib")
-		message(FATAL_ERROR "scour_geometry: OpenCascade import lib not found: ${OCC_LIB_DIR}/${_tk}.lib")
+		message(FATAL_ERROR "windcfd_geometry: OpenCascade import lib not found: ${OCC_LIB_DIR}/${_tk}.lib")
 	endif()
-	target_link_libraries(scour_geometry PRIVATE "${OCC_LIB_DIR}/${_tk}.lib")
+	target_link_libraries(windcfd_geometry PRIVATE "${OCC_LIB_DIR}/${_tk}.lib")
 endforeach()
 
-# --- scour_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
+# --- windcfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
 # Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can
 # link the slice kernel + its CPU reference without pulling in Qt/GL.
-add_library(scour_gui_cuda STATIC
+add_library(windcfd_gui_cuda STATIC
 	src/gui/slice_field.cu   # pure CUDA sampler+colourmap (+ CPU reference)
 	src/gui/slice_gl.cu      # cudaGraphicsGLRegisterBuffer interop (the only GL-header TU)
 )
-set_target_properties(scour_gui_cuda PROPERTIES
+set_target_properties(windcfd_gui_cuda PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
 	CUDA_SEPARABLE_COMPILATION OFF
 	POSITION_INDEPENDENT_CODE ON
 )
-target_link_libraries(scour_gui_cuda PUBLIC libscour)
+target_link_libraries(windcfd_gui_cuda PUBLIC libwindcfd)
 
-# --- scour-gui (Qt6 + GL 4.3 slice viewer; G1) ------------------------------
+# --- windcfd-gui (Qt6 + GL 4.3 slice viewer; G1) ------------------------------
 # Default ON from G1 onward (Qt 6.11.1 present on this machine). Turn OFF to build
 # a Qt-less stub (main_stub.cpp) on hosts without Qt.
-option(SCOUR_ENABLE_QT "Build scour-gui against Qt6 (G1 slice viewer)" ON)
-add_executable(scour-gui)
-if(SCOUR_ENABLE_QT)
+option(WINDCFD_ENABLE_QT "Build windcfd-gui against Qt6 (G1 slice viewer)" ON)
+add_executable(windcfd-gui)
+if(WINDCFD_ENABLE_QT)
 	file(GLOB _qt_candidates "C:/Qt/6.*/msvc2022_64")
 	list(SORT _qt_candidates)
 	list(REVERSE _qt_candidates) # newest first
@@ -181,8 +181,8 @@ if(SCOUR_ENABLE_QT)
 		endif()
 	endforeach()
 	find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
-	message(STATUS "scour-gui: Qt6 from ${_qt_found}")
-	target_sources(scour-gui PRIVATE
+	message(STATUS "windcfd-gui: Qt6 from ${_qt_found}")
+	target_sources(windcfd-gui PRIVATE
 		src/gui/main.cpp
 		src/gui/main_window.cpp
 		src/gui/slice_viewer.cpp
@@ -194,43 +194,43 @@ if(SCOUR_ENABLE_QT)
 		src/gui/video_recorder.cpp
 		src/gui/video_settings_dialog.cpp
 	)
-	set_target_properties(scour-gui PROPERTIES AUTOMOC ON)
-	target_link_libraries(scour-gui PRIVATE
-		libscour scour_gui_cuda scour_geometry
+	set_target_properties(windcfd-gui PROPERTIES AUTOMOC ON)
+	target_link_libraries(windcfd-gui PRIVATE
+		libwindcfd windcfd_gui_cuda windcfd_geometry
 		Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets
 	)
-	target_compile_definitions(scour-gui PRIVATE SCOUR_HAVE_QT=1)
+	target_compile_definitions(windcfd-gui PRIVATE WINDCFD_HAVE_QT=1)
 
-	# scour_geometry links OpenCascade DLLs -> deploy them next to scour-gui.exe so the
+	# windcfd_geometry links OpenCascade DLLs -> deploy them next to windcfd-gui.exe so the
 	# exe stays double-clickable (windeployqt only handles Qt, not OCC).
-	scour_deploy_occ_dlls(scour-gui)
+	windcfd_deploy_occ_dlls(windcfd-gui)
 
-	# --- Deploy the Qt runtime next to the exe so scour-gui.exe is double-clickable
+	# --- Deploy the Qt runtime next to the exe so windcfd-gui.exe is double-clickable
 	# (no Qt on PATH needed) and stays so after a clean rebuild. windeployqt copies the
 	# Qt6 DLLs + the platforms/qwindows.dll plugin into the output dir. Runs after each
 	# link; it is a no-op when the deployed files are already up to date.
 	find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${_qt_found}/bin")
 	if(WINDEPLOYQT_EXECUTABLE)
-		add_custom_command(TARGET scour-gui POST_BUILD
+		add_custom_command(TARGET windcfd-gui POST_BUILD
 			COMMAND "${WINDEPLOYQT_EXECUTABLE}"
 				"$<IF:$<CONFIG:Debug>,--debug,--release>"
-				--no-translations --no-system-d3d-compiler "$<TARGET_FILE:scour-gui>"
-			COMMENT "windeployqt: deploying Qt runtime next to scour-gui.exe (double-clickable)"
+				--no-translations --no-system-d3d-compiler "$<TARGET_FILE:windcfd-gui>"
+			COMMENT "windeployqt: deploying Qt runtime next to windcfd-gui.exe (double-clickable)"
 			VERBATIM)
 		# windeployqt only ships the windows platform plugin; also deploy qoffscreen so
 		# the headless --offscreen smoke path (STEP-load CI) works with no Qt on PATH.
 		set(_qoffscreen "${_qt_found}/plugins/platforms/$<IF:$<CONFIG:Debug>,qoffscreend,qoffscreen>.dll")
-		add_custom_command(TARGET scour-gui POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:scour-gui>/platforms"
-			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_qoffscreen}" "$<TARGET_FILE_DIR:scour-gui>/platforms"
-			COMMENT "Deploying Qt offscreen platform plugin next to scour-gui.exe"
+		add_custom_command(TARGET windcfd-gui POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:windcfd-gui>/platforms"
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_qoffscreen}" "$<TARGET_FILE_DIR:windcfd-gui>/platforms"
+			COMMENT "Deploying Qt offscreen platform plugin next to windcfd-gui.exe"
 			VERBATIM)
 	else()
-		message(WARNING "scour-gui: windeployqt not found under ${_qt_found}/bin; "
+		message(WARNING "windcfd-gui: windeployqt not found under ${_qt_found}/bin; "
 			"the exe will need the Qt bin dir on PATH to run (see CLAUDE.md).")
 	endif()
 
 else()
-	target_sources(scour-gui PRIVATE src/gui/main_stub.cpp)
-	target_link_libraries(scour-gui PRIVATE libscour)
+	target_sources(windcfd-gui PRIVATE src/gui/main_stub.cpp)
+	target_link_libraries(windcfd-gui PRIVATE libwindcfd)
 endif()

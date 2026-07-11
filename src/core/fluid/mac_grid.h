@@ -13,14 +13,14 @@
 #pragma once
 
 #ifdef __CUDACC__
-#define SCOUR_HD __host__ __device__
+#define WINDCFD_HD __host__ __device__
 #else
-#define SCOUR_HD
+#define WINDCFD_HD
 #endif
 
 #include <cmath>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Wall/face condition. The lid (MOVLID) carries a tangential x-velocity in BC::lid_u.
 	enum Wall : int
@@ -44,15 +44,15 @@ namespace scour::core
 		int nx = 0, ny = 0, nz = 0;
 		double h = 0.0;
 
-		SCOUR_HD int p_count() const { return nx * ny * nz; }
-		SCOUR_HD int u_count() const { return (nx + 1) * ny * nz; }
-		SCOUR_HD int v_count() const { return nx * (ny + 1) * nz; }
-		SCOUR_HD int w_count() const { return nx * ny * (nz + 1); }
+		WINDCFD_HD int p_count() const { return nx * ny * nz; }
+		WINDCFD_HD int u_count() const { return (nx + 1) * ny * nz; }
+		WINDCFD_HD int v_count() const { return nx * (ny + 1) * nz; }
+		WINDCFD_HD int w_count() const { return nx * ny * (nz + 1); }
 
-		SCOUR_HD int pidx(int i, int j, int k) const { return (k * ny + j) * nx + i; }
-		SCOUR_HD int uidx(int i, int j, int k) const { return (k * ny + j) * (nx + 1) + i; } // i in [0,nx]
-		SCOUR_HD int vidx(int i, int j, int k) const { return (k * (ny + 1) + j) * nx + i; } // j in [0,ny]
-		SCOUR_HD int widx(int i, int j, int k) const { return (k * ny + j) * nx + i; }        // k in [0,nz]
+		WINDCFD_HD int pidx(int i, int j, int k) const { return (k * ny + j) * nx + i; }
+		WINDCFD_HD int uidx(int i, int j, int k) const { return (k * ny + j) * (nx + 1) + i; } // i in [0,nx]
+		WINDCFD_HD int vidx(int i, int j, int k) const { return (k * (ny + 1) + j) * nx + i; } // j in [0,ny]
+		WINDCFD_HD int widx(int i, int j, int k) const { return (k * ny + j) * nx + i; }        // k in [0,nz]
 	};
 
 	// --- BC-aware ghost fetch of the three velocity components --------------------
@@ -60,7 +60,7 @@ namespace scour::core
 	// wall type; the *normal* index is clamped into the stored face range (the wall
 	// faces themselves hold the prescribed normal velocity, 0 for a closed box).
 
-	SCOUR_HD inline double fetch_u(const double* u, MacGrid g, BC bc, int i, int j, int k)
+	WINDCFD_HD inline double fetch_u(const double* u, MacGrid g, BC bc, int i, int j, int k)
 	{
 		double factor = 1.0, add = 0.0;
 		if (i < 0) i = 0; else if (i > g.nx) i = g.nx; // normal for u
@@ -76,7 +76,7 @@ namespace scour::core
 		return factor * u[g.uidx(i, j, k)] + add;
 	}
 
-	SCOUR_HD inline double fetch_v(const double* v, MacGrid g, BC bc, int i, int j, int k)
+	WINDCFD_HD inline double fetch_v(const double* v, MacGrid g, BC bc, int i, int j, int k)
 	{
 		double factor = 1.0;
 		if (j < 0) j = 0; else if (j > g.ny) j = g.ny; // normal for v
@@ -92,7 +92,7 @@ namespace scour::core
 		return factor * v[g.vidx(i, j, k)];
 	}
 
-	SCOUR_HD inline double fetch_w(const double* w, MacGrid g, BC bc, int i, int j, int k)
+	WINDCFD_HD inline double fetch_w(const double* w, MacGrid g, BC bc, int i, int j, int k)
 	{
 		double factor = 1.0;
 		if (k < 0) k = 0; else if (k > g.nz) k = g.nz; // normal for w
@@ -108,7 +108,7 @@ namespace scour::core
 	// space (see call sites). Returns the interpolated value; if mn/mx are non-null,
 	// also returns the min/max of the 8 corner values (for the MacCormack clamp).
 
-	SCOUR_HD inline double trilerp_u(const double* u, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
+	WINDCFD_HD inline double trilerp_u(const double* u, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = x / g.h;          // u node at i*h
 		double gy = y / g.h - 0.5;    // (j+0.5)h
@@ -136,7 +136,7 @@ namespace scour::core
 		return c0 * (1 - fz) + c1 * fz;
 	}
 
-	SCOUR_HD inline double trilerp_v(const double* v, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
+	WINDCFD_HD inline double trilerp_v(const double* v, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = x / g.h - 0.5;
 		double gy = y / g.h;
@@ -164,7 +164,7 @@ namespace scour::core
 		return c0 * (1 - fz) + c1 * fz;
 	}
 
-	SCOUR_HD inline double trilerp_w(const double* w, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
+	WINDCFD_HD inline double trilerp_w(const double* w, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = x / g.h - 0.5;
 		double gy = y / g.h - 0.5;
@@ -194,7 +194,7 @@ namespace scour::core
 
 	// Clamp a physical point to the closed domain [0,Lx]x[0,Ly]x[0,Lz] (advection
 	// backtraces that would leave the box are clipped to the boundary, RESEARCH §3.2).
-	SCOUR_HD inline void clamp_to_domain(MacGrid g, double& x, double& y, double& z)
+	WINDCFD_HD inline void clamp_to_domain(MacGrid g, double& x, double& y, double& z)
 	{
 		double Lx = g.nx * g.h, Ly = g.ny * g.h, Lz = g.nz * g.h;
 		const double eps = 1e-9;

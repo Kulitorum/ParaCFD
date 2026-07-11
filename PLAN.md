@@ -39,7 +39,7 @@ ctest --test-dir build --output-on-failure
 PATH — use the VS dev prompt or the VS-bundled ninja
 (`…/2022/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`).
 
-CMake: `project(ScourProtection LANGUAGES CXX CUDA)`. Copy cobod-slicer's Qt auto-detect glob
+CMake: `project(WindCFD LANGUAGES CXX CUDA)`. Copy cobod-slicer's Qt auto-detect glob
 (`C:/Qt/6.*/msvc2022_64`, newest with valid Qt6Config) rather than hard-coding a Qt version.
 **Wire `enable_testing()` + ctest from M0** (the slicer team regrets not doing this).
 Copy `.clang-format` from `C:\CODE\cobod-slicer` (team style: Allman + IndentBraces, tabs,
@@ -70,7 +70,7 @@ scour/
 ├── CMakeLists.txt
 ├── RESEARCH.md  PLAN.md  CLAUDE.md  research/
 ├── src/
-│   ├── core/                 → libscour (static lib, C++/CUDA, no Qt)
+│   ├── core/                 → libwindcfd (static lib, C++/CUDA, no Qt)
 │   │   ├── config.h/.cpp         run config (JSON, vendored nlohmann single header)
 │   │   ├── grid.h                MAC grid layout, indexing, SoA field arrays
 │   │   ├── fields.cu/.h          allocation, host↔device, ping-pong buffers
@@ -98,7 +98,7 @@ scour/
 │   │   │   └── checkpoint.cpp        full-state save/restore
 │   │   └── sim.h/.cpp                the operator-split loop (RESEARCH §2), MORFAC control
 │   ├── cli/                  → scour.exe: run config(s), write VTI/CSV/report
-│   └── gui/                  → scour-gui.exe: Qt6 live viewer (GL on main thread only)
+│   └── gui/                  → windcfd-gui.exe: Qt6 live viewer (GL on main thread only)
 ├── tests/                    → GoogleTest; unit + validation gates as ctest labels
 ├── tools/                    → py scripts to plot CSV/compare gates (matplotlib, dev-only)
 └── configs/                  → scenario matrix, benchmark cases (V1–V8)
@@ -141,7 +141,7 @@ gate passes as a ctest and `git commit` lands. Print gate numbers in the test ou
 Sizes: S ≈ half a session, M ≈ one session, L ≈ two sessions.
 **Manual-gate exception:** G1/G2 interactivity gates (fps, GL-thread assert) are manual —
 record measurements + screenshots in the milestone commit; the GL-main-thread check runs as
-a Qt debug assertion in scour-gui, not ctest. M0's automated check is a `tools/` Python
+a Qt debug assertion in windcfd-gui, not ctest. M0's automated check is a `tools/` Python
 reader validating the .vti header + payload; opening in ParaView is a one-time manual
 confirmation. Each milestone commits the config(s) its gate consumes
 (e.g. M1 → `configs/v1_cavity_re100.json`).
@@ -268,7 +268,7 @@ run comparison.
 MH sign-off — "perfect"), G3.3a (`resettleOnBed` unit-gated), G3.3b (live sink coupling: headless
 verified — re-settle fires on bed change, pile sinks, flow re-masks in place, 1600+ steps stable).
 Jolt v5.5.0 (prebuilt `/MD`, `find_package(Jolt CONFIG)`); 100/100 unit; gate_G1 PASS. Windowed:
-`scour-gui --config configs/g1_viewer_full.json --drop-step <XStone.stp> --drop <count>,<seed>[,smin,smax,sand]`.
+`windcfd-gui --config configs/g1_viewer_full.json --drop-step <XStone.stp> --drop <count>,<seed>[,smin,smax,sand]`.
 
 A pre-simulation "experiment setup" stage: scatter N scaled copies of a printed protection unit
 (e.g. Holcim **XStone**, loaded from STEP) above the bed and let them fall + settle under gravity
@@ -277,8 +277,8 @@ the morphodynamic run. Rigid-body settling is **fully DECOUPLED from the CUDA fl
 the CPU (**Jolt Physics**, MIT) and emits one affine `ModelPlacement` per block, consumed unchanged
 by the existing voxelizer + `build_seabed_from_structure` path. Holes are preserved: the settling
 **collision proxy** is a convex compound, but the flow still voxelizes the TRUE perforated mesh.
-**Isolation:** Jolt is linked only by a new `scour_physics` static lib (mirrors how `scour_geometry`
-isolates OpenCascade); libscour + every physics gate stay Jolt-free. Bodies persist for the whole
+**Isolation:** Jolt is linked only by a new `scour_physics` static lib (mirrors how `windcfd_geometry`
+isolates OpenCascade); libwindcfd + every physics gate stay Jolt-free. Bodies persist for the whole
 run so the sink-coupling increment is additive.
 - **G3.1 — settle core.** `scour_physics` (Jolt) + `load_step_solids()` multi-solid STEP loader
   (each convex piece → a Jolt `ConvexHullShape`; bootstrap = whole-mesh hull). Scatter → settle on a

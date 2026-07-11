@@ -28,9 +28,9 @@ class QPushButton;
 class QThread;
 class QTimer;
 
-namespace scour::core { class ChannelFluidCore; }
+namespace windcfd::core { class ChannelFluidCore; }
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	class SliceViewer;
 	class VideoRecorder;
@@ -42,7 +42,7 @@ namespace scour::gui
 	public:
 		// Takes ownership of the initial core; `recipe` carries its domain (recipe.info) for the
 		// viewer AND the ingredients to rebuild the core when a model is (de)injected as obstacle.
-		MainWindow(std::unique_ptr<scour::core::ChannelFluidCore> core, const SimRecipe& recipe,
+		MainWindow(std::unique_ptr<windcfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
 			QWidget* parent = nullptr);
 		~MainWindow() override;
 
@@ -121,7 +121,7 @@ namespace scour::gui
 
 		void shutdownWorker();
 		// `steps0`/`t0` prime the worker's counters (a scene restore resumes from the saved step).
-		void spawnWorker(std::unique_ptr<scour::core::ChannelFluidCore> core,
+		void spawnWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core,
 			long long steps0 = 0, double t0 = 0.0);
 
 		// --- Scene save / restore internals ------------------------------------------------------
@@ -130,14 +130,14 @@ namespace scour::gui
 		void restoreScene(SceneFile& sf); // tear down + rebuild core + inject the saved state
 		// Worker → main-thread hand-off: write the gathered state to disk. tag<0 = manual save (→ Recent
 		// Files), tag>=0 = an auto-save at that step (→ <base>.<step>.scn, not Recent).
-		void onCheckpointReady(scour::gui::CheckpointStatePtr state, qint64 tag);
+		void onCheckpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag);
 		QString scene_base_path_;          // stem (no extension) of the current scene, for the auto-save series
 		QString pending_manual_save_path_; // destination of an in-flight manual "Save Scene As"
 		QString pending_recent_keep_;      // a just-saved scene optimistically in Recent Files before its
 		                                   // async write lands — rebuildRecentMenu keeps it from being pruned
 		int autosave_interval_ = 0;        // auto-save cadence in steps (0 = off); re-applied on each spawnWorker
-		scour::core::TriMesh scene_mesh_;  // display mesh persisted into a saved scene (obstacle model)
-		scour::core::ModelPlacement scene_place_{}; // its display placement
+		windcfd::core::TriMesh scene_mesh_;  // display mesh persisted into a saved scene (obstacle model)
+		windcfd::core::ModelPlacement scene_place_{}; // its display placement
 		// Stop + join + delete the worker (and its thread) so a fresh core can replace it. Shared by the
 		// grid Apply and scene restore (both fully rebuild the sim). No-op if none.
 		void teardownWorkerForReload();
@@ -184,7 +184,7 @@ namespace scour::gui
 		QPushButton* play_btn_ = nullptr; // so a rebuild can honour the current play/pause state
 		static constexpr long long kMaxCells = 40000000LL; // Apply guard: refuse an OOM-risking grid
 
-		// Recent-files (feature 1): persisted via QSettings("COBOD","ScourProtection"). The submenu is
+		// Recent-files (feature 1): persisted via QSettings("COBOD","WindCFD"). The submenu is
 		// rebuilt on demand (pruning files that no longer exist), MRU-first, capped at kMaxRecent.
 		void addRecentFile(const QString& path);
 		void rebuildRecentMenu();
@@ -218,7 +218,7 @@ namespace scour::gui
 		QLabel* status_ = nullptr;
 		QLabel* fps_label_ = nullptr;
 		SimRecipe recipe_;
-		scour::core::TriMesh model_mesh_; // CPU copy of the loaded model (for voxelization)
+		windcfd::core::TriMesh model_mesh_; // CPU copy of the loaded model (for voxelization)
 		bool model_injected_ = false;
 		bool worker_down_ = false;
 		DiversionReport diversion_;

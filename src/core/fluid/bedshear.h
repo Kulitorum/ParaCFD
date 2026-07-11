@@ -21,7 +21,7 @@
 #include <cmath>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Roughness/regime selection for the u* extraction.
 	enum WallRegime : int
@@ -46,12 +46,12 @@ namespace scour::core
 		double rate_hi = 2.0;
 	};
 
-	SCOUR_HD inline double wall_ks(double d50) { return 2.5 * d50; }        // research/04 §3
-	SCOUR_HD inline double wall_z0_grain(double d50) { return d50 / 12.0; } // = ks/30
+	WINDCFD_HD inline double wall_ks(double d50) { return 2.5 * d50; }        // research/04 §3
+	WINDCFD_HD inline double wall_z0_grain(double d50) { return d50 / 12.0; } // = ks/30
 
 	// Guarded rough inversion: u* = κ·U_p/ln(z_p/z0), clamp ln arg ≥ e so u* ≤ κ·U_p
 	// (research/04 §6 guard). z0 must be > 0.
-	SCOUR_HD inline double wall_ustar_rough(double Up, double zp, double z0, double kappa)
+	WINDCFD_HD inline double wall_ustar_rough(double Up, double zp, double z0, double kappa)
 	{
 		double arg = zp / z0;
 		if (arg < 2.718281828459045) arg = 2.718281828459045;
@@ -60,7 +60,7 @@ namespace scour::core
 
 	// Christoffersen–Jonsson transitional roughness length given the current u*
 	// (research/04 §4): z0 = (ks/30)(1 − e^(−u*·ks/27ν)) + ν/(9u*).
-	SCOUR_HD inline double wall_z0_cj(double ustar, double ks, double nu)
+	WINDCFD_HD inline double wall_z0_cj(double ustar, double ks, double nu)
 	{
 		double u = ustar > 1e-12 ? ustar : 1e-12;
 		return (ks / 30.0) * (1.0 - exp(-u * ks / (27.0 * nu))) + nu / (9.0 * u);
@@ -68,7 +68,7 @@ namespace scour::core
 
 	// Full u* extraction from a probed tangential speed U_p at height z_p (research/04
 	// §5,§6). AUTO selects rough vs transitional by ks+ from a rough first guess.
-	SCOUR_HD inline double wall_ustar(double Up, double zp, double d50, double nu, double kappa, int regime, int cj_iters)
+	WINDCFD_HD inline double wall_ustar(double Up, double zp, double d50, double nu, double kappa, int regime, int cj_iters)
 	{
 		double ks = wall_ks(d50);
 		double us = wall_ustar_rough(Up, zp, ks / 30.0, kappa); // rough guess u*(0)
@@ -88,7 +88,7 @@ namespace scour::core
 	}
 
 	// Probe height z_p = max(1.5·h, 2·ks) above the bed (research/04 §practical).
-	SCOUR_HD inline double wall_zp(double h, double ks) { return fmax(1.5 * h, 2.0 * ks); }
+	WINDCFD_HD inline double wall_zp(double h, double ks) { return fmax(1.5 * h, 2.0 * ks); }
 
 	// ---- Cavity clearance four-branch rule (RESEARCH §4 / research/13 §8) ----------
 	// Given clearance H_c (raycast bed-normal distance to the first solid), the probe
@@ -104,7 +104,7 @@ namespace scour::core
 	};
 
 	// Classify the cavity branch from clearance alone (probe placement is done by caller).
-	SCOUR_HD inline int cavity_branch(double Hc, double h, double zp0, double Ugap, double nu)
+	WINDCFD_HD inline int cavity_branch(double Hc, double h, double zp0, double Ugap, double nu)
 	{
 		if (Hc >= 4.0 * zp0) return CAV_STANDARD;
 		if (Hc >= 6.0 * h) return CAV_QUARTER;
@@ -118,14 +118,14 @@ namespace scour::core
 
 	// τ_b [Pa] for the turbulent/laminar mid-gap branches (RESEARCH §4). For the log-law
 	// branches the caller uses wall_ustar()+τ=ρu*²; this covers the gap closures only.
-	SCOUR_HD inline double cavity_tau_gap_turb(double Ugap, double Hc, double z0, double rho, double kappa)
+	WINDCFD_HD inline double cavity_tau_gap_turb(double Ugap, double Hc, double z0, double rho, double kappa)
 	{
 		double arg = Hc / (2.0 * z0);
 		if (arg < 2.718281828459045) arg = 2.718281828459045;
 		double cd = kappa / log(arg);
 		return rho * cd * cd * Ugap * Ugap;
 	}
-	SCOUR_HD inline double cavity_tau_gap_laminar(double Ugap, double Hc, double rho, double nu)
+	WINDCFD_HD inline double cavity_tau_gap_laminar(double Ugap, double Hc, double rho, double nu)
 	{
 		return 6.0 * (rho * nu) * Ugap / Hc; // μ = ρ·ν ; plane-Poiseuille (research/13 §8)
 	}
@@ -135,7 +135,7 @@ namespace scour::core
 	// in xy for the periodic gate); we average the two x-faces / y-faces of cell (i,j) and
 	// linearly interpolate in z. Returns u_c,v_c at zp. (Voxel-bed normal probing arrives
 	// with the M5 interface geometry.)
-	SCOUR_HD inline void bed_sample_uv(const double* u, const double* v, MacGrid g, int i, int j, double zp, double& uc, double& vc)
+	WINDCFD_HD inline void bed_sample_uv(const double* u, const double* v, MacGrid g, int i, int j, double zp, double& uc, double& vc)
 	{
 		double gz = zp / g.h - 0.5;
 		int k0 = (int)floor(gz);

@@ -8,7 +8,7 @@
 
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Raw τ_b from the velocity field over the flat bed: probe (u,v) at z_p, invert the
 	// log law for u* (regime per WallParams), τx=ρu*²·û, τy=ρu*²·v̂. Outputs plane fields

@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	struct SimInfo
 	{
@@ -35,11 +35,11 @@ namespace scour::gui
 	// worker's rebuild factory so a re-inject is a pure worker-thread operation.
 	struct SimRecipe
 	{
-		scour::core::MacGrid grid;
-		scour::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
-		scour::core::ChannelParams pr;
+		windcfd::core::MacGrid grid;
+		windcfd::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
+		windcfd::core::ChannelParams pr;
 		std::vector<unsigned char> base_solid;   // config obstacle (procedural cylinder); all-zero if none
-		int base_solid_mode = scour::core::SOLID_NOSLIP; // config's obstacle surface mode
+		int base_solid_mode = windcfd::core::SOLID_NOSLIP; // config's obstacle surface mode
 		double init_u = 1.0;                     // init_uniform u0
 		double init_v_blip = 0.0;                // init_uniform transverse blip (absolute m/s)
 		SimInfo info;
@@ -71,7 +71,7 @@ namespace scour::gui
 
 	// Construct a fresh, flow-initialised core from the recipe with `solid` as the obstacle mask
 	// and `solid_mode` as its surface condition (SOLID_FREESLIP / SOLID_NOSLIP). Ready to step.
-	std::unique_ptr<scour::core::ChannelFluidCore> make_core(const SimRecipe& r,
+	std::unique_ptr<windcfd::core::ChannelFluidCore> make_core(const SimRecipe& r,
 		const std::vector<unsigned char>& solid, int solid_mode);
 
 	// Parse `config_path` (JSON), fill `recipe` (incl. recipe.info), and return the initial core
@@ -79,6 +79,6 @@ namespace scour::gui
 	// channel-with-cylinder setup and records the reason in `warn`. When `ov` is non-null and
 	// active, its domain + voxel size replace the config's (everything else unchanged) so the GUI
 	// can rebuild the same sim at a coarser/finer grid.
-	std::unique_ptr<scour::core::ChannelFluidCore> build_sim(const std::string& config_path,
+	std::unique_ptr<windcfd::core::ChannelFluidCore> build_sim(const std::string& config_path,
 		SimRecipe& recipe, std::string& warn, const GridOverride* ov = nullptr);
 }

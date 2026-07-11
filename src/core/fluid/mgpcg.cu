@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cstdio>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{

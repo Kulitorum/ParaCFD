@@ -13,7 +13,7 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	// x264 speed/size presets, slowest→fastest encode is the reverse; slower = smaller file at the same CRF.
 	static const char* const kPresets[] = {

@@ -5,7 +5,7 @@
 // the outlet BC, flux balance and projection don't corrupt it). RESEARCH §8.1-8.3.
 #pragma once
 
-namespace scour::core
+namespace windcfd::core
 {
 	struct ChannelEmptyConfig
 	{

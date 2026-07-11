@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{

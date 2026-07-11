@@ -7,7 +7,7 @@
 
 #include "core/fluid/mac_grid.h"
 
-namespace scour::core
+namespace windcfd::core
 {
 	class InletFluct
 	{

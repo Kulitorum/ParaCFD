@@ -5,17 +5,17 @@
 // shared source of truth: an AFFINE placement world(v) = M·v + t, where M is a 3×3 linear
 // part (rotation·scale) and t a translation (metres). The default M = identity reduces it to
 // the increment-1 translation-only "centre on x/y, drop onto the bed" transform, byte-for-byte.
-// The interactive placement gizmo (scour-gui) fills M with a rotation·scale so a loaded model
+// The interactive placement gizmo (windcfd-gui) fills M with a rotation·scale so a loaded model
 // can be moved/rotated/scaled and then voxelized exactly where the user placed it.
 //
-// OCC-free + Qt-free (pure inline maths on a TriMesh bbox), so it lives in libscour's
+// OCC-free + Qt-free (pure inline maths on a TriMesh bbox), so it lives in libwindcfd's
 // include path and is included by both the core voxelizer and the GUI viewer.
 // Units: SI METRES.
 #pragma once
 
 #include "core/geometry/tri_mesh.h"
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Affine placement applied to every mesh coordinate: world(v) = M·v + t. M is row-major
 	// (m[0..2] = row 0, m[3..5] = row 1, m[6..8] = row 2); the default is the identity so a

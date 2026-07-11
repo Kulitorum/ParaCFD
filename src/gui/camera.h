@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	class Camera
 	{

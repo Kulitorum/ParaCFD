@@ -1,9 +1,9 @@
 // tri_mesh.h — a plain, dependency-free triangle mesh in SI METRES.
 //
 // This struct is the hand-off contract between the (OpenCascade-backed) STEP importer in
-// the `scour_geometry` lib and the voxelizer in `libscour`. It lives here — in libscour's
+// the `windcfd_geometry` lib and the voxelizer in `libwindcfd`. It lives here — in libwindcfd's
 // include path, free of any OpenCascade AND Qt include — so BOTH libs can consume it
-// without a libscour→scour_geometry (or →OCC) dependency. step_import.h includes it.
+// without a libwindcfd→windcfd_geometry (or →OCC) dependency. step_import.h includes it.
 //
 // ⚠ Units: METRES. The STEP importer scales OCC's native millimetres by 0.001 before
 // filling this; every consumer (display + voxelizer) works in metres.
@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// A lit triangle mesh in SI METRES with outward-facing per-vertex normals. Flat SoA
 	// arrays: positions/normals are 3 floats per vertex (x,y,z); indices are triangle vertex

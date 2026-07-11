@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <cmath>
 
-namespace scour::gui
+namespace windcfd::gui
 {
-	using scour::core::MacGrid;
+	using windcfd::core::MacGrid;
 
 	namespace
 	{

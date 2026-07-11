@@ -19,7 +19,7 @@
 #include <mutex>
 #include <vector>
 
-namespace scour::gui
+namespace windcfd::gui
 {
 	namespace
 	{
@@ -339,7 +339,7 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setMesh(scour::core::TriMesh mesh)
+	void SliceViewer::setMesh(windcfd::core::TriMesh mesh)
 	{
 		// Seed the gizmo transform (centre-on-bed default) from the model bbox NOW — host-side, so
 		// modelPlacement() is valid even before the first paint (the CLI --load-step path voxelizes
@@ -358,7 +358,7 @@ void main()
 	{
 		has_mesh_ = false;
 		mesh_upload_pending_ = false;
-		pending_mesh_ = scour::core::TriMesh{};
+		pending_mesh_ = windcfd::core::TriMesh{};
 		mesh_index_count_ = 0;
 		mesh_override_ = false; // a fresh model (fluid viewer) is gizmo-editable again
 		gz_valid_ = false;
@@ -367,7 +367,7 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setVoxelOverlay(const std::vector<unsigned char>& solid, scour::core::MacGrid grid)
+	void SliceViewer::setVoxelOverlay(const std::vector<unsigned char>& solid, windcfd::core::MacGrid grid)
 	{
 		pending_vox_solid_ = solid;
 		pending_vox_grid_ = grid;
@@ -392,7 +392,7 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setMeshPlacement(const scour::core::ModelPlacement& p)
+	void SliceViewer::setMeshPlacement(const windcfd::core::ModelPlacement& p)
 	{
 		QMatrix4x4 m;
 		m.setRow(0, QVector4D((float)p.m[0], (float)p.m[1], (float)p.m[2], (float)p.tx));
@@ -418,9 +418,9 @@ void main()
 		return M;
 	}
 
-	scour::core::ModelPlacement SliceViewer::modelPlacement() const
+	windcfd::core::ModelPlacement SliceViewer::modelPlacement() const
 	{
-		scour::core::ModelPlacement p;
+		windcfd::core::ModelPlacement p;
 		const QMatrix4x4 M = modelMatrix();
 		p.m[0] = M(0, 0); p.m[1] = M(0, 1); p.m[2] = M(0, 2);
 		p.m[3] = M(1, 0); p.m[4] = M(1, 1); p.m[5] = M(1, 2);
@@ -476,7 +476,7 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setModelPlacement(const scour::core::ModelPlacement& p)
+	void SliceViewer::setModelPlacement(const windcfd::core::ModelPlacement& p)
 	{
 		if (!gz_valid_) return; // need a model (its pivot) first
 		// Decompose the affine linear part M = R·S: each column col_i = M·e_i = scale_i · (R's i-th column),
@@ -710,7 +710,7 @@ void main()
 
 	void SliceViewer::drawGizmo(const QMatrix4x4& mvp)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gizmoEditable() || !gizmo_on_) return;
 		if (!gizmo_vao_) { glGenVertexArrays(1, &gizmo_vao_); glGenBuffers(1, &gizmo_vbo_); }
 
@@ -886,7 +886,7 @@ void main()
 
 	void SliceViewer::initializeGL()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		initializeOpenGLFunctions();
 
 		const char* ver = reinterpret_cast<const char*>(glGetString(GL_VERSION));
@@ -991,7 +991,7 @@ void main()
 
 	void SliceViewer::buildArrowGlyph()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_) return;
 		// Unit arrow in the local (x=along-shaft, y=lateral) frame: a thin shaft rectangle plus a
 		// triangular head, filled triangles so it reads without relying on GL line width.
@@ -1028,7 +1028,7 @@ void main()
 
 	void SliceViewer::updateArrows()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !show_arrows_ || !worker_ || !have_info_)
 		{
 			arrow_draw_count_ = 0;
@@ -1083,7 +1083,7 @@ void main()
 
 	void SliceViewer::drawArrows(const QMatrix4x4& mvp)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!show_arrows_ || arrow_draw_count_ <= 0) return;
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1112,7 +1112,7 @@ void main()
 	// wires that layout onto the tracer VAO; the VBO is (re)sized on demand in updateTracers().
 	void SliceViewer::buildTracerBuffers()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_) return;
 		const int stride = FlowTracers::kStride * sizeof(float);
 		glBindVertexArray(tracer_vao_);
@@ -1128,7 +1128,7 @@ void main()
 
 	void SliceViewer::updateTracers()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !show_tracers_ || !worker_ || !have_info_)
 		{
 			tracer_strips_ = 0;
@@ -1199,7 +1199,7 @@ void main()
 
 	void SliceViewer::drawTracers(const QMatrix4x4& mvp)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!show_tracers_ || tracer_strips_ <= 0) return;
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1244,7 +1244,7 @@ void main()
 
 	void SliceViewer::drawAxes(const QMatrix4x4& mvp)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!show_axes_) return;
 		if (axes_dirty_) buildAxesGeometry();
 		const QVector4D col[3] = {
@@ -1290,7 +1290,7 @@ void main()
 
 	void SliceViewer::drawAxesLabels(QPainter& p)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!show_axes_ || !have_info_) return;
 		p.setRenderHint(QPainter::TextAntialiasing, true);
 		const QColor cx(232, 96, 84), cy(110, 205, 120), cz(120, 160, 245), cw(235, 237, 240);
@@ -1331,7 +1331,7 @@ void main()
 
 	void SliceViewer::drawLegendWith(QPainter& p)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!have_info_) return;
 		p.setRenderHint(QPainter::Antialiasing, true);
 		p.setRenderHint(QPainter::TextAntialiasing, true);
@@ -1391,7 +1391,7 @@ void main()
 
 	void SliceViewer::buildSliceGeometry()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !have_info_) return;
 		SliceParams sp = currentParams();
 		std::vector<float> pos((size_t)NRES * NRES * 3);
@@ -1410,7 +1410,7 @@ void main()
 
 	void SliceViewer::buildBoxGeometry()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_) return;
 		float Lx = (float)info_.Lx, Ly = (float)info_.Ly, Lz = (float)info_.Lz;
 		if (Lx <= 0) { Lx = 10; Ly = 10; Lz = 5; }
@@ -1453,7 +1453,7 @@ void main()
 
 	void SliceViewer::buildAxesGeometry()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_) return;
 		float Lx = (float)info_.Lx, Ly = (float)info_.Ly, Lz = (float)info_.Lz;
 		if (Lx <= 0) { Lx = 10; Ly = 10; Lz = 5; }
@@ -1493,7 +1493,7 @@ void main()
 
 	void SliceViewer::buildCornerGizmo()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_) return;
 		// Three unit axes from the origin; drawn with a camera-rotation-only transform so it always
 		// shows the world X/Y/Z directions as seen from the current view.
@@ -1544,7 +1544,7 @@ void main()
 
 	void SliceViewer::drawClipPlaneViz(const QMatrix4x4& mvp, const QVector4D& plane)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !clip_enabled_ || !have_info_) return;
 		QVector3D n(plane.x(), plane.y(), plane.z());
 		if (n.lengthSquared() < 1e-8f) return;
@@ -1592,16 +1592,16 @@ void main()
 
 	void SliceViewer::uploadMesh()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !mesh_upload_pending_) return;
 		mesh_upload_pending_ = false;
 
-		const scour::core::TriMesh& m = pending_mesh_;
+		const windcfd::core::TriMesh& m = pending_mesh_;
 		if (m.empty())
 		{
 			has_mesh_ = false;
 			mesh_index_count_ = 0;
-			pending_mesh_ = scour::core::TriMesh{};
+			pending_mesh_ = windcfd::core::TriMesh{};
 			return;
 		}
 
@@ -1624,16 +1624,16 @@ void main()
 		// geometry. modelMatrix() supplies the placement at draw time.
 
 		has_mesh_ = true;
-		pending_mesh_ = scour::core::TriMesh{}; // free CPU copy; it lives in GL now
+		pending_mesh_ = windcfd::core::TriMesh{}; // free CPU copy; it lives in GL now
 	}
 
 	void SliceViewer::uploadVoxelOverlay()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !vox_upload_pending_) return;
 		vox_upload_pending_ = false;
 
-		const scour::core::MacGrid g = pending_vox_grid_;
+		const windcfd::core::MacGrid g = pending_vox_grid_;
 		const std::vector<unsigned char>& s = pending_vox_solid_;
 		if (s.empty() || (int)s.size() != g.p_count() || g.h <= 0.0)
 		{
@@ -1702,14 +1702,14 @@ void main()
 
 	void SliceViewer::resizeGL(int w, int h)
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 		glViewport(0, 0, w, h);
 		camera_.setViewport(w, h);
 	}
 
 	void SliceViewer::paintGL()
 	{
-		SCOUR_ASSERT_GL_THREAD();
+		WINDCFD_ASSERT_GL_THREAD();
 
 		// QPainter drives the 2D legend overlay (feature 3) AFTER the raw GL scene. All raw GL is
 		// fenced inside begin/endNativePainting so Qt's paint engine restores its own GL state.
@@ -1726,7 +1726,7 @@ void main()
 		if (worker_ && worker_->maskGeneration() != vox_mask_gen_)
 		{
 			std::vector<unsigned char> mask;
-			scour::core::MacGrid mg;
+			windcfd::core::MacGrid mg;
 			if (worker_->copyMask(mask, mg))
 			{
 				vox_mask_gen_ = worker_->maskGeneration();

@@ -41,7 +41,7 @@
 #include <limits>
 #include <utility>
 
-namespace scour::core
+namespace windcfd::core
 {
 	namespace
 	{

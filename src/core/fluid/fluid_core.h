@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace scour::core
+namespace windcfd::core
 {
 	// Host-side snapshot of the MAC fields (for validation/IO). Face-staggered.
 	struct FluidSnapshot

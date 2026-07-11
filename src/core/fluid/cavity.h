@@ -7,7 +7,7 @@
 
 #include "core/fluid/stam_fluid_core.h"
 
-namespace scour::core
+namespace windcfd::core
 {
 	struct CavityMetrics
 	{

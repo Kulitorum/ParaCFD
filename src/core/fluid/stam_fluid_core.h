@@ -11,7 +11,7 @@
 
 #include <memory>
 
-namespace scour::core
+namespace windcfd::core
 {
 	struct StamParams
 	{
