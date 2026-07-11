@@ -25,6 +25,7 @@
 // entry sets WORKING_DIRECTORY to the repo root so that path resolves.
 #include "core/fluid/channel_bc.h"
 #include "core/fluid/channel_ops.h"
+#include "core/fluid/channel_pressure.h"
 #include "core/fluid/grid_metrics.h"
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
@@ -630,6 +631,30 @@ int main(int argc, char** argv)
 		double order = std::log(err[0] / err[1]) / std::log(hf[0] / hf[1]);
 		char d[96]; std::snprintf(d, sizeof d, "err %.2e->%.2e  order=%.2f", err[0], err[1], order);
 		rep.check("mms_laplacian_order", order >= 0.9 && err[1] < err[0], d);
+	}
+
+	std::printf("-- graded MGPCG solve convergence w/ decimated coarse metrics (task 2.5) --\n");
+	{
+		// Even per-axis cell counts ⇒ a real multi-level hierarchy ⇒ the per-level decimation is
+		// exercised. Solve A x = b (Dirichlet outlet ⇒ non-singular) on an empty graded channel;
+		// convergence proves the graded coarse operators + transfers form a working preconditioner.
+		FineCoreSpec spec;
+		spec.Lx = spec.Ly = spec.Lz = 2.0;
+		spec.x0 = spec.y0 = spec.z0 = 0.75; spec.x1 = spec.y1 = spec.z1 = 1.25;
+		spec.h_fine = 0.0625; spec.growth = 1.15;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gd = gm.device_view(), gh = gm.host_view();
+		int NPg = gh.p_count();
+		std::vector<unsigned char> gsolid(NPg, 0);
+		unsigned char* gds = dev_u8(gsolid);
+		ChannelMgpcg solver(gd);
+		solver.build_masks(gds);
+		std::vector<double> b = filled(NPg, 301, -1.0, 1.0);
+		double* db = dev(b); double* dxs = dev_zero(NPg);
+		SolveResult res = solver.solve(dxs, db, 1e-5, 500, false);
+		int levels = (int)solver.levels().size();
+		char d[96]; std::snprintf(d, sizeof d, "%dx%dx%d %d lvls %d it relres %.1e", gh.nx, gh.ny, gh.nz, levels, res.iters, res.relres);
+		rep.check("graded_mgpcg_solve", res.converged, d);
 	}
 
 	free_all();

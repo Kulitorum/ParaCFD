@@ -44,10 +44,16 @@ namespace windcfd::core
 		void vcycle(int level);
 		void precondition(const double* r, double* z);
 		void apply_finest(const double* p, double* Ap);
+		// Graded grids (finest carries metric arrays): give each COARSE level its own metrics by
+		// decimating the finer level's cumulative face coords (xf_coarse[i]=xf_fine[2i] ⇒
+		// dx_coarse[i]=dx_fine[2i]+dx_fine[2i+1]) — NOT by averaging dx (design D3 care-item B). A
+		// uniform finest (null metrics) skips this: each level's scalar h=2^l·h is already correct.
+		void build_level_metrics(const MacGrid& finest);
 
 		std::vector<MacGrid> grids_;
 		std::vector<double*> Lp_, Lrhs_, Ltmp_;
 		std::vector<unsigned char*> Lsolid_;
+		std::vector<double*> metric_allocs_; // owned per-level metric device arrays (graded only)
 		int n0_ = 0, dir_xmax_ = 1;
 		double *r_ = nullptr, *z_ = nullptr, *s_ = nullptr, *As_ = nullptr;
 	};

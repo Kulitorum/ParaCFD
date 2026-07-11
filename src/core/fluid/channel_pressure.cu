@@ -33,6 +33,41 @@ namespace windcfd::core
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			if (solid[t]) p[t] = 0.0;
 		}
+		// Coarse face coords by decimation: coarse_xf[i] = fine_xf[2i] (design D3 care-item B).
+		__global__ void k_decimate_faces(const double* fine_xf, double* coarse_xf, int ncp1)
+		{
+			int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= ncp1) return;
+			coarse_xf[i] = fine_xf[2 * i];
+		}
+		// Cell widths + centres from cumulative faces.
+		__global__ void k_faces_to_metrics(const double* xf, double* dx, double* xc, int nc)
+		{
+			int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= nc) return;
+			dx[i] = xf[i + 1] - xf[i];
+			xc[i] = 0.5 * (xf[i] + xf[i + 1]);
+		}
+	}
+
+	void ChannelMgpcg::build_level_metrics(const MacGrid& finest)
+	{
+		if (!finest.xfa) return; // uniform finest ⇒ per-level scalar h is already correct; nothing to do
+		grids_[0] = finest;      // level 0 uses the finest's (graded) metric pointers directly
+		// One axis, one level: allocate coarse xf/dx/xc, decimate from the finer level's xf, derive.
+		auto build_axis = [&](const double* fine_xf, int nc, const double*& out_xf, const double*& out_dx, const double*& out_xc)
+		{
+			double* cxf = dalloc(nc + 1); double* cdx = dalloc(nc); double* cxc = dalloc(nc);
+			metric_allocs_.push_back(cxf); metric_allocs_.push_back(cdx); metric_allocs_.push_back(cxc);
+			k_decimate_faces<<<gsz(nc + 1), 256>>>(fine_xf, cxf, nc + 1);
+			k_faces_to_metrics<<<gsz(nc), 256>>>(cxf, cdx, cxc, nc);
+			out_xf = cxf; out_dx = cdx; out_xc = cxc;
+		};
+		for (size_t l = 1; l < grids_.size(); ++l)
+		{
+			MacGrid& g = grids_[l];
+			build_axis(grids_[l - 1].xfa, g.nx, g.xfa, g.dxa, g.xca);
+			build_axis(grids_[l - 1].yfa, g.ny, g.yfa, g.dya, g.yca);
+			build_axis(grids_[l - 1].zfa, g.nz, g.zfa, g.dza, g.zca);
+		}
 	}
 
 	ChannelMgpcg::ChannelMgpcg(MacGrid finest)
@@ -46,6 +81,7 @@ namespace windcfd::core
 			MacGrid c; c.nx = g.nx / 2; c.ny = g.ny / 2; c.nz = g.nz / 2; c.h = g.h * 2.0;
 			grids_.push_back(c); g = c;
 		}
+		build_level_metrics(finest); // graded finest ⇒ give each coarse level decimated metrics
 		for (auto& lg : grids_)
 		{
 			int n = lg.p_count();
@@ -61,6 +97,7 @@ namespace windcfd::core
 		for (auto p : Lrhs_) cudaFree(p);
 		for (auto p : Ltmp_) cudaFree(p);
 		for (auto p : Lsolid_) cudaFree(p);
+		for (auto p : metric_allocs_) cudaFree(p);
 		cudaFree(r_); cudaFree(z_); cudaFree(s_); cudaFree(As_);
 	}
 

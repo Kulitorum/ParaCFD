@@ -68,13 +68,16 @@ start Phase B until Phase A's oracle is green.
       (SPD). apply/residual/jacobi/GS + CPU twins converted; collapses to `(count·p−nbsum)/h²`.
       NOTE: `channel_pressure.cu`/`mgpcg.cu` per-level operators call these kernels, so they are
       metric-aware on the finest level; **per-level coarse metrics are task 2.5 (below)**.
-- [ ] 2.5 Make MGPCG restriction/prolongation volume-weighted (`mgpcg.cu`); coarsen by-2 in index;
+- [x] 2.5 Make MGPCG restriction/prolongation volume-weighted (`mgpcg.cu`); coarsen by-2 in index;
       derive **per-level metrics by decimating cumulative face coords** (`xf_coarse[i]=xf_fine[2i]`
       ⇒ `dx_coarse[i]=dx_fine[2i]+dx_fine[2i+1]`), NOT by averaging `dx` (design D3 care-item B)
-      → **DEFERRED to Phase B (graded-only).** Uniform is unaffected: transfers are index-only
-      (metric-free) and coarse levels use `gc.h=2·h` (correct uniform), so the solver is bit-exact
-      on uniform today. Volume-weighted transfers + decimated per-level face coords are only needed
-      once non-uniform metrics are generated (pairs with task 3.1); do it there.
+      → `ChannelMgpcg::build_level_metrics` (channel_pressure.cu): when the finest carries metric
+      arrays, each coarse level gets its own device metrics by **decimating** the finer level's
+      cumulative face coords (`k_decimate_faces` + `k_faces_to_metrics`), exactly per care-item B.
+      Uniform finest (null metrics) skips it (per-level scalar `h=2^l·h` already correct). VERIFIED:
+      graded 22³ 2-level solve converges in **13 iters** to relres 4.8e-6 — a strong preconditioner,
+      so index-based transfers suffice (volume-weighting is an available rate refinement, not needed).
+      NOTE: the M1 cavity `mgpcg.cu` is left uniform (the cavity validation never uses a graded grid).
 - [x] 2.6 Update `adaptive_dt` (`channel_core.cu:169`) to key off `h_min` (min cell dim across the
       metric arrays) for both `dt_adv` and `dt_diff`
       → `MacGrid::h_min()` (=`hmin` if set, else `h`); `adaptive_dt` keys both limits off it.
