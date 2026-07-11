@@ -234,8 +234,19 @@ namespace windcfd::gui
 		j["state_bc"] = bc_json(s.bc);
 		j["solid_mode"] = s.solid_mode;
 		j["bed_inlet_mask"] = s.bed_inlet_mask;
-		j["has_mesh"] = d.has_mesh;
-		if (d.has_mesh)
+		// The STEP is the source of truth: when present, persist it and DROP the derived triangulation
+		// (it is regenerated on load). Only embed the mesh blobs for a model with NO STEP source
+		// (legacy / non-STEP meshes) so old scenes still display. bbox + placement meta are kept for
+		// either kind (header display + camera framing before the mesh is reconstructed).
+		const bool store_step = !d.step_data.empty();
+		const bool store_mesh_blob = d.has_mesh && !store_step;
+		const bool has_model = d.has_mesh || store_step;
+		j["has_mesh"] = store_mesh_blob;
+		j["has_step"] = store_step;
+		j["mesh_is_centerline"] = d.mesh_is_centerline;
+		j["step_name"] = d.step_name;
+		j["step_deflection"] = d.step_deflection;
+		if (has_model)
 		{
 			j["mesh"] = {
 				{"bbox_min", { d.mesh.bbox_min[0], d.mesh.bbox_min[1], d.mesh.bbox_min[2] }},
@@ -256,7 +267,8 @@ namespace windcfd::gui
 		write_u8(out, "base_solid", d.recipe.base_solid);
 		write_f32(out, "u", s.u); write_f32(out, "v", s.v); write_f32(out, "w", s.w); write_f32(out, "p", s.p);
 		write_u8(out, "solid", s.solid);
-		if (d.has_mesh)
+		if (store_step) write_u8(out, "step_data", d.step_data); // the source .stp (regenerates the mesh on load)
+		if (store_mesh_blob)
 		{
 			write_f32raw(out, "mesh_pos", d.mesh.positions);
 			write_f32raw(out, "mesh_norm", d.mesh.normals);
@@ -296,7 +308,7 @@ namespace windcfd::gui
 		hdr.name = j.value("name", std::string());
 		hdr.steps = j.value("steps", (long long)0);
 		hdr.sim_time = j.value("sim_time", 0.0);
-		hdr.has_mesh = j.value("has_mesh", false);
+		hdr.has_mesh = j.value("has_mesh", false) || j.value("has_step", false); // model present (mesh or STEP source)
 		if (j.contains("grid"))
 		{
 			const auto& g = j.at("grid");
@@ -349,13 +361,24 @@ namespace windcfd::gui
 		s.u = as_f64(blobs, "u"); s.v = as_f64(blobs, "v"); s.w = as_f64(blobs, "w"); s.p = as_f64(blobs, "p");
 		s.solid = as_u8(blobs, "solid");
 
-		// display mesh
-		d.has_mesh = j.value("has_mesh", false);
-		if (d.has_mesh)
+		// Model: prefer the embedded STEP (source of truth); a legacy scene instead stored the mesh
+		// blobs directly. Either way, bbox + placement meta live in the JSON.
+		const bool has_mesh_blob = j.value("has_mesh", false);
+		const bool has_step = j.value("has_step", false);
+		d.mesh_is_centerline = j.value("mesh_is_centerline", false); // absent in pre-flag scenes ⇒ plain STEP mesh
+		d.step_name = j.value("step_name", std::string());
+		d.step_deflection = j.value("step_deflection", 0.1);
+		if (has_step) d.step_data = as_u8(blobs, "step_data");
+
+		const bool has_model = has_mesh_blob || !d.step_data.empty();
+		if (has_model)
 		{
-			d.mesh.positions = as_f32(blobs, "mesh_pos");
-			d.mesh.normals = as_f32(blobs, "mesh_norm");
-			d.mesh.indices = as_u32(blobs, "mesh_idx");
+			if (has_mesh_blob) // legacy: the triangulation was embedded directly (no STEP source)
+			{
+				d.mesh.positions = as_f32(blobs, "mesh_pos");
+				d.mesh.normals = as_f32(blobs, "mesh_norm");
+				d.mesh.indices = as_u32(blobs, "mesh_idx");
+			}
 			if (j.contains("mesh"))
 			{
 				const auto& m = j.at("mesh");
@@ -372,8 +395,11 @@ namespace windcfd::gui
 				if (p.contains("m") && p.at("m").is_array() && p.at("m").size() == 9)
 					for (int i = 0; i < 9; ++i) d.place.m[i] = p.at("m")[i].get<double>();
 			}
-			if (d.mesh.indices.empty()) d.has_mesh = false; // mesh flagged but blobs absent ⇒ treat as none
 		}
+		// has_mesh reflects whether d.mesh currently holds triangles. For a STEP-sourced scene it is
+		// EMPTY here — the caller reconstructs it from step_data (load_step_mesh_from_memory).
+		d.has_mesh = !d.mesh.indices.empty();
+		if (!has_model) d.mesh_is_centerline = false; // no model ⇒ nothing to build from
 		return true;
 	}
 

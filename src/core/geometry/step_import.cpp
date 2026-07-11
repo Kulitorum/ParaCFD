@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <utility>
 
 namespace windcfd::core
@@ -50,19 +51,11 @@ namespace windcfd::core
 			if (error) *error = msg;
 		}
 
-		// Read + transfer a STEP file to its single shape and triangulate it in place (BRepMesh).
-		// Returns false with *error set on any read/transfer/null-shape failure. deflection is in
-		// OCC's native millimetres. May throw Standard_Failure (OCC) — callers wrap in try/catch.
-		bool read_step_shape(const std::string& path, double deflection_mm, TopoDS_Shape& out, std::string* error)
+		// Transfer a loaded reader's roots to a single shape and triangulate it in place (BRepMesh).
+		// Shared tail of the file- and stream-based readers below. Returns false with *error set on
+		// transfer/null-shape failure. deflection is in OCC's native millimetres.
+		bool transfer_and_mesh(STEPControl_Reader& reader, double deflection_mm, TopoDS_Shape& out, std::string* error)
 		{
-			STEPControl_Reader reader;
-			IFSelect_ReturnStatus status = reader.ReadFile(path.c_str());
-			if (status != IFSelect_RetDone)
-			{
-				set_error(error, "STEPControl_Reader::ReadFile failed for '" + path + "'");
-				return false;
-			}
-
 			Standard_Integer nroots = reader.TransferRoots();
 			if (nroots <= 0)
 			{
@@ -82,6 +75,35 @@ namespace windcfd::core
 			BRepMesh_IncrementalMesh mesher(out, deflection_mm);
 			mesher.Perform();
 			return true;
+		}
+
+		// Read + transfer a STEP file to its single shape and triangulate it in place (BRepMesh).
+		// Returns false with *error set on any read/transfer/null-shape failure. deflection is in
+		// OCC's native millimetres. May throw Standard_Failure (OCC) — callers wrap in try/catch.
+		bool read_step_shape(const std::string& path, double deflection_mm, TopoDS_Shape& out, std::string* error)
+		{
+			STEPControl_Reader reader;
+			IFSelect_ReturnStatus status = reader.ReadFile(path.c_str());
+			if (status != IFSelect_RetDone)
+			{
+				set_error(error, "STEPControl_Reader::ReadFile failed for '" + path + "'");
+				return false;
+			}
+			return transfer_and_mesh(reader, deflection_mm, out, error);
+		}
+
+		// Read + transfer a STEP file held in an in-memory stream (raw .stp bytes). Same pipeline as
+		// read_step_shape but sourced from a stream — used to reconstruct a scene's embedded STEP.
+		bool read_step_shape_stream(std::istream& in, double deflection_mm, TopoDS_Shape& out, std::string* error)
+		{
+			STEPControl_Reader reader;
+			IFSelect_ReturnStatus status = reader.ReadStream("scene.stp", in);
+			if (status != IFSelect_RetDone)
+			{
+				set_error(error, "STEPControl_Reader::ReadStream failed (embedded STEP bytes)");
+				return false;
+			}
+			return transfer_and_mesh(reader, deflection_mm, out, error);
 		}
 
 		// Accumulate every triangulated FACE of `shape` into one TriMesh (metres, outward winding,
@@ -192,6 +214,37 @@ namespace windcfd::core
 			if (mesh.empty())
 			{
 				set_error(error, "shape produced no triangulable faces");
+				return TriMesh{};
+			}
+			if (error) error->clear();
+			return mesh;
+		}
+		catch (const Standard_Failure& f)
+		{
+			set_error(error, std::string("OpenCascade exception: ") + f.GetMessageString());
+			return TriMesh{};
+		}
+	}
+
+	TriMesh load_step_mesh_from_memory(const std::vector<unsigned char>& step_bytes, double deflection_mm, std::string* error)
+	{
+		if (step_bytes.empty())
+		{
+			set_error(error, "empty STEP byte buffer");
+			return TriMesh{};
+		}
+		try
+		{
+			std::string s(reinterpret_cast<const char*>(step_bytes.data()), step_bytes.size());
+			std::istringstream in(s, std::ios::binary);
+
+			TopoDS_Shape shape;
+			if (!read_step_shape_stream(in, deflection_mm, shape, error)) return TriMesh{};
+
+			TriMesh mesh = mesh_from_faces(shape);
+			if (mesh.empty())
+			{
+				set_error(error, "embedded STEP produced no triangulable faces");
 				return TriMesh{};
 			}
 			if (error) error->clear();

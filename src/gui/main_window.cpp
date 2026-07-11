@@ -21,6 +21,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -56,6 +57,19 @@
 
 namespace windcfd::gui
 {
+	namespace
+	{
+		// Slurp a file's raw bytes (the source .stp) so a saved scene can embed the STEP itself, not
+		// the derived triangulation. Returns empty on any read error (the caller degrades gracefully).
+		std::vector<unsigned char> read_file_bytes(const QString& path)
+		{
+			QFile f(path);
+			if (!f.open(QIODevice::ReadOnly)) return {};
+			const QByteArray a = f.readAll();
+			return std::vector<unsigned char>(a.constBegin(), a.constEnd());
+		}
+	}
+
 	MainWindow::MainWindow(std::unique_ptr<windcfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
 		QWidget* parent)
 		: QMainWindow(parent), recipe_(recipe)
@@ -1223,6 +1237,15 @@ namespace windcfd::gui
 		SceneFile sf;
 		sf.def.recipe = recipe_;
 		sf.def.has_mesh = !scene_mesh_.empty();
+		// Record whether the display mesh is a building CENTERLINE (so a restored scene routes it back into
+		// centerline_mesh_ and Build can re-voxelize it) or a plain STEP-as-mesh obstacle. When a centerline is
+		// loaded, model_mesh_ is deliberately empty and scene_mesh_ holds the centerline (see loadCenterline).
+		sf.def.mesh_is_centerline = !centerline_mesh_.empty();
+		// Embed the SOURCE STEP (the source of truth); write_scene then drops the derived triangulation and
+		// regenerates it on load. Empty ⇒ legacy path embeds the mesh blobs instead.
+		sf.def.step_data = step_data_;
+		sf.def.step_name = step_source_name_;
+		sf.def.step_deflection = 0.1; // matches the deflection the load paths pass to load_step_mesh
 		if (sf.def.has_mesh)
 		{
 			sf.def.mesh = scene_mesh_;
@@ -1333,9 +1356,37 @@ namespace windcfd::gui
 		core->set_inlet_speed(st.bc.U_inlet);
 		core->load_state_host(st.u, st.v, st.w, st.p);
 
-		// GUI-side provenance so a later Apply rebuilds correctly.
-		model_mesh_ = d.has_mesh ? d.mesh : windcfd::core::TriMesh{};
-		scene_mesh_ = model_mesh_;
+		// SOURCE OF TRUTH: the scene embeds the STEP — regenerate the triangulation from it here. The
+		// stored mesh (d.mesh) is only a LEGACY fallback for scenes saved before STEP embedding. Keep the
+		// bytes so a later re-save re-embeds them.
+		step_data_ = d.step_data;
+		step_source_name_ = d.step_name;
+		windcfd::core::TriMesh model = d.mesh; // legacy scenes carry the triangulation directly
+		if (!d.step_data.empty())
+		{
+			std::string err;
+			windcfd::core::TriMesh regen = windcfd::core::load_step_mesh_from_memory(d.step_data, d.step_deflection, &err);
+			if (!regen.empty()) model = std::move(regen);
+			else std::fprintf(stderr, "[scene] STEP regenerate failed (%s) — falling back to stored mesh\n", err.c_str());
+		}
+		const bool have_model = !model.empty();
+
+		// Route the model to the member each rebuild path reads: a building CENTERLINE feeds buildBuilding
+		// (section → solid), a plain STEP feeds applyGrid (mesh re-voxelize) — otherwise Build reports "no
+		// centerline loaded". For a centerline, model_mesh_ MUST stay empty (that is how applyGrid tells the
+		// two apart); the injected surface mode comes from the restored solid mode.
+		if (have_model && d.mesh_is_centerline)
+		{
+			centerline_mesh_ = model;
+			centerline_noslip_ = (st.solid_mode == windcfd::core::SOLID_NOSLIP);
+			model_mesh_ = windcfd::core::TriMesh{};
+		}
+		else
+		{
+			model_mesh_ = have_model ? model : windcfd::core::TriMesh{};
+			centerline_mesh_ = windcfd::core::TriMesh{};
+		}
+		scene_mesh_ = have_model ? model : windcfd::core::TriMesh{};
 		scene_place_ = d.place;
 
 		const SimInfo& info = recipe_.info;
@@ -1350,11 +1401,12 @@ namespace windcfd::gui
 
 		spawnWorker(std::move(core), st.steps, st.sim_time);
 
-		// Fluid viewer with a display mesh: attach it here (the obstacle is already baked into the restored
-		// solid mask — no re-voxelize).
-		if (d.has_mesh && viewer_)
+		// Fluid viewer with a display mesh: attach the regenerated model (the obstacle is already baked into
+		// the restored solid mask — no re-voxelize). scene_mesh_ holds it for both the centerline and plain
+		// cases (model_mesh_ is empty for a centerline).
+		if (have_model && viewer_)
 		{
-			viewer_->setMesh(windcfd::core::TriMesh(model_mesh_));
+			viewer_->setMesh(windcfd::core::TriMesh(scene_mesh_));
 			viewer_->setModelPlacement(d.place); // restore the saved gizmo placement (move/rotate/scale)
 			model_injected_ = true;
 		}
@@ -1397,6 +1449,9 @@ namespace windcfd::gui
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
+		centerline_mesh_ = windcfd::core::TriMesh{}; // a plain STEP is the mesh obstacle, not a centerline
+		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the mesh on load)
+		step_source_name_ = QFileInfo(path).fileName().toStdString();
 		scene_place_ = windcfd::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
 		if (viewer_) viewer_->setMesh(std::move(mesh));
 		addRecentFile(path);          // remember it in the Recent Files menu (feature 1)
@@ -1433,6 +1488,8 @@ namespace windcfd::gui
 
 		centerline_mesh_ = mesh; // keep the centerline so Build can re-run without reloading
 		centerline_noslip_ = noslip;
+		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the centerline on load)
+		step_source_name_ = QFileInfo(path).fileName().toStdString();
 
 		// A centerline defines a BUILDING obstacle, not a STEP-as-mesh obstacle: keep model_mesh_ EMPTY so
 		// the Apply/Build paths use the centerline→building voxelizer (not voxelize_mesh over a stale mesh).
@@ -1454,20 +1511,24 @@ namespace windcfd::gui
 	void MainWindow::buildBuilding()
 	{
 		using namespace windcfd::core;
-		if (centerline_mesh_.empty())
+		// Build voxelizes the loaded model as a building. Prefer the centerline; fall back to a plain loaded
+		// model (model_mesh_) so Build also works for a plain STEP and for LEGACY scenes restored before STEP
+		// embedding (their model lands in model_mesh_, with no centerline flag to route it otherwise).
+		const TriMesh& src_mesh = !centerline_mesh_.empty() ? centerline_mesh_ : model_mesh_;
+		if (src_mesh.empty())
 		{
-			statusBar()->showMessage("no centerline loaded — File ▸ Open centerline STEP…", 5000);
+			statusBar()->showMessage("no model loaded — File ▸ Open centerline STEP…", 5000);
 			return;
 		}
 		if (!worker_) { statusBar()->showMessage("no active simulation to build into", 4000); return; }
 
-		// 1) Place the centerline WHERE THE GIZMO PUT IT: the user can translate/rotate/scale the house, so
+		// 1) Place the model WHERE THE GIZMO PUT IT: the user can translate/rotate/scale the house, so
 		//    voxelize the TRANSFORMED model. Read the live placement from the viewer (default centre-on-bed);
 		//    placed_mesh applies it to every vertex so the section/voxelization land under the drawn mesh.
 		const ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
 			? viewer_->modelPlacement()
-			: place_model_on_bed(centerline_mesh_, recipe_.info.Lx, recipe_.info.Ly);
-		const TriMesh placed = placed_mesh(centerline_mesh_, place);
+			: place_model_on_bed(src_mesh, recipe_.info.Lx, recipe_.info.Ly);
+		const TriMesh placed = placed_mesh(src_mesh, place);
 
 		// 2) Section the PLACED centerline to a 2D footprint at mid-height (NaN = robust mid-section). The
 		//    footprint is already in domain xy coordinates (the placement positions the building), so no

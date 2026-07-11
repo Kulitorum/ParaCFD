@@ -27,6 +27,12 @@ namespace windcfd::core
 	// returned TriMesh is empty() and, if `error` is non-null, it holds a human-readable reason.
 	TriMesh load_step_mesh(const std::string& path, double deflection_mm = 0.1, std::string* error = nullptr);
 
+	// Same as load_step_mesh but sourced from the raw STEP file BYTES held in memory (the exact
+	// contents of the .stp), not a path. A saved scene embeds the STEP (the source of truth) and
+	// reconstructs the triangulation from it on load — the mesh is a derived artifact, so we store
+	// the STEP and regenerate, never the other way round. Empty() on failure (as load_step_mesh).
+	TriMesh load_step_mesh_from_memory(const std::vector<unsigned char>& step_bytes, double deflection_mm = 0.1, std::string* error = nullptr);
+
 	// Read + triangulate a STEP file into ONE mesh PER SOLID (metres, outward normals) — the
 	// convex-piece decomposition for the drop/settle preparation phase (PLAN G3). Each returned
 	// mesh is one convex collision piece: its vertices become a Jolt ConvexHullShape, while the

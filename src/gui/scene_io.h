@@ -52,12 +52,25 @@ namespace windcfd::gui
 	using CheckpointStatePtr = std::shared_ptr<CheckpointState>;
 
 	// The static scene definition: enough to reconstruct the sim + display the STEP model.
+	//
+	// SOURCE OF TRUTH: the STEP file bytes (`step_data`). The triangulated `mesh` is a DERIVED
+	// artifact — a STEP can always be re-triangulated, but the triangulation can't be turned back
+	// into a STEP. So a scene persists the STEP and regenerates the mesh on load (see write/read).
+	// `mesh` is populated in memory (loaded or reconstructed) for display/voxelization/bbox, and
+	// `has_mesh` says whether it currently holds triangles. Legacy scenes (pre-STEP-embedding) have
+	// no step_data and fall back to a mesh that WAS stored in the file.
 	struct SceneDefinition
 	{
 		SimRecipe recipe;                              // grid, bc, pr, base_solid, init, provenance, info
-		bool has_mesh = false;
-		windcfd::core::TriMesh mesh;                     // display STEP mesh (metres); empty ⇒ none
+		bool has_mesh = false;                           // true ⇒ `mesh` holds a triangulation (in memory)
+		windcfd::core::TriMesh mesh;                     // display/voxelize mesh (metres); derived from step_data
 		windcfd::core::ModelPlacement place;             // where the mesh sits (display translate)
+		bool mesh_is_centerline = false;                 // true ⇒ model is a building CENTERLINE (Build re-voxelizes
+		                                                 // it via the centerline→solid pipeline), false ⇒ plain
+		                                                 // STEP-as-mesh obstacle. Absent in pre-flag scenes ⇒ false.
+		std::vector<unsigned char> step_data;            // raw bytes of the source .stp (SOURCE OF TRUTH); empty ⇒ none
+		std::string step_name;                           // original STEP filename (provenance/logging)
+		double step_deflection = 0.1;                    // BRepMesh deflection (mm) used ⇒ reproduces the same mesh
 	};
 
 	// A complete .scn = the static definition + the full dynamic state.

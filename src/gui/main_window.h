@@ -301,6 +301,12 @@ namespace windcfd::gui
 		// the building without reloading the STEP. Distinct from model_mesh_ (the STEP-as-mesh obstacle).
 		windcfd::core::TriMesh centerline_mesh_; // stored centerline (empty until a centerline is loaded)
 		bool centerline_noslip_ = false;         // surface mode for the injected building solid
+
+		// The loaded model's SOURCE STEP bytes (the source of truth). The triangulated meshes above are
+		// a derived artifact; a saved scene embeds these bytes and regenerates the mesh on load. Kept in
+		// memory so an auto-save/checkpoint can embed the STEP without re-reading (the file may have moved).
+		std::vector<unsigned char> step_data_;   // raw .stp bytes of the loaded model (empty ⇒ none)
+		std::string step_source_name_;           // original STEP filename (provenance)
 		QDoubleSpinBox* wall_thick_spin_ = nullptr;
 		QDoubleSpinBox* wall_height_spin_ = nullptr;
 		QDoubleSpinBox* corner_radius_spin_ = nullptr;
