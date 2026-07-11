@@ -379,24 +379,27 @@ namespace windcfd::core
 		const double roof_reach = half + prm.roof_overhang;
 
 		// xy region that can possibly be solid (footprint + wall/overhang reach), as cell indices.
+		// World→cell index via the grid's world↔index map (graded-aware; floor(v/h) on a uniform grid).
 		const double reach = std::max(half, half + prm.roof_overhang) + 1.5 * g.h;
-		auto ci = [&](double v, int n) { int c = (int)std::floor(v / g.h); return c < 0 ? 0 : (c > n - 1 ? n - 1 : c); };
-		const int i0 = ci(fp.bbox_min[0] - reach, g.nx), i1 = ci(fp.bbox_max[0] + reach, g.nx);
-		const int j0 = ci(fp.bbox_min[1] - reach, g.ny), j1 = ci(fp.bbox_max[1] + reach, g.ny);
+		auto clampc = [](int c, int n) { return c < 0 ? 0 : (c > n - 1 ? n - 1 : c); };
+		const int i0 = clampc((int)std::floor(grid_fx(g, fp.bbox_min[0] - reach)), g.nx);
+		const int i1 = clampc((int)std::floor(grid_fx(g, fp.bbox_max[0] + reach)), g.nx);
+		const int j0 = clampc((int)std::floor(grid_fy(g, fp.bbox_min[1] - reach)), g.ny);
+		const int j1 = clampc((int)std::floor(grid_fy(g, fp.bbox_max[1] + reach)), g.ny);
 
 		int wall_cells = 0, roof_cells = 0;
 		for (int k = 0; k < g.nz; ++k)
 		{
-			const double cz = (k + 0.5) * g.h;
+			const double cz = g.zc(k); // cell-centre world z (graded-aware; (k+0.5)h uniform)
 			const bool inWall = (cz >= prm.base_z && cz <= top);
 			const bool inRoof = (prm.roof_thickness > 0.0 && cz > top && cz <= roof_top);
 			if (!inWall && !inRoof) continue;
 			for (int j = j0; j <= j1; ++j)
 			{
-				const double cy = (j + 0.5) * g.h;
+				const double cy = g.yc(j);
 				for (int i = i0; i <= i1; ++i)
 				{
-					const double cx = (i + 0.5) * g.h;
+					const double cx = g.xc(i);
 					bool solid = false;
 					if (inWall)
 					{

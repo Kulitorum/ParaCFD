@@ -124,8 +124,17 @@ start Phase B until Phase A's oracle is green.
 
 ## 4. Phase B — Consumers
 
-- [ ] 4.1 Update the building voxelizer (`voxelize.*`, `building.cpp`) to use local cell size for
+- [x] 4.1 Update the building voxelizer (`voxelize.*`, `building.cpp`) to use local cell size for
       the wall band; the committed `0.5·h·√2` floor (`d648cb6`) becomes a no-op inside the fine core
+      → `building.cpp`: world→cell via the grid map — bbox range `floor(grid_fx/fy/fz)`, cell centres
+      `g.xc/yc/zc(i)` (were `(i+0.5)·h`). The `0.5·g.h·√2` wall floor stays correct: `g.h==h_fine`
+      is the local cell size in the (uniform) core, and at h_fine=0.03 the 0.08 m wall dominates the
+      floor (no-op), resolving ~2.7 cells. `voxelize.cpp` (mesh ray-parity voxelizer): the model must
+      sit in the uniform core where `xf(i)=i·h+Δ` (per-axis constant Δ), so shifting the placed
+      geometry by −Δ makes the uniform sub-lattice's `floor(x/h)` equal the graded core-cell index —
+      reuses all the parity code; uniform grid ⇒ `xfa` null ⇒ Δ=0 (byte-identical). VERIFIED
+      (`parity_probe`): a square footprint at world (1,1) voxelizes to solid cells centred on (1,1),
+      all in the uniform core — the old `floor(x/h)` would mis-place it.
 - [ ] 4.2 Update the CUDA-GL slice sampler (`slice_field.cu`, `slice_gl.cu`) to sample via the
       world→index mapping
 - [x] 4.3 **windloads (`windloads.cpp`) — the deliverable**: feed `h_fine` (not a stale global `h`)

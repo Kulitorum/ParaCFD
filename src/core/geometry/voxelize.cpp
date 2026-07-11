@@ -85,7 +85,28 @@ namespace windcfd::core
 
 		// Cell index range overlapping the placed bbox (only these cells can be solid).
 		auto clampi = [](int v, int a, int b) { return v < a ? a : (v > b ? b : v); };
-		const int i0 = clampi((int)std::floor(lo[0] / h) - 1, 0, g.nx - 1);
+		// Graded grid: the model must live in the UNIFORM fine core (h_fine cubes; windloads asserts
+			// bbox ⊆ core). There xf(i)=i·h+Δ for a per-axis CONSTANT Δ, so this uniform voxelizer is exact
+			// once the placed geometry is shifted by −Δ: then floor(x/h) equals the correct graded CORE cell
+			// index. Δ is read from the cell containing the model bbox centre (a core cell). Uniform grid ⇒
+			// xfa null ⇒ Δ=0 (no shift, byte-identical). A model straddling the graded transition would
+			// mis-voxelize, but the load integration rejects that case (task 4.3).
+			if (g.xfa)
+			{
+				const int ic = clampi((int)std::floor(grid_fx(g, 0.5 * (lo[0] + hi[0]))), 0, g.nx - 1);
+				const int jc = clampi((int)std::floor(grid_fy(g, 0.5 * (lo[1] + hi[1]))), 0, g.ny - 1);
+				const int kc = clampi((int)std::floor(grid_fz(g, 0.5 * (lo[2] + hi[2]))), 0, g.nz - 1);
+				const double Dx = g.xf(ic) - ic * h, Dy = g.yf(jc) - jc * h, Dz = g.zf(kc) - kc * h;
+				for (Tri& tr : tris)
+				{
+					tr.ax -= Dx; tr.bx -= Dx; tr.cx -= Dx;
+					tr.ay -= Dy; tr.by -= Dy; tr.cy -= Dy;
+					tr.az -= Dz; tr.bz -= Dz; tr.cz -= Dz;
+				}
+				lo[0] -= Dx; hi[0] -= Dx; lo[1] -= Dy; hi[1] -= Dy; lo[2] -= Dz; hi[2] -= Dz;
+			}
+
+			const int i0 = clampi((int)std::floor(lo[0] / h) - 1, 0, g.nx - 1);
 		const int i1 = clampi((int)std::floor(hi[0] / h) + 1, 0, g.nx - 1);
 		const int j0 = clampi((int)std::floor(lo[1] / h) - 1, 0, g.ny - 1);
 		const int j1 = clampi((int)std::floor(hi[1] / h) + 1, 0, g.ny - 1);

@@ -29,6 +29,7 @@
 #include "core/fluid/grid_metrics.h"
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
+#include "core/geometry/building.h"
 #include "core/windloads.h"
 
 #include <cuda_runtime.h>
@@ -689,6 +690,39 @@ int main(int argc, char** argv)
 		try { std::vector<unsigned char> s = make_solid(0.45, 0.80); (void)compute_wind_loads(pf.data(), s.data(), gh, prm, nullptr); }
 		catch (const std::exception&) { threw = true; }
 		rep.check("windloads_transition_throws", threw, "building in transition rejected");
+	}
+
+	std::printf("-- voxelize_building world→index on a graded grid (task 4.1) --\n");
+	{
+		// A square wall centerline around world (1,1) must voxelize to solid cells AT world (1,1) — the
+		// graded world→index mapping. The old floor(x/h_fine) would mis-place it (the core doesn't start
+		// at x=0). Also assert every solid cell is in the uniform core (dx=dy=h_fine).
+		FineCoreSpec spec; spec.Lx = spec.Ly = 2.0; spec.Lz = 1.0;
+		spec.x0 = spec.y0 = 0.8; spec.x1 = spec.y1 = 1.2; spec.z0 = 0.0; spec.z1 = 0.6;
+		spec.h_fine = 0.04; spec.growth = 1.2;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gh = gm.host_view();
+		Footprint fp;
+		Loop2D loop; loop.push_back({0.9, 0.9}); loop.push_back({1.1, 0.9}); loop.push_back({1.1, 1.1}); loop.push_back({0.9, 1.1});
+		fp.loops.push_back(loop); fp.bbox_min = {0.9, 0.9}; fp.bbox_max = {1.1, 1.1};
+		BuildingParams bp; bp.wall_thickness = 0.06; bp.wall_height = 0.4; bp.corner_radius = 0.0; bp.roof_thickness = 0.0; bp.roof_overhang = 0.0; bp.base_z = 0.0;
+		int sc = 0;
+		std::vector<unsigned char> mask = voxelize_building(fp, bp, gh, &sc);
+		double xmn = 1e9, xmx = -1e9, ymn = 1e9, ymx = -1e9;
+		bool allcore = true;
+		for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+			if (mask[gh.pidx(i, j, k)])
+			{
+				xmn = std::min(xmn, gh.xc(i)); xmx = std::max(xmx, gh.xc(i));
+				ymn = std::min(ymn, gh.yc(j)); ymx = std::max(ymx, gh.yc(j));
+				if (std::fabs(gh.dx(i) - spec.h_fine) > 1e-9 || std::fabs(gh.dy(j) - spec.h_fine) > 1e-9) allcore = false;
+			}
+		// Solid bbox must be CENTRED on the footprint (1,1) and span ≈ the footprint width (0.2 m). The old
+		// floor(x/h_fine) mapping would place it at a different world location (the core doesn't start at 0).
+		bool located = sc > 0 && std::fabs(0.5 * (xmn + xmx) - 1.0) < 0.03 && std::fabs(0.5 * (ymn + ymx) - 1.0) < 0.03
+			&& (xmx - xmn) > 0.15 && (xmx - xmn) < 0.25 && (ymx - ymn) > 0.15 && (ymx - ymn) < 0.25;
+		char d[96]; std::snprintf(d, sizeof d, "%d cells x[%.2f,%.2f] y[%.2f,%.2f]", sc, xmn, xmx, ymn, ymx);
+		rep.check("voxelize_building_located", located && allcore, d);
 	}
 
 	free_all();
