@@ -1,361 +1,327 @@
-# PLAN.md — Implementation Plan: 3D Morphodynamic Scour-Protection Simulator
+# PLAN.md — Implementation Plan: WindCFD (wind loads on 3D-printed buildings)
 
-C++/CUDA simulator that ranks 3D-printed concrete shapes by their ability to make flowing
-sand settle inside them and keep it there. Physics is fully specified in **RESEARCH.md**
-(read its relevant section before implementing any milestone; constants come from there,
-never from memory). Detailed literature notes live in `research/`.
+GPU (CUDA) 3D incompressible-flow **LES** tool that quantifies how **wind** flows around
+3D-printed concrete buildings and the wind **loads** on their facade and roof, comparing
+**rounded** vs **sharp** building corners. The fluid is **air** in an atmospheric boundary
+layer (ABL) — bluff-body aerodynamics, not a hydraulic problem.
 
-This plan is written to be executed **one milestone per AI coding session** by cheaper
-models. Each milestone is self-contained, lists exactly what to build, and ends with an
-acceptance gate that must pass before the next milestone starts.
+WindCFD was forked from a sediment-transport simulator; **all** sediment / seabed / erosion
+code has been removed. What remains is a validated, GPU-resident incompressible fluid core
+plus a CAD-to-voxel geometry pipeline and a Qt/GL viewer — the foundation this plan builds a
+wind-load workflow on top of. Physics constants come from the referenced notes / benchmark
+papers, never from memory.
 
----
-
-## 1. Target machine & toolchain (verified on this machine, 2026-07)
-
-| Component | Version / Path |
-|---|---|
-| GPU | NVIDIA RTX 4090, 24 GB, driver 595.79 (CUDA driver API 13.2) |
-| CUDA toolkit | **13.1** — `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1`, `nvcc` on PATH. `CMAKE_CUDA_ARCHITECTURES=89` |
-| CPU / RAM | i9-13900K, 128 GB |
-| Compiler | MSVC 14.44 (VS2022 Professional), C++20 |
-| CMake | 4.1.1 (`C:\Program Files\CMake\bin`). Ninja bundled with VS2022 |
-| Qt | **6.11.1** — `C:/Qt/6.11.1/msvc2022_64` (also 6.10.1). Modules: Core, Gui, Widgets, OpenGLWidgets |
-| OpenCascade | **8.0** — `C:/OpenCASCADE-8.0/build2` (inc/, win64/vc14/lib, win64/vc14/bin); 7.9 fallback at `C:/OpenCASCADE-7.9.0-vc14-64/opencascade-7.9.0` |
-| TBB | 2021.13 — `C:/OpenCASCADE-7.9.0-vc14-64/3rdparty-vc14-64/tbb-2021.13.0-x64` (only if needed) |
-
-Configure/build (mirrors cobod-slicer conventions):
-```
-cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-⚠ **Host-compiler trap:** this machine ALSO has VS 18 Community (MSVC 14.51), which CUDA 13.1
-**rejects** ("unsupported Microsoft Visual Studio version" — only 2019–2022 supported), and
-`vswhere -latest` resolves to it. Build from the **x64 Native Tools Command Prompt for VS 2022
-(Professional)**, or pass
-`-DCMAKE_CUDA_HOST_COMPILER="C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"`
-(and matching `CMAKE_CXX_COMPILER`). Never use `-allow-unsupported-compiler`. Ninja is not on
-PATH — use the VS dev prompt or the VS-bundled ninja
-(`…/2022/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`).
-
-CMake: `project(WindCFD LANGUAGES CXX CUDA)`. Copy cobod-slicer's Qt auto-detect glob
-(`C:/Qt/6.*/msvc2022_64`, newest with valid Qt6Config) rather than hard-coding a Qt version.
-**Wire `enable_testing()` + ctest from M0** (the slicer team regrets not doing this).
-Copy `.clang-format` from `C:\CODE\cobod-slicer` (team style: Allman + IndentBraces, tabs,
-ColumnLimit 0). Conventional Commits (`feat:`, `fix:`, `test:`, …).
+The plan is written to be executed **one milestone per coding session**. Each forward
+milestone (W1…W8) is self-contained, states what to build and why, and ends with an
+acceptance criterion that must pass before the next one starts.
 
 ---
 
-## 2. What we simulate
+## 1. Goal & scope
 
-A 10×10×5 m patch of seabed with one printed unit or a small cluster (frontal area ≤ 3 m²
-→ blockage ≤ 6%), uniform voxels h = 5 cm ranking / 2.5 cm hero. Modern monopiles (8–11.5 m
-dia.) don't fit in this domain — near-pile conditions are represented by **amplified inflow
-(1.5–2.0×) + 10–20% turbulence intensity** (RESEARCH.md §1, §8). Scenario matrix: U = 0.5 /
-1.0 / 1.5 / 2.5 m/s × d50 = 0.2 / 0.35 / 1.0 / 5.0 mm (skip 5 mm @ 0.5 m/s — no motion).
+**Question:** for a 3D-printed concrete building in a design wind, how large are the wind
+loads on the facade and roof, and how do **rounded** corners change those loads versus
+**sharp** corners?
 
-Primary KPIs per shape: fitted equilibrium **trapped sand volume** inside the shape's control
-volume, **retention** under a subsequent higher-flow stage, **edge scour** depth at the
-perimeter, sinking/undermining volume beneath the unit.
+**Approach:** drive an ABL inflow (mean shear + resolved turbulence) past the building
+(imported/generated as a voxelized solid), run wall-modelled LES, sample the surface
+pressure on the envelope, integrate it into pressure coefficients and force/moment
+coefficients, and compare two geometries that differ **only** in corner radius under matched
+inflow and grid.
+
+**In scope:** single isolated building (optionally a small cluster), incompressible air,
+mean + fluctuating + peak surface pressures, drag/lift/side-force, roof uplift, base moments,
+and the rounded-vs-sharp delta. **Out of scope (for now):** compressibility, thermal
+stratification / buoyancy, rain/driven-particle effects, full urban context, structural
+response (this produces the aerodynamic loads a structural check would consume).
+
+**Fluid:** air — ρ ≈ 1.225 kg/m³, ν ≈ 1.5e-5 m²/s. ⚠ The current `Config` defaults still
+carry the inherited **seawater** values (ρ = 1027, ν = 1.36e-6); switching them is the first
+forward task (W1).
 
 ---
 
-## 3. Architecture
+## 2. Current state — what already works
 
-Three CMake targets; the core has no Qt dependency:
+Everything below is **implemented, builds, and has a passing gate or smoke run**. The forward
+work in §4 is genuinely future — do not assume any W-milestone feature exists yet.
+
+**Fluid core (complete).**
+- MAC staggered grid, MacCormack semi-Lagrangian advection (clamp + near-solid reversion),
+  explicit Smagorinsky LES eddy viscosity, MGPCG pressure projection (Jacobi fallback),
+  no-slip / free-slip walls, divergence check.
+  *Gate that survives:* lid-driven cavity 128³ vs **Ghia (1982)** centreline profiles < 5%
+  at Re=100; MGPCG convergence + `max|div u|` tolerances (`gate_M1`).
+- Open-channel flow: log-law inlet, Orlanski-type convective outlet + flux balance + pressure
+  pin, rigid lid, voxel **obstacle mask**, free-slip **and** no-slip solids.
+  *Gate that survives:* circular-cylinder **Cd / Strouhal** at Re=100 & 200 (Kármán street,
+  Cd ≈ 1.33–1.4, St ≈ 0.165) with < 0.1% global mass imbalance (`gate_M2`).
+- Porous momentum sink (thin-screen Δp model), available on obstacle faces.
+- Log-law **wall function** for the ground / ABL surface (rough + transitional-roughness
+  branch, EMA time-filtering, τ smoothing, stair-step mitigations) — file `fluid/bedshear.*`,
+  functionally the ground-shear/wall model.
+- Periodic-channel driver: body force + **PI mass-flux controller** for a homogeneous
+  turbulent channel; mixing-length closure for the mean profile.
+- **SEM synthetic turbulent inlet** (Jarrin 2006, Nezu–Nakagawa stresses, Cholesky
+  colouring) + a **precursor** inlet-plane record/replay.
+  *Gate that survives:* flat-wall periodic channel recovers analytic u\*/κ within 10% and
+  holds target turbulence intensity at mid-domain without divergence growth (`gate_M3`).
+
+**Geometry pipeline (complete).**
+- OpenCascade **STEP import** → triangulated `TriMesh` (mm→m scaling, outward-normal winding
+  fix), isolated in the `windcfd_geometry` static lib (the only target that links OCC).
+- Watertight **ray-parity voxelizer** (CAD mesh → solid cell mask), with an
+  enclosed-volume-vs-mesh-volume sanity check and affine model placement.
+- Procedural reference-shape masks (`geometry/shape_masks.h`): plate, ring, open box — a
+  starting point for procedurally generated building blocks.
+
+**IO & config (complete).** Hand-rolled VTK **ImageData (.vti)** writer/reader (appended
+binary); **JSON** config loader (vendored nlohmann) with a strict allowed-key whitelist;
+`namespace windcfd::core`, units SI.
+
+**GUI `windcfd-gui` (complete).** Qt 6 + GL 4.3 slice viewer: threaded solver (GL strictly on
+the main thread, render decoupled from stepping → ~60 fps), live field slices, CUDA-GL interop
+colour kernel, animated flow **particles / tracers**, **video capture**, clip plane, **STEP
+model load** + a full **placement gizmo** (move/rotate/scale then voxelize where placed),
+scene save/restore, live inlet-speed / profile controls, and **flow reversal**. Doubles as the
+**headless driver** via `--offscreen` + a family of scripted smoke flags (`--load-step`,
+`--voxelize`, `--set-u`, `--apply-h`, `--autoclose-ms`, …).
+
+**Build & run (verified).** Configures and builds green with **VS 2022 (MSVC 14.44) + CUDA
+13.1 + Qt 6.11.1 + OpenCascade 8.0**, CUDA archs 75;86;89 (Ada = 89 dev box, RTX 4090).
+Fast unit suite + gates pass; the headless offscreen smoke run passes and the exe is
+double-clickable with the Qt + OCC runtime deployed next to it. There is **no separate CLI
+target** yet — the GUI is the run driver.
+
+---
+
+## 3. Architecture & directory layout (current, accurate)
+
+Four CMake targets; the physics core has no Qt and no OCC dependency.
 
 ```
-scour/
-├── CMakeLists.txt
-├── RESEARCH.md  PLAN.md  CLAUDE.md  research/
+WindCFD/
+├── CMakeLists.txt            project(WindCFD LANGUAGES CXX CUDA); Qt auto-detect glob
+├── PLAN.md  RESEARCH.md  CLAUDE.md  HANDOVER.md  research/
+├── configs/                 v1_cavity_re100 · v2_channel_loglaw · v3_cylinder ·
+│                            g1_viewer(_full/_highres) · m0_smoke   (+ wind configs = forward work)
 ├── src/
-│   ├── core/                 → libwindcfd (static lib, C++/CUDA, no Qt)
-│   │   ├── config.h/.cpp         run config (JSON, vendored nlohmann single header)
-│   │   ├── grid.h                MAC grid layout, indexing, SoA field arrays
-│   │   ├── fields.cu/.h          allocation, host↔device, ping-pong buffers
-│   │   ├── fluid/                FluidCore INTERFACE + StamFluidCore impl
-│   │   │   ├── fluid_core.h          step(dt) → {u,v,w, ν_t, τ_b}; swappable (LBM plan-B)
-│   │   │   ├── advect.cu             MacCormack semi-Lagrangian + clamp + solid reversion
-│   │   │   ├── project.cu            MGPCG (Jacobi fallback for bring-up)
-│   │   │   ├── turbulence.cu         Smagorinsky ν_t
-│   │   │   ├── bedshear.cu           log-law wall function, EMA filter, cavity rules
-│   │   │   │                         (produces τ_b for the Stam core; an LBM core supplies
-│   │   │   │                          its own local wall shear natively)
-│   │   │   └── boundary.cu           inlet log-law+SEM, Orlanski outlet, lid, mask BCs
-│   │   ├── sediment/
-│   │   │   ├── suspended.cu          c advection (w_s folded in), ν_t/σ_s diffusion, exchange
-│   │   │   ├── bedload.cu            Wong-Parker / Engelund-Fredsøe on interface cells
-│   │   │   ├── bedstate.cu           f_pack field, states, interface normals (RESEARCH §7)
-│   │   │   └── avalanche.cu          layered-column 32/30° sweeps
-│   │   ├── geometry/
-│   │   │   ├── step_import.cpp       OpenCascade STEP→mesh (pattern below)
-│   │   │   ├── stl_io.cpp            RWStl read/write
-│   │   │   └── voxelize.cpp          watertight ray-parity voxelizer → PRINTED mask
-│   │   ├── io/
-│   │   │   ├── vti_writer.cpp        hand-rolled VTK ImageData (appended binary)
-│   │   │   ├── metrics.cpp           KPI extraction, CSV timeseries
-│   │   │   └── checkpoint.cpp        full-state save/restore
-│   │   └── sim.h/.cpp                the operator-split loop (RESEARCH §2), MORFAC control
-│   ├── cli/                  → scour.exe: run config(s), write VTI/CSV/report
-│   └── gui/                  → windcfd-gui.exe: Qt6 live viewer (GL on main thread only)
-├── tests/                    → GoogleTest; unit + validation gates as ctest labels
-├── tools/                    → py scripts to plot CSV/compare gates (matplotlib, dev-only)
-└── configs/                  → scenario matrix, benchmark cases (V1–V8)
+│   ├── 3rdparty/nlohmann/json.hpp
+│   ├── core/                → libwindcfd (static, C++/CUDA, NO Qt/OCC)
+│   │   ├── config.{h,cpp}         JSON run config; ⚠ defaults still seawater (W1 target)
+│   │   ├── cuda_probe.{h,cu}      device query
+│   │   ├── vti_writer.cpp / vti_reader.cpp / vti_synthetic.h   VTK ImageData IO
+│   │   ├── fluid/                 the incompressible LES core (FluidCore interface)
+│   │   │   ├── mac_grid.h, mac_ops.h, fluid_core.h
+│   │   │   ├── advect.cu          MacCormack SL + clamp + solid reversion
+│   │   │   ├── turbulence.cu      Smagorinsky ν_t
+│   │   │   ├── project.cu, mgpcg.cu   pressure projection (MGPCG + Jacobi fallback)
+│   │   │   ├── stam_fluid_core.cu, cavity.{cpp,h}   closed-box core + Ghia gate
+│   │   │   ├── channel_*.{cu,cpp,h}  open channel: inlet/Orlanski/lid/mask, pressure,
+│   │   │   │                         porous sink, periodic driver, SEM driver, empty-channel
+│   │   │   ├── channel_bc.h        inlet profiles (uniform / log-law), BC sampling
+│   │   │   ├── cylinder.cu         Cd(control-volume) + St(FFT) — the M2 gate probe
+│   │   │   ├── bedshear.{cu,h}, bedshear_ops.h   log-law GROUND/ABL wall model
+│   │   │   ├── sem_inlet.{cu,h}, inlet_fluct.h, plane_ops.{cu,h}, periodic_ops.h
+│   │   │   └── precursor.{cpp,h}   inlet-plane record/replay
+│   │   └── geometry/          → voxelizer in libwindcfd; STEP import split out (below)
+│   │       ├── tri_mesh.h, model_placement.h, shape_masks.h
+│   │       ├── voxelize.{cpp,h}    watertight ray-parity mesh → solid mask
+│   │       └── step_import.{cpp,h} → compiled into windcfd_geometry (OCC-only .cpp)
+│   └── gui/                  → windcfd-gui (Qt6+GL) + windcfd_gui_cuda (Qt-free interop lib)
+│       ├── main.cpp, main_stub.cpp, main_window.{cpp,h}
+│       ├── slice_viewer.{cpp,h}   QOpenGLWidget, GL 4.3, camera, gizmo, clip plane
+│       ├── sim_worker.{cpp,h}     steps the FluidCore on a QThread (no GL)
+│       ├── sim_setup.{cpp,h}      builds the sim from JSON (looser parser than core Config)
+│       ├── scene_io.{cpp,h}       .scn save/restore
+│       ├── flow_particles/flow_tracers.{cpp,h}, video_recorder.{cpp,h}, video_settings_dialog.cpp
+│       ├── slice_field.{cu,h}     sampler + colourmap (+ CPU reference, parity-tested)
+│       ├── slice_gl.{cu,h}        cudaGraphicsGLRegisterBuffer interop (only GL-header TU)
+│       └── camera.h, colormap.h, gl_thread_check.h
+└── tests/                   GoogleTest + ctest labels (unit + gate_M1/M2/M3, geometry, slice)
 ```
 
-**Memory budget** (fields: u,v,w ×2 ping-pong, p, div, c, f_pack, ν_t, τ_b, mask ≈ 15–20
-floats/cell): 4M cells (h=5 cm) ≈ 0.3 GB; 32M cells (h=2.5 cm) ≈ 2.5 GB — trivial on 24 GB.
-Keep everything resident; use 128 GB host RAM for async VTI/checkpoint buffering.
+**Targets:** `libwindcfd` (core), `windcfd_geometry` (OCC STEP import, isolated),
+`windcfd_gui_cuda` (Qt-free CUDA-GL interop), `windcfd-gui` (Qt6 viewer / headless driver).
 
-**STEP import** (copy the proven cobod-slicer pattern — see the exploration report facts):
-`STEPControl_Reader` → `TransferRoots()` → `OneShape()` → `BRepMesh_IncrementalMesh(shape,
-0.1)` → per-face `BRep_Tool::Triangulation`, applying `TopLoc_Location` transforms, 1-based→
-0-based indices, and a winding fix (all three correctness-critical for watertight
-voxelization; reference impl at cobod-slicer `src/app/widgets/render/mesh.cpp:494-522`,
-`renderer.cpp:3223-3250`). ⚠ **Winding:** the slicer's `mesh.cpp:517` swaps indices when the
-face is **NOT** reversed — its meshes are globally inverted vs the OCC convention. For our
-voxelizer, swap when `face.Orientation() == TopAbs_REVERSED` to get outward normals; do NOT
-copy the slicer's branch verbatim, and use **|signed mesh volume|** in the watertightness
-check. **OCC outputs millimeters — multiply by 0.001.** Minimal OCC toolkits: `TKernel TKMath TKG2d TKG3d
-TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKXSBase TKDESTEP` (+`TKDESTL` for STL,
-+`TKShHealing` for sewing dirty shells — lift `gentle_repair.h` from the slicer).
+**Memory / performance (RTX 4090, air).** Grid sizes are unchanged by the fluid switch:
+~4M cells at h = 5 cm (~0.3 GB) is the working resolution; 32M cells at h = 2.5 cm (~2.5 GB)
+is the hero resolution — both trivial on 24 GB, everything stays resident. Per-step cost is a
+few tens of ms at 4M cells; long averaging windows for peak-pressure statistics are the real
+wall-clock driver (see §5 risks).
 
-**GUI** (follow cobod-slicer's proven approach, not OCC's viewer): `QOpenGLWidget` +
-`QOpenGLExtraFunctions`, **GL 4.3 core** requested via `QSurfaceFormat` *before*
-`QApplication` (slicer uses 3.3; we need 4.3 for SSBOs/compute + clean CUDA-GL interop).
-Reuse slicer patterns: `Camera` class (orbit/pan/zoom, ray picking), chunked `BufferArena` +
-GLsync fence recycling, geometry-shader/instancing expansion for particles. CUDA writes
-directly into registered GL buffers (`cudaGraphicsGLRegisterBuffer`) — zero copy. Sim runs
-on a worker thread; GL strictly on the main thread; hand-off via
-`QMetaObject::invokeMethod(..., Qt::QueuedConnection)` (slicer `mainwindow.cpp:1691-1703`
-pattern). Reference files to read: slicer `src/main.cpp:474-483`, `opengl.h/.cpp`,
-`camera.h`, `shaders/mesh.geom`.
+**Toolchain (verified on this machine, 2026-07).** CUDA **13.1**
+(`…/CUDA/v13.1`, arch 75;86;89); MSVC **14.44** (VS2022 Professional, C++20); CMake 4.1.1;
+Qt **6.11.1** (`C:/Qt/6.11.1/msvc2022_64`); OpenCascade **8.0** (`C:/OpenCASCADE-8.0/build2`).
+Configure/build/test:
+```
+cmake -B build -S . -G "Visual Studio 17 2022" -A x64        # or -G Ninja from a VS2022 dev prompt
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure        # gates: -L gate_M<k>; fast: -L unit
+```
+⚠ **Host-compiler trap:** this box also has VS 18 (MSVC 14.51), which CUDA 13.1 **rejects**.
+The VS2022 generator picks 14.44 automatically; with Ninja, build from the **x64 Native Tools
+prompt for VS 2022** (or pass `-DCMAKE_CUDA_HOST_COMPILER=…/14.44…/cl.exe`). Never
+`-allow-unsupported-compiler`.
 
 ---
 
-## 4. Milestones
+## 4. Forward milestones
 
-Rules: implement in order (GUI track G1/G2 can interleave). A milestone is DONE only when its
-gate passes as a ctest and `git commit` lands. Print gate numbers in the test output.
-Sizes: S ≈ half a session, M ≈ one session, L ≈ two sessions.
-**Manual-gate exception:** G1/G2 interactivity gates (fps, GL-thread assert) are manual —
-record measurements + screenshots in the milestone commit; the GL-main-thread check runs as
-a Qt debug assertion in windcfd-gui, not ctest. M0's automated check is a `tools/` Python
-reader validating the .vti header + payload; opening in ParaView is a one-time manual
-confirmation. Each milestone commits the config(s) its gate consumes
-(e.g. M1 → `configs/v1_cavity_re100.json`).
+Implement in order (W1→W8); a GUI/reporting sub-task may interleave once its prerequisite
+data exists. A milestone is DONE only when its acceptance check passes as a test/smoke run and
+the commit lands. Never weaken an acceptance check to pass it — if one looks wrong, flag it.
+Keep the `FluidCore` interface clean: load post-processing consumes only the fields the core
+already exposes (`{u, v, w, p, ν_t, τ_wall}`).
 
-### M0 — Scaffold (S)
-CMake (3 targets, CUDA arch 89, Qt auto-detect glob), GoogleTest + ctest wiring, config
-loader, VTI writer + a synthetic-field smoke test, `.clang-format`, `.gitignore`, git init.
-**Gate:** `ctest` green; a generated `.vti` opens in ParaView showing the synthetic field.
+### W1 — Switch physics defaults to AIR + a wind config (S)
+**What:** change `Config` defaults to air (ρ ≈ 1.225, ν ≈ 1.5e-5), add a reference wind speed
+/ reference height concept, reinterpret the inherited roughness key (currently `d50`, mapped
+to z₀ = d50/12) as an **ABL aerodynamic roughness length z₀** for a terrain category, and add
+a first `configs/wind_*.json`. Extend the strict allowed-key whitelist in `config.cpp` (and
+the looser `sim_setup` parser) for any new keys.
+**Why:** the entire tool must default to air; every downstream coefficient (Cp, Cd, …)
+normalises by ρ and U, so wrong fluid properties silently corrupt all loads.
+**Acceptance:** `Config` round-trips the air defaults; the surviving `gate_M1/M2/M3` fluid
+gates still pass with the air ν (artificial-ν validation cases are unaffected); an
+empty-domain run with the wind config is steady and matches its inlet profile at mid-domain
+within 5%; the headless smoke run passes on the wind config.
 
-### M1 — Fluid core in a closed box (L)
-MAC grid, MacCormack advection (with clamp + 1st-order reversion near solids), explicit
-Smagorinsky, MGPCG projection (Jacobi fallback switch), no-slip/free-slip walls. Verbatim
-specs: RESEARCH §3. Include a divergence-check kernel.
-**Gate (V1):** lid-driven cavity, 128³ grid, **Cs = 0 (LES off)**, molecular ν = U·L/Re
-treated explicitly, no wall model: RMS centerline error of u(y) and v(x) vs Ghia tables
-(research/11; normalize by lid speed) **< 5% at Re=100**; Re=1000 is a diagnostic — log its
-error (expect < 8% only at 128³+), do not hard-fail. Pressure: at production tolerance
-‖r‖/‖b‖ ≤ 1e-4, MGPCG converges in ≤ 14 iterations and max|div u| < 1e-4·U/h; in validation
-mode (tolerance 1e-6, iterations unconstrained) max|div u| < 1e-6·U/h. Closed box is
-all-Neumann/singular: subtract mean(b) and pin p = 0 at one cell.
+### W2 — ABL inflow profile (M)
+**What:** assemble a proper atmospheric boundary-layer inlet from the existing pieces — a
+log-law (or power-law) **mean** profile set by z₀ + reference speed/height, plus **SEM**
+turbulence at a target intensity/length-scale, optionally seeded from a **precursor** for a
+converged spectrum. Expose it as an `inlet_profile: "abl"` mode driven from config.
+**Why:** design wind loads depend strongly on the incoming shear and turbulence intensity;
+a top-hat inlet under-loads and mislocates separation. This is the reference "design wind".
+**Acceptance:** on an empty fetch, the mid-domain mean profile matches the target
+log-/power-law within ~5% and the turbulence intensity holds at its target (e.g. 10–20%)
+across ≥ several flow-throughs without divergence growth; the profile + TI are documented in
+the wind config and reproduced from a fixed seed.
 
-### M2 — Open channel + obstacles (M)
-Inlet log-law profile, Orlanski-type outlet + flux balance + p pin, rigid lid, voxel obstacle
-mask (hand-built cylinder first), free-slip solids. RESEARCH §3, §8.
-**Gate (V3):** cylinder benchmark setup: D = 32 voxels, artificial ν = U·D/Re, domain
-≥ 24D × 12D (thin spanwise, periodic or free-slip); measure St by FFT of cross-stream
-velocity probed at (5D, 0) over ≥ 20 shedding cycles after 10 flow-throughs. Re=100:
-St within 0.164–0.168 (±5%), Cd 1.33–1.40 (±10%); Re≈200 sheds vortices. Global mass
-imbalance < 0.1%; a 10×10×5 m empty-channel run is steady and matches the inlet profile
-within 5% at mid-domain.
+### W3 — Building geometry: rounded vs sharp corner variants (M)
+**What:** produce the 3D-printed building as a voxelized solid obstacle in **two variants
+that differ only in corner radius** — sharp (r = 0) and rounded (r > 0). Two supported paths:
+(i) import a building **STEP** per variant via the existing OCC pipeline + voxelizer; and/or
+(ii) procedurally generate a prismatic building block with a `corner_radius` parameter
+(extending `shape_masks.h`) so a radius sweep needs no CAD round-trip. Both variants must
+share footprint, height, and blockage.
+**Why:** the rounded-vs-sharp comparison is the whole point; it is only fair if the two
+geometries are identical except at the corners and voxelize on the same grid.
+**Acceptance:** both variants voxelize **watertight** (enclosed-volume vs mesh-volume within
+tolerance), report matched footprint/height/blockage, and the LES diverts stably around each
+with a plausible wake; a corner-radius change is visible in the voxel mask at the working
+resolution.
 
-### M3 — Bed shear + SEM inlet turbulence (M)
-Log-law wall function with EMA filtering, transitional-roughness branch, stair-step
-mitigations, cavity clearance rules (RESEARCH §4). Jarrin SEM at the inlet (RESEARCH §8).
-**Also build here (needed by this gate and by V6/V7 later):** periodic x/y boundary option +
-body-force channel driver g_x = u*²/h with a PI mass-flux controller
-(g_x ← g_x + 0.1·(u*²/h)·(U_d − U_bulk)/U_d); precursor inlet-plane recording/replay
-(5–10 Hz, ~300 s library) here or as the first task of M6.
-**Gate (V2):** flat-bed periodic channel, h = 5 m, U = 1 m/s: extracted u* within 10% of the
-analytic κ·U/(ln(h/z0) − 1) computed from the run's own h and z0 = d50/12 — i.e.
-u* = 0.0345 m/s (τ_b ≈ 1.22 Pa) at d50 = 0.2 mm; repeat at d50 = 1.0 mm (u* = 0.040 m/s);
-recovered κ from profile fit within 5%. ⚠ Do NOT target the rippled-bed Cd ≈ 0.0025 / u* =
-0.050 (see RESEARCH §4). τ_b field smooth (no grid-pitch banding after mitigation); SEM run
-maintains 5–10% ambient TI at mid-domain without divergence growth.
+### W4 — Surface pressure sampling → Cp (M)
+**What:** identify the building's wetted envelope cells (facade + roof faces adjacent to
+fluid), sample the pressure there each step, time-average and accumulate fluctuation
+statistics, and convert to a **pressure coefficient** Cp = (p − p_ref)/(½ ρ U_ref²) using a
+defined reference pressure and reference velocity. Export per-face Cp maps (VTI/CSV).
+**Why:** every wind load derives from the surface pressure field; Cp is the standard,
+grid-independent way to report and validate it.
+**Acceptance:** on a validation bluff body (e.g. a surface-mounted cube), the mean Cp on the
+windward/side/leeward/roof faces reproduces published values within tolerance (windward
+stagnation Cp ≈ +0.7…+0.8, separated faces negative); mean **and** RMS Cp fields export
+cleanly.
 
-### G1 — GUI v1 (M, anytime after M1)
-Qt window, GL 4.3 context, slicer-style camera, slice-plane rendering of any field via
-CUDA-GL interop, play/pause/step, load config. No editing features.
-**Gate:** 60 fps slice view of a running M2 simulation at h = 5 cm; no GL calls off the main
-thread (assert via Qt debug).
+### W5 — Integrated wind loads (M)
+**What:** integrate the surface pressure (plus, optionally, wall shear from the ground/wall
+model) over the envelope to obtain **drag / lift / side-force coefficients**, **roof uplift**,
+and **base overturning moments**; report mean, RMS/fluctuating, and **peak** values over a
+statistically converged window. Export force/moment time series to CSV.
+**Why:** these coefficients + roof uplift are the deliverable the building's structural design
+consumes; peak (not just mean) pressures govern cladding and roof fixings.
+**Acceptance:** on the W4 validation building, integrated force coefficients match the
+benchmark within tolerance; roof uplift and base moments are reported with mean **and** peak;
+force histories export to CSV and a re-run is bit-reproducible.
 
-### M4 — Suspended sediment (M)
-Concentration field(s), advection with settling folded in, ν_t/σ_s diffusion, van Rijn
-pickup with 2019 damping, w_s·c_b deposition as flux BC, hindered settling. RESEARCH §6.1–6.2.
-**Gate (V5, V6):** settling column L2 < 2%, mass error < 0.1%. Rouse: periodic channel
-h = 0.4 m, u* = 0.02 m/s, d50 = 0.1 mm (R = 0.91): fitted Rouse exponent of the steady
-profile within 15% of R, with c Dirichlet-pinned to c_a at a = 0.05h — the Dirichlet pin is
-permitted in this validation test ONLY; production bed exchange stays flux-based
-(RESEARCH §6.2).
+### W6 — Rounded-vs-sharp comparison study (M)
+**What:** run the two W3 variants under **matched** ABL inflow, grid, and run length, then
+quantify the load differences — Cp distributions on facade + roof, integrated force/uplift
+coefficients, and peak pressures — as a paired delta (rounded − sharp).
+**Why:** this answers the project's question and produces the headline result (does rounding
+the printed corners reduce drag / roof uplift / peak cladding pressure, and by how much).
+**Acceptance:** a paired run identical except for corner radius yields signed, magnitude-bearing
+load-difference metrics; both runs are individually reproducible; the report states the effect
+of rounding on drag and roof uplift with an uncertainty estimate (see W7/§5 resolution caveat).
 
-### M5 — Bed state + morphodynamics (L)
-f_pack field, cell states, interface normals/areas, Winterwerp erosion, bedload donor
-transfers (Wong-Parker default, Engelund-Fredsøe toggle), slope-corrected θ_cr, layered-column
-avalanching, Exner-equivalence bookkeeping, MORFAC + cadence + limiters. RESEARCH §5–§7.
-**Gate:** (a-i) still-water deposition: uniform c0 over a flat bed — column sum of f_pack
-rises at w_s·c0 (bed elevation at w_s·c0/0.64), match < 0.5%, total mass error < 0.1%;
-(a-ii) prescribed bedload q_b(x) = q0·sin(2πx/L) with E = D = 0: bed change matches
-(1−p)·∂z_b/∂t = −∂q_b/∂x to < 0.5% after 100 updates (upwind ∇·q_b per RESEARCH §7);
-(b) sand-pile relaxation settles to 30–32° everywhere; (c) three-reservoir mass
-(bed + suspended + boundary fluxes) conserved to < 0.1% over 10⁴ steps; (d) no motion when
-θ < θ_cr everywhere; onset within 10% of Soulsby–Whitehouse threshold.
+### W7 — Validation against a wind-engineering benchmark (M)
+**What:** reproduce a standard, well-documented bluff-body ABL benchmark for mean **and**
+fluctuating Cp and integrated loads — e.g. the **CAARC** standard tall building, the **Silsoe /
+surface-mounted cube**, or an **AIJ / TPU** aerodynamic-database case — matching that case's
+specified inflow with the W2 ABL inlet.
+**Why:** credibility of the rounded-vs-sharp numbers rests on the pipeline reproducing a case
+with published experimental data; ideally validated **before or alongside** W6.
+**Acceptance:** mean Cp and force coefficients fall within the benchmark's reported
+experimental scatter at the specified grid, and the fluctuating/peak Cp trend is captured
+qualitatively; the comparison + grid are documented in `configs/` and a report.
 
-### M6 — Pile-scour validation (L) — the big calibration gate
-Roulund et al. (2005) benchmark at lab scale (Engelund–Fredsøe + suspended load ON).
-**Setup:** voxel h = 1 cm (D/10); domain 3.0 × 1.6 × 0.4 m (pile D = 0.1 m centered 1.0 m
-from inlet, ≥ 7D lateral clearance) ≈ 19M cells; V = 0.46 m/s, d50 = 0.26 mm, live-bed
-V/Vcr = 1.25. Inflow from a precursor periodic channel at h_dom = 0.4 m; **verify recovered
-u* = 0.020 m/s ± 10% on a frozen bed before enabling morphology** (research/14). Run ≥ 400 s
-morphological time at M = 1 (T ≈ 130 s, research/11); fit S(t) = S_eq(1 − e^(−t/T)); the
-gate compares fitted S_eq and T. Calibrate at most: pickup α (±30% band), Cs (0.10–0.12),
-optional HSV shear multiplier — then FREEZE constants in `configs/calibrated.json`.
-**Gate (V7):** upstream S/D = 1.25 ± 15%; downstream ± 30%; timescale within factor 2;
-sensitivity run at 1.5× resolution changes S/D < 10%.
+### W8 — Results, reporting & visualization (M)
+**What:** a batch runner for the variant/inflow matrix plus an **HTML/CSV comparison report**
+(Cp maps, load tables with mean + peak, rounded-vs-sharp deltas); visualization of the
+pressure field + surface Cp + streamlines in the GUI, and an **offscreen** render path that
+produces report figures with no interactive session.
+**Why:** turns runs into a communicable deliverable and makes the comparison repeatable.
+**Acceptance:** a single command reproduces the rounded-vs-sharp comparison report end-to-end
+with figures; the offscreen path emits the images headlessly; re-running a config reproduces
+the report numbers.
 
-### M7 — Deposition validation "M-DEP" (M) — must pass before any ranking
-Du et al. 2025 perforated-unit case (4–5 mm voxels) + current-only trench variant vs van
-Rijn's trapping efficiency e_s (RESEARCH §10 V8; the full wave-stirred 1986 trench moves to
-M10). **Build the C-AR/H-AR units procedurally as voxel masks** (no STEP import needed —
-that's M8). **Move the thin-screen porous model here from M8:** Δp = ½·ρ·k·u_face²,
-k = 1/β² − 1 (RESEARCH §8), applied to the perforated faces — at 4 mm voxels the 8.33 mm
-holes are ~2 cells across, below the ≥ 8-cell resolution floor (research/13), so model them
-sub-grid; do NOT attempt to resolve the hole jets.
-**Gate (V8):** trapped volume ± 30%; depth ± 20–30%; BSS ≥ 0.3 (report if ≥ 0.6); measured
-C-AR/H-AR ranking reproduced; e_s within ± 30%; qualitative deposition behind/inside the
-porous array.
-
-### M8 — Shape-testing harness (L, two sessions)
-**Session 1 — geometry pipeline:** STEP/STL import + voxelization with unit-scale and
-enclosed-volume gates (|signed mesh volume| vs voxel volume, fail > 2%); reference shapes
-(solid ring, flat plate of equal footprint) generated procedurally as STL by
-`tools/gen_ref_shapes.py` (no CAD input needed).
-**Session 2 — campaign machinery:** scenario-matrix batch runner (run-length protocol of
-RESEARCH §7: t ≥ 0.5T, dual-fit S_eq & V_eq, CIs, matched t/T comparisons); derive T,
-θ/θ_cr regime, and the MORFAC schedule **at runtime from config (ρ, ν)** using RESEARCH §7
-formulas — research/16 E6 (computed at ρ = 1025, ν = 1.05e-6) is a reference example, not a
-lookup table; matrix configs generated by `tools/gen_matrix.py`. KPI extraction (trapped
-volume in shape CV, retention stage, edge scour, undermining), HTML/CSV comparison report.
-`checkpoint.cpp` (full-state save/restore; unit test: save→restore→step bit-identical to
-uninterrupted stepping). **Retention protocol:** from the fitted-equilibrium state
-(checkpoint), ramp U to the next-higher matrix velocity over 60 s (cosine), run 1·T at the
-new U, report retained fraction V_trapped(end)/V_trapped(eq).
-**Gate:** end-to-end: the two reference shapes rank correctly with non-overlapping CIs; a
-full 4M-cell scenario completes in ≤ 25 min wall-clock; re-running a config is
-bit-reproducible.
-
-### G2 — GUI v2 (M)
-Volume rendering of c (raymarch slices), bed surface extraction (marching cubes on F = 1
-or GPU point splat), particle tracers (instanced billboards), KPI live plots, side-by-side
-run comparison.
-**Gate:** interactive (≥ 30 fps) on a live 4M-cell run; screenshots exportable for reports.
-
-### G3 — Preparation phase: drop & settle rigid bodies (Jolt) (L) — DONE 2026-07-10
-**Status: COMPLETE.** G3.1 (settle core, `scour_physics_tests` gate), G3.2 (windowed drop demo,
-MH sign-off — "perfect"), G3.3a (`resettleOnBed` unit-gated), G3.3b (live sink coupling: headless
-verified — re-settle fires on bed change, pile sinks, flow re-masks in place, 1600+ steps stable).
-Jolt v5.5.0 (prebuilt `/MD`, `find_package(Jolt CONFIG)`); 100/100 unit; gate_G1 PASS. Windowed:
-`windcfd-gui --config configs/g1_viewer_full.json --drop-step <XStone.stp> --drop <count>,<seed>[,smin,smax,sand]`.
-
-A pre-simulation "experiment setup" stage: scatter N scaled copies of a printed protection unit
-(e.g. Holcim **XStone**, loaded from STEP) above the bed and let them fall + settle under gravity
-with body–body + body–bed contact, then voxelize the settled pile as the rigid structure and start
-the morphodynamic run. Rigid-body settling is **fully DECOUPLED from the CUDA fluid** — it runs on
-the CPU (**Jolt Physics**, MIT) and emits one affine `ModelPlacement` per block, consumed unchanged
-by the existing voxelizer + `build_seabed_from_structure` path. Holes are preserved: the settling
-**collision proxy** is a convex compound, but the flow still voxelizes the TRUE perforated mesh.
-**Isolation:** Jolt is linked only by a new `scour_physics` static lib (mirrors how `windcfd_geometry`
-isolates OpenCascade); libwindcfd + every physics gate stay Jolt-free. Bodies persist for the whole
-run so the sink-coupling increment is additive.
-- **G3.1 — settle core.** `scour_physics` (Jolt) + `load_step_solids()` multi-solid STEP loader
-  (each convex piece → a Jolt `ConvexHullShape`; bootstrap = whole-mesh hull). Scatter → settle on a
-  rigid bed → `std::vector<ModelPlacement>`. Deterministic (fixed seed).
-- **G3.2 — windowed self-driving demo.** A non-interactive-but-VISIBLE scenario that scatters,
-  animates the live settle (repeat-draw the mesh at each body transform), commits the union voxel
-  mask, adds sand, and runs the flow — MH watches + narrates. CLI `--drop <shape>,<count>,<seed>`.
-- **G3.3 — two-way sink coupling.** Persistent Jolt world; when the bed erodes ≥ ~½ cell the ground
-  heightfield (from z_b) is rebuilt, blocks re-settle into the scour hole, moved blocks are
-  re-voxelized, and the flow re-masks in place (`update_solid`) with neighbour-averaged seeding of
-  newly-revealed cells + a dynamic structure-footprint pin.
-
-**Gate (G3.1, automated):** drop ≥ 8 blocks, settle to sleep within the step budget; every body
-rests with min-z ≥ bed and no pair interpenetrates beyond a small tolerance; re-running with the
-same seed is bit-reproducible. **Gate (G3.2/G3.3, manual + stability):** the committed pile
-voxelizes watertight, the flow diverts and stays stable, sand mass conserves to < 1e-5 over the run;
-the windowed demo renders the drop + scour without artifacts (MH sign-off).
-
-### M9 — Tidal reversal + ranking campaign (M)
-Face-swap reversal with cosine ramp (RESEARCH §8), M ≤ 5 in reversing scenarios; run the
-first real shape-candidate campaign; write the comparison report template.
-**Gate:** reversal run conserves total sand mass (bed + suspended ± boundary fluxes) to
-< 0.1% and shows no monotonic kinetic-energy growth across 4 slack transitions; MORFAC
-limiter clip-fraction < 1% (research/16); first ranked report of ≥ 3 candidate shapes
-delivered.
-
-### M10 — Waves (L, later)
-Oscillatory inlet forcing (KC-parameterized), wave-current combination, backfill benchmark,
-plus the **full van Rijn 1986 trench** (waves H = 0.08 m, T = 1.5 s over 0.18 m/s current,
-sand feed 0.0167 kg/s/m — deferred from M7 because its infill is wave-stirred).
-**Gate (V9):** Sumer 2013 backfill direction & final-KC equilibrium reproduced qualitatively;
-S/D vs KC trend matches 1.3·(1 − e^(−0.03(KC−6))) within ±30% at 2–3 KC points; trench
-infill volume ±30%, BSS ≥ 0.3.
-
-### M11 — Performance & hero runs (M, optional)
-Profile (Nsight), kernel fusion, 2.5 cm hero-grid runs of the top-3 shapes, longer-horizon
-storm-sequence scenarios.
-**Gate:** ≤ 150 ms/step at 32M cells; hero-vs-ranking grid ordering unchanged for top-3.
+**Sequencing.** W1 → W2 → W3 unblock everything. W4 → W5 build the load pipeline on the
+validation building; W7 validates it; W6 applies it to the real comparison; W8 packages it.
+GUI/reporting increments (pressure-field colouring, Cp overlay, streamline export) can land
+opportunistically once W4/W5 produce data.
 
 ---
 
-## 5. Performance budget (RTX 4090, from research/16 traffic model)
+## 5. Risks & open questions
 
-| Grid | Cells | ms/step | 300 s flow | 20 min wall-clock buys |
-|---|---|---|---|---|
-| h = 5 cm | 4.0M | ~12–18 | 2–4 min | 1 400–7 000 fluid-seconds (U-dependent dt 18–88 ms) |
-| h = 2.5 cm | 32M | ~100–150 | ~1.5–2 h at hero settings (CFL 1.0, max\|u\| = 1.7·U∞ → dt ≈ 6–30 ms); ~30 min only at CFL 2 / dt = 20 ms (lower bound) | hero runs only |
+1. **Rounded-corner physics is Reynolds-sensitive.** Sharp-edged bluff-body flow has *fixed*
+   separation (Re-independent) — LES at model Re transfers to full scale. But a **rounded**
+   corner's separation point *moves* with Re, and full-scale building Re is unreachable; LES
+   at reduced Re can misplace separation on the rounded variant. Treat rounded-vs-sharp deltas
+   as **model-scale** results, sanity-check against benchmark data (W7), and flag the caveat in
+   any report — do not over-claim a full-scale drag reduction.
+2. **Voxel resolution vs corner radius.** A rounded corner of radius r is only meaningful when
+   r spans **several voxels**; at h = 5 cm a small radius is re-sharpened by the staircase, so
+   the comparison collapses. Needs a resolution study and likely the hero grid (h = 2.5 cm) for
+   the final W6 numbers; state r/h for every result.
+3. **Staircase over-prediction of drag.** The voxel staircase over-predicts Cd (measured
+   ~+14% on the cylinder gate; cut-cell/variational projection is deferred). Bias partly
+   cancels in the *rounded − sharp difference* only if both run at **matched resolution** —
+   enforce that, and report absolute coefficients with the staircase caveat.
+4. **Headless / offscreen GL for report figures.** The current headless path uses Qt's
+   `qoffscreen` platform, which has **no GL context**, so the interactive drag/render feel and
+   any screenshot capture are unverified headlessly. W8's figure export may need an EGL/pbuffer
+   offscreen GL context or a CPU raster fallback — confirm the capture path early rather than
+   assuming a windowed screenshot works headlessly.
+5. **Validation-data availability & inflow match.** A benchmark is only usable if its **inflow
+   (z₀, profile, TI, length scale) is fully specified** so the W2 ABL inlet can reproduce it.
+   Pick the case (CAARC / Silsoe cube / AIJ / TPU) on that basis; some datasets report loads
+   but under-specify the approach flow.
+6. **Peak/fluctuating pressures need long, converged windows.** Mean Cp settles quickly; peak
+   cladding pressures need many flow-throughs of statistics, which drives wall-clock at hero
+   resolution. Budget run length per the averaging requirement, and report the window used +
+   convergence of the peak estimate.
+7. **Config schema & inherited naming.** The core `Config` uses a **strict key whitelist** and
+   inherited names (`d50` for roughness); adding ABL roughness-length, reference-height, and
+   corner-radius keys means extending both `config.cpp` and the GUI's looser `sim_setup`
+   parser. Decide the ABL roughness parameterization (terrain-category z₀ vs the legacy
+   z₀ = d50/12 mapping) in W1 and keep the two parsers in sync.
+8. **Wall model on a vertical facade.** The log-law wall function was built for the horizontal
+   ground; applying/validating it on the building's vertical walls and roof (where separation,
+   not an attached log layer, dominates) needs checking — near separated regions the free-slip
+   / resolved-BL treatment may be more appropriate than a log-law probe.
 
-Every scenario-matrix cell closes in 15–25 min at h = 5 cm using the MORFAC schedule
-(M = 6–9 only for U = 0.5 m/s; M = 1–2 otherwise). If a run exceeds budget, check the
-adaptive limiter M·N·dt·max|dz_b rate| ≤ 0.05·h before touching anything else.
+## 6. How implementation sessions should work
 
-## 6. Risks & mitigations
-
-1. **HSV under-resolution → under-predicted upstream scour.** Expected; handled by M6
-   calibration + honesty rules (RESEARCH §11). If calibration cannot reach the V7 gate,
-   promote the LBM plan-B core behind `FluidCore` (research/09; do NOT copy FluidX3D code —
-   non-commercial license).
-2. **Ranking artifacts from fixed run lengths.** Prevented by the fitted-equilibrium protocol;
-   never compare shapes at different t/T.
-3. **Stair-step τ_b noise → noisy erosion.** Mitigations in RESEARCH §4; verify in M3 gate.
-4. **STEP units/watertightness.** mm→m factor; gentle-repair + sewing before voxelization;
-   voxelizer must report enclosed volume vs mesh volume (fail > 2% mismatch).
-5. **Two-branch formulas silently truncated** (van Rijn T ≥ 3, transitional roughness,
-   slope-correction clamps). Each has a dedicated unit test in its milestone.
-
-## 7. How implementation sessions should work
-
-- Read `CLAUDE.md`, this plan's milestone, and the referenced RESEARCH.md sections first.
-- Constants come from RESEARCH.md verbatim; if code needs a constant not specified there,
-  stop and flag it in the commit message rather than inventing one.
-- Every kernel gets a CPU reference implementation and a GPU-vs-CPU unit test (tolerance
-  1e-5 rel. for float32 reductions).
-- Gates are ctest targets labeled `gate_M<k>`; a milestone PR/commit must show its gate
-  output. Never weaken a gate to pass it — if a gate seems wrong, flag it.
-- Determinism: fixed seeds (SEM eddies), no atomics in accumulation paths where avoidable;
-  document any nondeterminism.
-- Keep `FluidCore` interface pure: sediment code may only consume `{u, v, w, ν_t, τ_b}`.
-  For the Stam core, τ_b comes from the log-law probe (`fluid/bedshear.cu`); an LBM core
-  supplies its own local wall shear natively.
+- Read `CLAUDE.md`, the target W-milestone, and the relevant `research/` notes / benchmark
+  paper first. Physics constants come from those sources verbatim; if a needed constant is
+  unspecified, **stop and flag it in the commit** rather than inventing one.
+- Every new kernel gets a CPU reference and a GPU-vs-CPU parity test (≈1e-5 rel. for float32
+  reductions); keep the `FluidCore` interface clean (load code only *reads* `{u,v,w,p,ν_t,τ}`).
+- Gates/acceptance checks are ctest targets or scripted headless smoke runs; a milestone commit
+  must show its check output. Determinism: fixed seeds for SEM eddies; document any
+  nondeterminism.
+- Commit style: Conventional Commits (`feat:`, `fix:`, `test:`, …). Keep the fluid gates
+  (`gate_M1/M2/M3`) green — they are the foundation every wind result stands on.

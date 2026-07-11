@@ -17,6 +17,11 @@ Experiments/
 *.scn
 Scenes/
 
+# Recorded videos (GUI video recorder output)
+Video/
+Videos/
+*.mp4
+
 # CMake / IDE
 CMakeCache.txt
 CMakeFiles/
