@@ -38,6 +38,8 @@ add_library(libwindcfd STATIC
 	src/core/config.cpp
 	src/core/vti_writer.cpp
 	src/core/vti_reader.cpp
+	# Wind loads — Cp + force/moment integration over the voxelized building.
+	src/core/windloads.cpp
 	src/core/cuda_probe.cu
 	# M1 — fluid core (MAC + MacCormack + Smagorinsky + MGPCG)
 	src/core/fluid/advect.cu
