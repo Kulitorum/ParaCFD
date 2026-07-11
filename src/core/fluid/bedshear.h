@@ -36,8 +36,8 @@ namespace windcfd::core
 	{
 		double kappa = 0.40;   // von Kármán (RESEARCH §4 verbatim)
 		double d50 = 0.2e-3;   // m — grain size
-		double nu = 1.36e-6;   // m²/s — molecular viscosity (config, RESEARCH §1)
-		double rho = 1027.0;   // kg/m³ (RESEARCH §1)
+		double nu = 1.5e-5;   // m²/s — molecular viscosity (config, RESEARCH §1)
+		double rho = 1.225;   // kg/m³ (RESEARCH §1)
 		int regime = WALL_AUTO;
 		int cj_iters = 5;      // Christoffersen–Jonsson fixed-point sweeps (research/04 §6: 2–5)
 		double t_avg = 2.0;    // s — EMA window for τ_b (research/04 LES note, RESEARCH §4: 1–3 s)

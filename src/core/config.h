@@ -10,21 +10,21 @@ namespace windcfd::core
 {
 	// Run configuration. Defaults are the canonical parameters of RESEARCH.md §1.
 	// NOTE (RESEARCH §1): rho and nu MUST be config parameters — the physics is
-	// temperature/salinity dependent. Defaults here are 10 C seawater, S=35.
+	// temperature dependent. Defaults here are dry air at ~15 C, sea level (ISA).
 	struct Config
 	{
 		std::string name = "default";
 
-		// --- Domain & grid (RESEARCH §1: 10 x 10 x 5 m, h = 5 cm ranking) ---
+		// --- Domain & grid (default 10 x 10 x 5 m domain, h = 5 cm) ---
 		double domain_x = 10.0;  // m
 		double domain_y = 10.0;  // m
 		double domain_z = 5.0;   // m
 		double voxel_h = 0.05;   // m (uniform voxel edge)
 
-		// --- Fluid (RESEARCH §1) ---
-		double rho = 1027.0;     // kg/m^3  seawater S=35, 10 C (ITTC)
-		double nu = 1.36e-6;     // m^2/s   10 C seawater
-		double U = 1.0;          // m/s     depth-averaged current
+		// --- Fluid (air; RESEARCH §1) ---
+		double rho = 1.225;     // kg/m^3  dry air, 15 C, sea level (ISA)
+		double nu = 1.5e-5;     // m^2/s   dry air, ~15 C
+		double U = 1.0;          // m/s     free-stream wind speed
 
 		// --- Bed roughness (log-law wall model) ---
 		double d50 = 0.35e-3;    // m  grain size -> wall roughness ks = 2.5*d50, z0 = d50/12

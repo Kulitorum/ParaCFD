@@ -15,7 +15,7 @@ namespace windcfd::core
 		double h = 0.1;                        // voxel [m]
 		double U = 1.0;                        // depth-avg speed [m/s]
 		double d50 = 0.2e-3;                   // grain size [m] → z0, inlet u*
-		double nu = 1.36e-6;                   // m²/s
+		double nu = 1.5e-5;                   // m²/s
 		double Cs = 0.11;                      // Smagorinsky (RESEARCH §3.4)
 		double gamma = 1.0;                    // SEM Reynolds-stress amplitude (≤2.5)
 		int N = 150;                           // SEM eddy count

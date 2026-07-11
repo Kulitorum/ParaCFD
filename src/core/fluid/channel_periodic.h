@@ -25,8 +25,8 @@ namespace windcfd::core
 		int nx = 8, ny = 8;   // transverse extent (homogeneous — kept small)
 		double U_d = 1.0;     // target depth-averaged speed [m/s]
 		double d50 = 0.2e-3;  // grain size [m] → z0 = d50/12, ks = 2.5·d50
-		double nu = 1.36e-6;  // molecular viscosity [m²/s] (RESEARCH §1)
-		double rho = 1027.0;  // density [kg/m³]
+		double nu = 1.5e-5;  // molecular viscosity [m²/s] (RESEARCH §1)
+		double rho = 1.225;  // density [kg/m³]
 		double kappa = 0.40;  // von Kármán (RESEARCH §4)
 		int wall_regime = WALL_AUTO;
 		double pi_gain = 0.1; // PI mass-flux controller gain (research/14 §4)

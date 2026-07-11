@@ -30,7 +30,7 @@ namespace windcfd::core
 		bc.ymin = bc.ymax = WALL_FREESLIP; bc.zmin = bc.zmax = WALL_FREESLIP;
 
 		ChannelParams pr;
-		pr.rho = 1027.0; pr.nu = cfg.nu; pr.Cs = cfg.Cs; pr.cfl = 1.0; pr.safety = 0.9;
+		pr.rho = 1.225; pr.nu = cfg.nu; pr.Cs = cfg.Cs; pr.cfl = 1.0; pr.safety = 0.9;
 		pr.proj_tol = 1e-4; pr.proj_max_iter = 60; pr.fixed_dt = 0.0; pr.advect_band = 1;
 
 		std::vector<unsigned char> nosolid((size_t)g.p_count(), 0);

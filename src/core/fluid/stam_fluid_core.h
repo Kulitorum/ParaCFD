@@ -15,8 +15,8 @@ namespace windcfd::core
 {
 	struct StamParams
 	{
-		double rho = 1027.0; // kg/m^3
-		double nu = 1.36e-6; // m^2/s molecular kinematic viscosity (treated explicitly)
+		double rho = 1.225; // kg/m^3
+		double nu = 1.5e-5; // m^2/s molecular kinematic viscosity (treated explicitly)
 		double Cs = 0.0;     // Smagorinsky constant (0 = LES off, M1 gate)
 		double cfl = 1.0;    // advective CFL target
 		double safety = 0.9; // dt safety factor

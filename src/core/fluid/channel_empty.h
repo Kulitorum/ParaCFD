@@ -13,7 +13,7 @@ namespace windcfd::core
 		double h = 0.1;                        // m (voxel)
 		double U = 1.0;                        // m/s depth-averaged target
 		double d50 = 0.35e-3;                  // m (=> z0 = d50/12)
-		double nu = 1.36e-6;                   // m^2/s
+		double nu = 1.5e-5;                   // m^2/s
 		double flowthroughs = 4.0;             // spin-up length
 		double Cs = 0.0;
 	};
