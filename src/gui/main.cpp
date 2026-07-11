@@ -13,6 +13,10 @@
 //   --load-step <path>     load a STEP model at startup (also available via File menu). The model
 //                          is auto-voxelized into the flow as the solid obstacle (replacing the
 //                          config obstacle); smoke-testable headlessly with --offscreen
+//   --load-centerline <path>  load a 3D-printing CENTERLINE STEP at startup (also via File menu). The
+//                          domain is sized to the building footprint and a solid building (thickened
+//                          walls + overhanging flat roof, core/geometry/building) is built + injected
+//                          as the obstacle; smoke-testable headlessly with --offscreen
 //   --voxelize             DEPRECATED no-op: loading a model auto-injects it now (kept for scripts)
 //   --noslip               use SOLID_NOSLIP for the loaded model (default: SOLID_FREESLIP,
 //                          RESEARCH §3 production default)
@@ -72,6 +76,7 @@ int main(int argc, char** argv)
 	// --- Parse our flags (leave the rest for QApplication, e.g. -platform) ------
 	std::string config;
 	std::string step_path;
+	std::string centerline_path;
 	int autoclose_ms = 0;
 	bool offscreen = false;
 	bool voxelize = false;
@@ -94,6 +99,7 @@ int main(int argc, char** argv)
 		if (a == "--config" && i + 1 < argc) config = argv[++i];
 		else if (a == "--autoclose-ms" && i + 1 < argc) autoclose_ms = std::atoi(argv[++i]);
 		else if (a == "--load-step" && i + 1 < argc) step_path = argv[++i];
+		else if (a == "--load-centerline" && i + 1 < argc) centerline_path = argv[++i];
 		else if (a == "--offscreen") offscreen = true;
 		else if (a == "--voxelize") voxelize = true;
 		else if (a == "--noslip") noslip = true;
@@ -262,6 +268,16 @@ int main(int argc, char** argv)
 			noslip ? "no-slip" : "free-slip");
 		if (!win.loadStepFile(QString::fromStdString(step_path), noslip))
 			std::fprintf(stderr, "[G1] STEP load failed; no obstacle injected\n");
+	}
+
+	// Optional startup CENTERLINE STEP (File menu does the same at runtime). The domain is sized to the
+	// building footprint and a solid building (thickened walls + overhanging roof) is built + injected.
+	if (!centerline_path.empty())
+	{
+		std::fprintf(stderr, "[G1] --load-centerline: loading + building solid from centerline as %s obstacle\n",
+			noslip ? "no-slip" : "free-slip");
+		if (!win.loadCenterlineFile(QString::fromStdString(centerline_path), noslip))
+			std::fprintf(stderr, "[G1] centerline load failed; no building injected\n");
 	}
 
 	// Optional headless smoke of the placement gizmo: move/rotate/scale the loaded model, then re-voxelize

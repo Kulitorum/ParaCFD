@@ -55,6 +55,15 @@ namespace windcfd::gui
 		// summary; returns false on load failure. Safe to call before the window is shown.
 		bool loadStepFile(const QString& path, bool noslip = false);
 
+		// Load a 3D-printing CENTERLINE STEP (vertical wall ribbons) as a CENTERLINE — distinct from
+		// loadStepFile's "STEP as mesh obstacle". The mesh is STORED (centerline_mesh_) so Build can
+		// re-run without reloading; it is NOT voxelized as a mesh. On load, the domain is sized to the
+		// footprint and a solid building (thickened walls + overhanging flat roof) is built + injected
+		// once (buildBuilding). `noslip` selects SOLID_NOSLIP for the injected solid (default free-slip,
+		// matching loadStepFile). Used by the File menu and the --load-centerline CLI flag. Logs the
+		// tri count + bbox; returns false on load failure.
+		bool loadCenterlineFile(const QString& path, bool noslip = false);
+
 		// Stop the worker (if running) and, if a voxel obstacle was injected, sample the flow-
 		// diversion metrics. Idempotent. Call before reading diversion() from main().
 		void finalize();
@@ -118,6 +127,14 @@ namespace windcfd::gui
 		// the worker thread. `noslip` selects SOLID_NOSLIP (default SOLID_FREESLIP, RESEARCH §3).
 		// Internal: driven by loadStepFile (on), "Close model" (off) and the grid-Apply re-inject.
 		bool setModelAsObstacle(bool on, bool noslip = false);
+
+		// (Re)generate the solid building from the stored centerline and inject it as the obstacle. Sizes
+		// the domain around the sectioned footprint (with wind clearance) and rebuilds the core at that
+		// grid through the SAME resize path as Apply (applyGrid / GridOverride), then voxelizes the
+		// thickened walls + overhanging roof (core/geometry/building) and hands the mask to the worker
+		// exactly as loadStepFile does. Driven by the "Build" button and once on centerline load. No-op
+		// (with a status message) if no centerline is loaded.
+		void buildBuilding();
 
 		void shutdownWorker();
 		// `steps0`/`t0` prime the worker's counters (a scene restore resumes from the saved step).
@@ -219,6 +236,19 @@ namespace windcfd::gui
 		QLabel* fps_label_ = nullptr;
 		SimRecipe recipe_;
 		windcfd::core::TriMesh model_mesh_; // CPU copy of the loaded model (for voxelization)
+
+		// --- Building (centerline STEP → thickened walls + flat roof solid) ----------------------
+		// Stored centerline surface + the dock's wall/roof params, so Build can re-voxelize + re-inject
+		// the building without reloading the STEP. Distinct from model_mesh_ (the STEP-as-mesh obstacle).
+		windcfd::core::TriMesh centerline_mesh_; // stored centerline (empty until a centerline is loaded)
+		bool centerline_noslip_ = false;         // surface mode for the injected building solid
+		QDoubleSpinBox* wall_thick_spin_ = nullptr;
+		QDoubleSpinBox* wall_height_spin_ = nullptr;
+		QDoubleSpinBox* corner_radius_spin_ = nullptr;
+		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
+		QDoubleSpinBox* roof_thick_spin_ = nullptr;
+		QPushButton* build_btn_ = nullptr;
+
 		bool model_injected_ = false;
 		bool worker_down_ = false;
 		DiversionReport diversion_;

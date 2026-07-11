@@ -1,6 +1,7 @@
 // main_window.cpp — see main_window.h.
 #include "gui/main_window.h"
 
+#include "core/geometry/building.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/step_import.h"
 #include "core/geometry/voxelize.h"
@@ -81,6 +82,16 @@ namespace windcfd::gui
 			if (viewer_) viewer_->clearMesh();
 			updateGizmoUi(); // no model ⇒ disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
+		});
+
+		// Load a 3D-printing CENTERLINE STEP as a CENTERLINE (walls thickened + flat roof, built into a
+		// solid obstacle) — distinct from "Open STEP…" which voxelizes the mesh directly. Set the
+		// wall/roof params in the "Building" dock group, then press "Build" (also auto-built on load).
+		QAction* openCenterline = fileMenu->addAction("Open centerline STEP…");
+		connect(openCenterline, &QAction::triggered, this, [this] {
+			QString fn = QFileDialog::getOpenFileName(this, "Open centerline STEP", QString(),
+				"STEP files (*.step *.stp);;All files (*)");
+			if (!fn.isEmpty()) loadCenterlineFile(fn);
 		});
 
 		// --- Scene save / restore (a full self-contained .scn: setup + model + all field data) ----
@@ -287,6 +298,70 @@ namespace windcfd::gui
 		connect(apply_btn_, &QPushButton::clicked, this, [this] { applyGrid(); });
 		gridCol->addWidget(apply_btn_);
 		col->addWidget(gridGroup);
+
+		// --- Building group (centerline STEP → thickened walls + overhanging flat roof solid) ---------
+		// Load a 3D-printing CENTERLINE STEP (File ▸ Open centerline STEP…), dial in the wall/roof params
+		// here, then Build: the domain is sized around the sectioned footprint (with wind clearance) and
+		// rebuilt through the SAME path as Apply, and a solid building is voxelized + injected as the flow
+		// obstacle. Re-runs on the STORED centerline — no reload. Spin boxes seed from BuildingParams.
+		QGroupBox* buildingGroup = new QGroupBox("Building (centerline → solid)");
+		QVBoxLayout* buildingCol = new QVBoxLayout(buildingGroup);
+		QFormLayout* buildingForm = new QFormLayout;
+		buildingForm->setLabelAlignment(Qt::AlignLeft);
+		const windcfd::core::BuildingParams bdefs; // seed the controls from the API defaults
+
+		wall_thick_spin_ = new QDoubleSpinBox;
+		wall_thick_spin_->setRange(0.05, 2.0);
+		wall_thick_spin_->setDecimals(2);
+		wall_thick_spin_->setSingleStep(0.05);
+		wall_thick_spin_->setSuffix(" m");
+		wall_thick_spin_->setValue(bdefs.wall_thickness);
+		wall_thick_spin_->setToolTip("Full wall thickness: the centerline is thickened ± half of this. Also sets the build voxel size (~3 cells across the wall).");
+		buildingForm->addRow("Wall thickness", wall_thick_spin_);
+
+		wall_height_spin_ = new QDoubleSpinBox;
+		wall_height_spin_->setRange(1.0, 50.0);
+		wall_height_spin_->setDecimals(2);
+		wall_height_spin_->setSingleStep(0.5);
+		wall_height_spin_->setSuffix(" m");
+		wall_height_spin_->setValue(bdefs.wall_height);
+		wall_height_spin_->setToolTip("Wall height above the base (z = 0). The domain height is sized to walls + roof + clearance.");
+		buildingForm->addRow("Wall height", wall_height_spin_);
+
+		corner_radius_spin_ = new QDoubleSpinBox;
+		corner_radius_spin_->setRange(0.0, 5.0);
+		corner_radius_spin_->setDecimals(2);
+		corner_radius_spin_->setSingleStep(0.05);
+		corner_radius_spin_->setSuffix(" m");
+		corner_radius_spin_->setValue(bdefs.corner_radius);
+		corner_radius_spin_->setToolTip("Outer corner radius (0 = sharp).");
+		buildingForm->addRow("Corner radius", corner_radius_spin_);
+
+		roof_overhang_spin_ = new QDoubleSpinBox;
+		roof_overhang_spin_->setRange(0.0, 5.0);
+		roof_overhang_spin_->setDecimals(2);
+		roof_overhang_spin_->setSingleStep(0.05);
+		roof_overhang_spin_->setSuffix(" m");
+		roof_overhang_spin_->setValue(bdefs.roof_overhang);
+		roof_overhang_spin_->setToolTip("How far the flat roof extends beyond the outer wall face (0 = flush).");
+		buildingForm->addRow("Roof overhang", roof_overhang_spin_);
+
+		roof_thick_spin_ = new QDoubleSpinBox;
+		roof_thick_spin_->setRange(0.0, 2.0);
+		roof_thick_spin_->setDecimals(2);
+		roof_thick_spin_->setSingleStep(0.05);
+		roof_thick_spin_->setSuffix(" m");
+		roof_thick_spin_->setValue(bdefs.roof_thickness);
+		roof_thick_spin_->setToolTip("Flat roof slab thickness (0 = no roof).");
+		buildingForm->addRow("Roof thickness", roof_thick_spin_);
+
+		buildingCol->addLayout(buildingForm);
+
+		build_btn_ = new QPushButton("Build");
+		build_btn_->setToolTip("Size the domain around the building (with wind clearance), rebuild the sim at that grid, then voxelize the thickened walls + overhanging flat roof and inject them as the flow obstacle. Load a centerline via File ▸ Open centerline STEP… first.");
+		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
+		buildingCol->addWidget(build_btn_);
+		col->addWidget(buildingGroup);
 
 		// --- Visualization group ---------------------------------------------------------------
 		QGroupBox* vizGroup = new QGroupBox("Visualization");
@@ -1034,6 +1109,133 @@ namespace windcfd::gui
 		setModelAsObstacle(true, noslip);
 		updateGizmoUi(); // enable the placement gizmo for the freshly loaded model
 		return true;
+	}
+
+	bool MainWindow::loadCenterlineFile(const QString& path, bool noslip)
+	{
+		QApplication::setOverrideCursor(Qt::WaitCursor);
+		std::string err;
+		windcfd::core::TriMesh mesh = windcfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
+		QApplication::restoreOverrideCursor();
+
+		if (mesh.empty())
+		{
+			std::fprintf(stderr, "[G1] centerline STEP load FAILED (%s): %s\n", path.toUtf8().constData(), err.c_str());
+			statusBar()->showMessage(QString("centerline load failed: %1").arg(QString::fromStdString(err)), 6000);
+			return false;
+		}
+
+		const auto& lo = mesh.bbox_min;
+		const auto& hi = mesh.bbox_max;
+		std::fprintf(stderr,
+			"[G1] loaded centerline STEP %s: %zu triangles, bbox=[%.4f %.4f %.4f]..[%.4f %.4f %.4f] m\n",
+			path.toUtf8().constData(), mesh.triangle_count(),
+			lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+		statusBar()->showMessage(QString("loaded centerline %1 (%2 triangles)")
+			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 5000);
+
+		centerline_mesh_ = std::move(mesh); // keep the centerline so Build can re-run without reloading
+		centerline_noslip_ = noslip;
+
+		// A centerline defines a BUILDING obstacle, not a STEP-as-mesh obstacle: drop any loaded mesh
+		// model so the Apply/resize path in Build doesn't re-voxelize a stale mesh over the building.
+		if (!model_mesh_.empty())
+		{
+			model_mesh_ = windcfd::core::TriMesh{};
+			if (viewer_) viewer_->clearMesh();
+			updateGizmoUi();
+		}
+
+		buildBuilding(); // size the domain + build + inject the solid once, right after loading
+		return true;
+	}
+
+	void MainWindow::buildBuilding()
+	{
+		using namespace windcfd::core;
+		if (centerline_mesh_.empty())
+		{
+			statusBar()->showMessage("no centerline loaded — File ▸ Open centerline STEP…", 5000);
+			return;
+		}
+
+		// 1) Section the centerline to a 2D footprint at mid-height (NaN = robust mid-section).
+		Footprint fp = mesh_horizontal_section(centerline_mesh_, std::nan(""));
+		if (fp.empty())
+		{
+			std::fprintf(stderr, "[G1] building: empty footprint (no closed loops from the centerline section)\n");
+			statusBar()->showMessage("build failed: no closed loops from the centerline section", 6000);
+			return;
+		}
+
+		// Building parameters from the dock (seeded from the BuildingParams defaults). Wall base on the floor.
+		BuildingParams prm;
+		if (wall_thick_spin_)    prm.wall_thickness = wall_thick_spin_->value();
+		if (wall_height_spin_)   prm.wall_height    = wall_height_spin_->value();
+		if (corner_radius_spin_) prm.corner_radius  = corner_radius_spin_->value();
+		if (roof_overhang_spin_) prm.roof_overhang  = roof_overhang_spin_->value();
+		if (roof_thick_spin_)    prm.roof_thickness = roof_thick_spin_->value();
+		prm.base_z = 0.0;
+
+		// 2) Size the domain around the building with wind clearance (mirrors tools/building_probe): the
+		//    footprint plus generous margins in xy; height = base + walls + roof + headroom.
+		const auto sz = fp.bbox_size();
+		const double margin = std::max(sz[0], sz[1]) * 1.5 + 2.0;
+		const double Lx = sz[0] + 2.0 * margin;
+		const double Ly = sz[1] + 2.0 * margin;
+		const double Lz = prm.base_z + prm.wall_height + prm.roof_thickness + 3.0;
+
+		// Voxel size for the building: resolve the wall (~3 cells across). A building domain is tens of
+		// metres — a different scale from the demo channel — so we pick h from the wall rather than
+		// inheriting the config's fine channel h. Backstop: coarsen to stay within the Apply cell guard
+		// (kMaxCells) so the rebuild never over-allocates.
+		double h = std::max(0.05, prm.wall_thickness / 3.0);
+		{
+			int nx = 0, ny = 0, nz = 0;
+			grid_dims_for(Lx, Ly, Lz, h, nx, ny, nz);
+			while ((long long)nx * ny * nz > kMaxCells) { h *= 1.25; grid_dims_for(Lx, Ly, Lz, h, nx, ny, nz); }
+		}
+
+		// 3) Rebuild the sim at that domain + h through the EXISTING Apply-resize path (applyGrid reads the
+		//    domain/h spin boxes). model_mesh_ is empty for a centerline, so Apply rebuilds a plain empty
+		//    channel at the new grid (no stale mesh re-voxelize) that we then inject the building into.
+		if (lx_spin_ && ly_spin_ && lz_spin_ && h_spin_)
+		{
+			const QSignalBlocker b1(lx_spin_), b2(ly_spin_), b3(lz_spin_), b4(h_spin_);
+			lx_spin_->setValue(Lx);
+			ly_spin_->setValue(Ly);
+			lz_spin_->setValue(Lz);
+			h_spin_->setValue(h);
+		}
+		updateGridReadout();
+		applyGrid(); // teardown + build_sim(GridOverride) + spawnWorker (fresh t=0)
+		if (!worker_) return; // apply failed (a status message was already shown)
+
+		// 4) Voxelize the building on the grid Apply actually built and inject it as the obstacle — the
+		//    SAME worker hand-off loadStepFile uses for its voxelized mask (rebuild off the main thread).
+		const MacGrid g = recipe_.grid;
+		Footprint placed = center_footprint(fp, g.nx * g.h, g.ny * g.h);
+		int solid = 0;
+		std::vector<unsigned char> mask = voxelize_building(placed, prm, g, &solid);
+		if (solid <= 0 || (int)mask.size() != g.p_count())
+		{
+			std::fprintf(stderr, "[G1] building: voxelize produced %d solid cells (mask %zu, expected %d)\n",
+				solid, mask.size(), g.p_count());
+			statusBar()->showMessage("build produced no solid cells", 6000);
+			return;
+		}
+
+		const int mode = centerline_noslip_ ? SOLID_NOSLIP : SOLID_FREESLIP;
+		worker_->requestRebuild(std::move(mask), mode); // core rebuild off-thread; overlay follows the published mask
+		model_injected_ = true; // finalize() samples flow-diversion; the voxel overlay refreshes on the new mask
+
+		std::fprintf(stderr,
+			"[G1] building: domain %.1f x %.1f x %.1f m @ h=%.3f -> %dx%dx%d = %d cells; "
+			"%d solid cells (%.2f%% of domain) [%s]\n",
+			Lx, Ly, Lz, g.h, g.nx, g.ny, g.nz, g.p_count(), solid,
+			100.0 * solid / std::max(1, g.p_count()), centerline_noslip_ ? "no-slip" : "free-slip");
+		statusBar()->showMessage(QString("building built: %1 solid cells, grid %2×%3×%4 @ h=%5 m")
+			.arg(solid).arg(g.nx).arg(g.ny).arg(g.nz).arg(g.h), 8000);
 	}
 
 	void MainWindow::addRecentFile(const QString& path)
