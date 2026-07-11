@@ -1408,6 +1408,18 @@ void main()
 		}
 		draw_bar(barX, barY, barW, barH, title, vmin_, vmax_, units,
 			[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
+
+		// --- Cp wind-load ramp (shown when "Colour building by Cp" is ON and the building is Cp-coloured) --
+		// Same 5-stop ramp the overlay uses, over the current SYMMETRIC Cp range [vox_cp_lo_, vox_cp_hi_], so
+		// it's clear what surface pressures the building colours mean (blue = suction, red = pressure). Ticks
+		// read min / 0 / max (0 falls on the mid, since the range is symmetric about Cp = 0). Placed to the
+		// LEFT of the slice bar so the two colorbars + their labels don't collide.
+		if (colour_by_cp_ && has_vox_cp_)
+		{
+			const int cpX = barX - 130;
+			draw_bar(cpX, barY, barW, barH, "Cp", vox_cp_lo_, vox_cp_hi_, "pressure coeff.",
+				[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
+		}
 	}
 
 	void SliceViewer::buildSliceGeometry()

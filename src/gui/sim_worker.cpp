@@ -337,9 +337,13 @@ namespace windcfd::gui
 			// emit it for the main thread to write. Serviced even while paused (it's before the do_step gate).
 			if (snapshot_pending_.exchange(false)) emit_checkpoint(snapshot_tag_.load());
 
-			bool do_step = playing_.load();
+			// Master gate: hold the whole sim until "Start Simulation" — no stepping and no manual
+			// single-step until the user has started the run (so they can load/place/Build/set the domain
+			// first). The live play/pause + Step still apply on top once started.
+			const bool started = started_.load();
+			bool do_step = started && playing_.load();
 			int req = step_requests_.load();
-			if (!do_step && req > 0) do_step = true;
+			if (started && !do_step && req > 0) do_step = true;
 
 			if (!do_step)
 			{

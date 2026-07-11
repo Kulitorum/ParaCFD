@@ -173,19 +173,33 @@ namespace windcfd::gui
 		// --- Simulation group ------------------------------------------------------------------
 		QGroupBox* simGroup = new QGroupBox("Simulation (live — no reset)");
 		QVBoxLayout* simCol = new QVBoxLayout(simGroup);
+
+		// "Start Simulation" master gate: the worker is HELD (steps nothing) until this is pressed, so the
+		// user can prepare the site first — load a centerline, place/rotate it with the gizmo, Build the
+		// solid, and set the domain — all while the flow stays frozen. Display/repaint + Build/voxelize keep
+		// working while held. Once started, the live Play/Pause + Step below take over.
+		QPushButton* startBtn = new QPushButton("Start Simulation");
+		startBtn->setToolTip("Begin advancing the flow. Prepare the site first (load a centerline, place/rotate it, Build, set the domain), then press Start.");
+		connect(startBtn, &QPushButton::clicked, this, [this] { startSimulation(); });
+		start_btn_ = startBtn;
+		simCol->addWidget(startBtn);
+
 		QHBoxLayout* runRow = new QHBoxLayout;
 		QPushButton* playBtn = new QPushButton("Pause");
 		playBtn->setCheckable(true);
 		playBtn->setChecked(true);
-		playBtn->setToolTip("Play/pause the simulation stepping.");
+		playBtn->setEnabled(false); // enabled once the sim is started (holds until then)
+		playBtn->setToolTip("Play/pause the simulation stepping (available once the simulation is started).");
 		connect(playBtn, &QPushButton::toggled, this, [this, playBtn](bool on) {
 			if (worker_) worker_->setPlaying(on);
 			playBtn->setText(on ? "Pause" : "Play");
 		});
 		play_btn_ = playBtn; // a rebuild (scenario load / grid Apply) honours this play/pause state
 		QPushButton* stepBtn = new QPushButton("Step");
-		stepBtn->setToolTip("Advance a single step (while paused).");
+		stepBtn->setEnabled(false); // enabled once the sim is started
+		stepBtn->setToolTip("Advance a single step (while paused). Available once the simulation is started.");
 		connect(stepBtn, &QPushButton::clicked, this, [this] { if (worker_) worker_->stepOnce(); });
+		step_btn_ = stepBtn;
 		runRow->addWidget(playBtn);
 		runRow->addWidget(stepBtn);
 		simCol->addLayout(runRow);
@@ -639,6 +653,7 @@ namespace windcfd::gui
 		if (!s_meta) { qRegisterMetaType<windcfd::gui::CheckpointStatePtr>("windcfd::gui::CheckpointStatePtr"); s_meta = true; }
 
 		worker_ = new SimWorker(std::move(core)); // no parent: moved to worker_thread_
+		worker_->setStarted(sim_started_); // hold the fresh worker until "Start Simulation" (persists across a rebuild)
 		if (play_btn_) worker_->setPlaying(play_btn_->isChecked()); // honour the current play/pause state
 		worker_->primeCounters(steps0, t0);          // a scene restore resumes from the saved step (else 0)
 		worker_->setAutosaveInterval(autosave_interval_); // keep auto-saving across a rebuild/restore
@@ -707,6 +722,24 @@ namespace windcfd::gui
 		}
 		updateGridReadout();
 		applyGrid();
+	}
+
+	void MainWindow::startSimulation()
+	{
+		if (sim_started_) return; // idempotent
+		sim_started_ = true;
+		if (worker_) worker_->setStarted(true); // release the master run gate — the worker begins stepping
+		// Hand control to the live Play/Pause + Step controls, and make sure we resume playing.
+		if (play_btn_)
+		{
+			play_btn_->setEnabled(true);
+			if (!play_btn_->isChecked()) play_btn_->setChecked(true); // fires setPlaying(true)
+			else if (worker_) worker_->setPlaying(true);
+		}
+		if (step_btn_) step_btn_->setEnabled(true);
+		if (start_btn_) { start_btn_->setEnabled(false); start_btn_->setText("Simulation running"); }
+		statusBar()->showMessage("simulation started", 3000);
+		std::fprintf(stderr, "[G1] simulation started (run gate released)\n");
 	}
 
 	void MainWindow::setInputSpeed(double U)
@@ -886,6 +919,17 @@ namespace windcfd::gui
 			if (keep_x.valid) viewer_->setModelXform(keep_x);    // re-apply the user's placement (setMesh reset it)
 			setModelAsObstacle(true);                            // re-voxelizes at viewer_->modelPlacement()
 			updateGizmoUi();
+		}
+
+		// Loaded centerline (building): re-display the placed house and RE-VOXELIZE it into the NEW
+		// domain/resolution. buildBuilding no longer resizes the grid (the dependency is now this way round),
+		// so an Apply that changes the domain re-runs the placed house's section→voxelize on the fresh grid.
+		if (!centerline_mesh_.empty() && viewer_)
+		{
+			viewer_->setMesh(windcfd::core::TriMesh(centerline_mesh_)); // re-show (setMesh reset the gizmo)
+			if (keep_x.valid) viewer_->setModelXform(keep_x);           // re-apply the user's placement
+			updateGizmoUi();
+			buildBuilding();                                            // re-voxelize the placed house into the new grid
 		}
 
 		syncGridControls(); // reflect the built grid (floor/clamp may differ from the typed value)
@@ -1151,19 +1195,23 @@ namespace windcfd::gui
 		statusBar()->showMessage(QString("loaded centerline %1 (%2 triangles)")
 			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 5000);
 
-		centerline_mesh_ = std::move(mesh); // keep the centerline so Build can re-run without reloading
+		centerline_mesh_ = mesh; // keep the centerline so Build can re-run without reloading
 		centerline_noslip_ = noslip;
 
-		// A centerline defines a BUILDING obstacle, not a STEP-as-mesh obstacle: drop any loaded mesh
-		// model so the Apply/resize path in Build doesn't re-voxelize a stale mesh over the building.
-		if (!model_mesh_.empty())
-		{
-			model_mesh_ = windcfd::core::TriMesh{};
-			if (viewer_) viewer_->clearMesh();
-			updateGizmoUi();
-		}
+		// A centerline defines a BUILDING obstacle, not a STEP-as-mesh obstacle: keep model_mesh_ EMPTY so
+		// the Apply/Build paths use the centerline→building voxelizer (not voxelize_mesh over a stale mesh).
+		model_mesh_ = windcfd::core::TriMesh{};
 
-		buildBuilding(); // size the domain + build + inject the solid once, right after loading
+		// Display the centerline mesh in the viewer AND enable the placement gizmo for it, exactly like a
+		// loaded STEP model: setMesh seeds a centre-on-bed default placement (in the CURRENT domain) that the
+		// user can translate/rotate/scale, and Build voxelizes the TRANSFORMED model (see buildBuilding).
+		scene_mesh_ = centerline_mesh_; // persist for a scene save (display mesh)
+		scene_place_ = windcfd::core::place_model_on_bed(centerline_mesh_, recipe_.info.Lx, recipe_.info.Ly);
+		if (viewer_) viewer_->setMesh(std::move(mesh)); // default centre-on-bed gizmo, valid before first paint
+		addRecentFile(path);
+		updateGizmoUi(); // enable the placement gizmo for the centerline
+
+		buildBuilding(); // build + inject the solid once (into the current domain), right after loading
 		return true;
 	}
 
@@ -1175,9 +1223,20 @@ namespace windcfd::gui
 			statusBar()->showMessage("no centerline loaded — File ▸ Open centerline STEP…", 5000);
 			return;
 		}
+		if (!worker_) { statusBar()->showMessage("no active simulation to build into", 4000); return; }
 
-		// 1) Section the centerline to a 2D footprint at mid-height (NaN = robust mid-section).
-		Footprint fp = mesh_horizontal_section(centerline_mesh_, std::nan(""));
+		// 1) Place the centerline WHERE THE GIZMO PUT IT: the user can translate/rotate/scale the house, so
+		//    voxelize the TRANSFORMED model. Read the live placement from the viewer (default centre-on-bed);
+		//    placed_mesh applies it to every vertex so the section/voxelization land under the drawn mesh.
+		const ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
+			? viewer_->modelPlacement()
+			: place_model_on_bed(centerline_mesh_, recipe_.info.Lx, recipe_.info.Ly);
+		const TriMesh placed = placed_mesh(centerline_mesh_, place);
+
+		// 2) Section the PLACED centerline to a 2D footprint at mid-height (NaN = robust mid-section). The
+		//    footprint is already in domain xy coordinates (the placement positions the building), so no
+		//    center_footprint is needed.
+		Footprint fp = mesh_horizontal_section(placed, std::nan(""));
 		if (fp.empty())
 		{
 			std::fprintf(stderr, "[G1] building: empty footprint (no closed loops from the centerline section)\n");
@@ -1194,51 +1253,18 @@ namespace windcfd::gui
 		if (roof_thick_spin_)    prm.roof_thickness = roof_thick_spin_->value();
 		prm.base_z = 0.0;
 
-		// 2) Size the domain around the building with wind clearance (mirrors tools/building_probe): the
-		//    footprint plus generous margins in xy; height = base + walls + roof + headroom.
-		const auto sz = fp.bbox_size();
-		const double margin = std::max(sz[0], sz[1]) * 1.5 + 2.0;
-		const double Lx = sz[0] + 2.0 * margin;
-		const double Ly = sz[1] + 2.0 * margin;
-		const double Lz = prm.base_z + prm.wall_height + prm.roof_thickness + 3.0;
-
-		// Voxel size for the building: resolve the wall (~3 cells across). A building domain is tens of
-		// metres — a different scale from the demo channel — so we pick h from the wall rather than
-		// inheriting the config's fine channel h. Backstop: coarsen to stay within the Apply cell guard
-		// (kMaxCells) so the rebuild never over-allocates.
-		double h = std::max(0.05, prm.wall_thickness / 3.0);
-		{
-			int nx = 0, ny = 0, nz = 0;
-			grid_dims_for(Lx, Ly, Lz, h, nx, ny, nz);
-			while ((long long)nx * ny * nz > kMaxCells) { h *= 1.25; grid_dims_for(Lx, Ly, Lz, h, nx, ny, nz); }
-		}
-
-		// 3) Rebuild the sim at that domain + h through the EXISTING Apply-resize path (applyGrid reads the
-		//    domain/h spin boxes). model_mesh_ is empty for a centerline, so Apply rebuilds a plain empty
-		//    channel at the new grid (no stale mesh re-voxelize) that we then inject the building into.
-		if (lx_spin_ && ly_spin_ && lz_spin_ && h_spin_)
-		{
-			const QSignalBlocker b1(lx_spin_), b2(ly_spin_), b3(lz_spin_), b4(h_spin_);
-			lx_spin_->setValue(Lx);
-			ly_spin_->setValue(Ly);
-			lz_spin_->setValue(Lz);
-			h_spin_->setValue(h);
-		}
-		updateGridReadout();
-		applyGrid(); // teardown + build_sim(GridOverride) + spawnWorker (fresh t=0)
-		if (!worker_) return; // apply failed (a status message was already shown)
-
-		// 4) Voxelize the building on the grid Apply actually built and inject it as the obstacle — the
-		//    SAME worker hand-off loadStepFile uses for its voxelized mask (rebuild off the main thread).
+		// 3) Voxelize the building into the CURRENT domain + resolution (the sim's live grid) — NO auto-resize.
+		//    The user controls the simulation volume via the Domain size + voxel-size controls and Apply. Inject
+		//    the mask as the obstacle through the SAME worker hand-off loadStepFile uses (rebuild off-thread).
 		const MacGrid g = recipe_.grid;
-		Footprint placed = center_footprint(fp, g.nx * g.h, g.ny * g.h);
 		int solid = 0;
-		std::vector<unsigned char> mask = voxelize_building(placed, prm, g, &solid);
+		std::vector<unsigned char> mask = voxelize_building(fp, prm, g, &solid);
 		if (solid <= 0 || (int)mask.size() != g.p_count())
 		{
-			std::fprintf(stderr, "[G1] building: voxelize produced %d solid cells (mask %zu, expected %d)\n",
+			std::fprintf(stderr, "[G1] building: voxelize produced %d solid cells (mask %zu, expected %d) — "
+				"is the building inside the current domain? adjust Domain size + Apply\n",
 				solid, mask.size(), g.p_count());
-			statusBar()->showMessage("build produced no solid cells", 6000);
+			statusBar()->showMessage("build produced no solid cells (check domain size)", 6000);
 			return;
 		}
 
@@ -1247,9 +1273,9 @@ namespace windcfd::gui
 		model_injected_ = true; // finalize() samples flow-diversion; the voxel overlay refreshes on the new mask
 
 		std::fprintf(stderr,
-			"[G1] building: domain %.1f x %.1f x %.1f m @ h=%.3f -> %dx%dx%d = %d cells; "
+			"[G1] building: current domain %.1f x %.1f x %.1f m @ h=%.3f -> %dx%dx%d = %d cells; "
 			"%d solid cells (%.2f%% of domain) [%s]\n",
-			Lx, Ly, Lz, g.h, g.nx, g.ny, g.nz, g.p_count(), solid,
+			g.nx * g.h, g.ny * g.h, g.nz * g.h, g.h, g.nx, g.ny, g.nz, g.p_count(), solid,
 			100.0 * solid / std::max(1, g.p_count()), centerline_noslip_ ? "no-slip" : "free-slip");
 		statusBar()->showMessage(QString("building built: %1 solid cells, grid %2×%3×%4 @ h=%5 m")
 			.arg(solid).arg(g.nx).arg(g.ny).arg(g.nz).arg(g.h), 8000);

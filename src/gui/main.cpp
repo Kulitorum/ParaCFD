@@ -13,10 +13,11 @@
 //   --load-step <path>     load a STEP model at startup (also available via File menu). The model
 //                          is auto-voxelized into the flow as the solid obstacle (replacing the
 //                          config obstacle); smoke-testable headlessly with --offscreen
-//   --load-centerline <path>  load a 3D-printing CENTERLINE STEP at startup (also via File menu). The
-//                          domain is sized to the building footprint and a solid building (thickened
-//                          walls + overhanging flat roof, core/geometry/building) is built + injected
-//                          as the obstacle; smoke-testable headlessly with --offscreen
+//   --load-centerline <path>  load a 3D-printing CENTERLINE STEP at startup (also via File menu). A
+//                          solid building (thickened walls + overhanging flat roof, core/geometry/
+//                          building) is built into the CURRENT domain + injected as the obstacle. Set
+//                          the domain via the Domain controls; defaults to configs/building.json when
+//                          no --config is given. Smoke-testable headlessly with --offscreen.
 //   --voxelize             DEPRECATED no-op: loading a model auto-injects it now (kept for scripts)
 //   --noslip               use SOLID_NOSLIP for the loaded model (default: SOLID_FREESLIP,
 //                          RESEARCH §3 production default)
@@ -118,7 +119,7 @@ int main(int argc, char** argv)
 		else if (a == "--record-selftest" && i + 1 < argc) record_selftest = argv[++i];
 		else if (!a.empty() && a[0] != '-') config = a; // positional config path
 	}
-	if (config.empty()) config = "configs/g1_viewer.json";
+	if (config.empty()) config = centerline_path.empty() ? "configs/g1_viewer.json" : "configs/building.json";
 	if (offscreen) qputenv("QT_QPA_PLATFORM", "offscreen");
 
 	// --- GL 4.3 core default format BEFORE QApplication -------------------------
@@ -368,7 +369,11 @@ int main(int argc, char** argv)
 
 	if (autoclose_ms > 0)
 	{
-		std::fprintf(stderr, "[G1] scripted run: auto-close in %d ms\n", autoclose_ms);
+		// Headless/gate path: the worker starts HELD (the "Start Simulation" gate). A scripted run has no
+		// user to press Start, so auto-start after all setup (load/place/Build/domain done above) — the sim
+		// must advance for loads to develop. Interactive runs stay held until the user presses Start.
+		std::fprintf(stderr, "[G1] scripted run: auto-starting simulation, auto-close in %d ms\n", autoclose_ms);
+		win.startSimulation();
 		QTimer::singleShot(autoclose_ms, &app, &QApplication::quit);
 	}
 

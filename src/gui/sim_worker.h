@@ -57,6 +57,11 @@ namespace windcfd::gui
 		const unsigned char* disp_solid() const { return ds_; } // solid mask snapshot (auto-range excludes it)
 
 		bool playing() const { return playing_.load(); }
+		// Master run gate ("hold until Start Simulation"): the worker steps NOTHING until started, so the
+		// user can prepare the site (load / place / Build / set the domain) first. Independent of the live
+		// play/pause — stepping requires BOTH started AND playing. Re-applied across a rebuild by the GUI.
+		bool started() const { return started_.load(); }
+		void setStarted(bool s) { started_.store(s); }
 		long long steps() const { return steps_.load(); }
 		double sim_time() const { return sim_time_.load(); }
 
@@ -263,6 +268,7 @@ namespace windcfd::gui
 		bool display_dirty_ = false;
 
 		std::atomic<bool> playing_{ true };
+		std::atomic<bool> started_{ false }; // master run gate: false until "Start Simulation" holds the sim
 		std::atomic<bool> quit_{ false };
 		std::atomic<int> step_requests_{ 0 };
 		std::atomic<long long> steps_{ 0 };

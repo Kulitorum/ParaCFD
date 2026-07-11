@@ -1,0 +1,15 @@
+{
+	"name": "building",
+	"_doc": "Wind-around-building domain for the centerline Build workflow. A ~40 x 30 x 15 m wind tunnel at h=0.25 m (160x120x60 = ~1.15M cells), air (rho=1.225). Workflow: load a centerline STEP, place/rotate it with the gizmo, set the domain size + voxel size if needed (Apply), press Build, then Start Simulation. Enlarge the domain (esp. height) for a bigger building or a lower blockage ratio; Build/Apply re-voxelize the placed house.",
+	"domain_x": 40.0,
+	"domain_y": 30.0,
+	"domain_z": 15.0,
+	"voxel_h": 0.25,
+	"U": 5.0,
+	"rho": 1.225,
+	"nu": 1.0e-3,
+	"Cs": 0.1,
+	"v_blip": 0.0,
+	"proj_tol": 1e-3,
+	"proj_max_iter": 40
+}

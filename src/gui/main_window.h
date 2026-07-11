@@ -85,6 +85,11 @@ namespace windcfd::gui
 		// testable headlessly (mirrors --load-step / --voxelize).
 		void applyGridValues(double Lx, double Ly, double Lz, double h);
 
+		// Programmatically press "Start Simulation": release the master run gate so the worker begins
+		// advancing the flow (the sim is held/paused until this). Idempotent. Used by the headless/gate
+		// path (--autoclose-ms) to auto-start after setup so loads develop, and by the dock's Start button.
+		void startSimulation();
+
 		// Programmatically set the inlet current speed U [m/s], exactly as the "Input speed" spin box:
 		// applies live to the running flow (no reset). Used by the `--set-u` CLI smoke hook so the
 		// different-currents feature is testable headlessly (mirrors --apply-h).
@@ -208,6 +213,9 @@ namespace windcfd::gui
 		QLabel* grid_readout_ = nullptr;
 		QPushButton* apply_btn_ = nullptr;
 		QPushButton* play_btn_ = nullptr; // so a rebuild can honour the current play/pause state
+		QPushButton* start_btn_ = nullptr; // "Start Simulation" — releases the master run gate (holds until pressed)
+		QPushButton* step_btn_ = nullptr;  // single-step (enabled only once started)
+		bool sim_started_ = false;         // master run gate mirror; re-applied to every (re)spawned worker
 		static constexpr long long kMaxCells = 40000000LL; // Apply guard: refuse an OOM-risking grid
 
 		// Recent-files (feature 1): persisted via QSettings("COBOD","WindCFD"). The submenu is
