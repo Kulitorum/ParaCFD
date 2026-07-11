@@ -10,10 +10,12 @@
 #include "gui/scene_io.h"    // SceneFile / CheckpointStatePtr
 #include "gui/sim_setup.h"
 #include "gui/sim_worker.h" // DiversionReport
+#include "gui/slice_viewer.h" // SliceViewer + SliceViewer::ModelGizmoXform (placement undo/redo history)
 
 #include <QMainWindow>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -188,9 +190,34 @@ namespace windcfd::gui
 		void updateGridReadout();
 
 		// --- Model-placement gizmo UI ------------------------------------------------------------
-		// Enable the gizmo dock group + refresh its readout for the current model (any gizmo-editable
-		// model). Called on model load/close, grid Apply and scene restore.
+		// Enable the gizmo dock group + refresh its readout (incl. the placement readout + undo/redo
+		// enable state) for the current model. Called on model load/close, grid Apply and scene restore.
 		void updateGizmoUi();
+		// Human-readable one-shot of a gizmo transform: translation (m), rotation (yaw about Z + total
+		// axis-angle) and uniform/near-uniform scale — for the always-visible monospaced readout.
+		QString formatPlacement(const SliceViewer::ModelGizmoXform& x) const;
+
+		// --- Model-placement UNDO / REDO (30 levels) + transform readout -------------------------
+		// A 30-deep history of the gizmo's FULL transform snapshot so an accidental move/rotate/scale is
+		// visible AND reversible without restarting the app. last_xform_ is the last COMMITTED state (the
+		// baseline the next edit is measured against); restoring_placement_ guards the modelPlacementChanged
+		// slot so pushing a state back during undo/redo cannot re-enter and pollute the stacks. Undo only
+		// MOVES the model — the user presses Build/Apply to re-voxelize (noted in the button tooltips).
+		void initPlacementHistory();    // (re)seat the baseline from the viewer + clear both stacks (model load / Apply / restore)
+		void commitPlacementEdit();     // record last_xform_ → undo, clear redo, adopt the viewer's state as the new baseline
+		void onModelPlacementChanged(); // SliceViewer::modelPlacementChanged slot (guarded by restoring_placement_)
+		void undoPlacement();
+		void redoPlacement();
+		std::deque<SliceViewer::ModelGizmoXform> undo_, redo_;
+		SliceViewer::ModelGizmoXform last_xform_{}; // last committed gizmo state (the undo baseline)
+		bool restoring_placement_ = false;          // re-entrancy guard while restoring a state
+		static constexpr int kUndoMax = 30;
+		QAction* undo_action_ = nullptr;            // Ctrl+Z
+		QAction* redo_action_ = nullptr;            // Ctrl+Shift+Z / Ctrl+Y
+		QPushButton* undo_btn_ = nullptr;
+		QPushButton* redo_btn_ = nullptr;
+		QLabel* placement_readout_ = nullptr;       // monospaced always-visible transform readout
+
 		QGroupBox* gizmo_group_ = nullptr;
 		QCheckBox* gizmo_enable_chk_ = nullptr; // enable the unified manipulator (all handles at once)
 		QLabel* gizmo_info_ = nullptr;

@@ -46,6 +46,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <utility>
@@ -80,7 +81,7 @@ namespace windcfd::gui
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
 			model_mesh_ = windcfd::core::TriMesh{};
 			if (viewer_) viewer_->clearMesh();
-			updateGizmoUi(); // no model ⇒ disable the placement gizmo
+			initPlacementHistory(); // no model ⇒ clear the undo/redo history + disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
 		});
 
@@ -125,6 +126,21 @@ namespace windcfd::gui
 		// --- Recent files — STEP models AND saved scenes (persisted across sessions via QSettings) --
 		recent_menu_ = fileMenu->addMenu("Recent Files");
 		rebuildRecentMenu();
+
+		// --- Edit menu: model-placement Undo / Redo (30 levels) ----------------------------------
+		// The gizmo can move/rotate/scale the model by accident (and previously that couldn't be undone —
+		// only restarting fixed it). These give a visible, reversible history: Ctrl+Z / Ctrl+Shift+Z (and
+		// Ctrl+Y), mirrored by the small buttons in the "Model placement" dock group. They only MOVE the
+		// model — the user presses Build/Apply to re-voxelize the new pose (see the tooltips).
+		QMenu* editMenu = menuBar()->addMenu("&Edit");
+		undo_action_ = editMenu->addAction("Undo placement");
+		undo_action_->setShortcut(QKeySequence::Undo); // Ctrl+Z
+		undo_action_->setEnabled(false);
+		connect(undo_action_, &QAction::triggered, this, [this] { undoPlacement(); });
+		redo_action_ = editMenu->addAction("Redo placement");
+		redo_action_->setShortcuts({ QKeySequence(QStringLiteral("Ctrl+Shift+Z")), QKeySequence(QStringLiteral("Ctrl+Y")) });
+		redo_action_->setEnabled(false);
+		connect(redo_action_, &QAction::triggered, this, [this] { redoPlacement(); });
 
 		// A loaded STEP model IS the obstacle: loadStepFile auto-voxelizes + injects it (replacing the
 		// config obstacle), so there is no separate "Model as obstacle" toggle / Model menu any more.
@@ -204,18 +220,18 @@ namespace windcfd::gui
 		runRow->addWidget(stepBtn);
 		simCol->addLayout(runRow);
 
-		// Inlet current speed U — applies LIVE to the running flow (no reset): the wake/scour evolves
+		// Inlet current speed U — applies LIVE to the running flow (no reset): the wake evolves
 		// toward the new current so you can test different currents interactively. It is ALSO honoured
 		// by Apply below (a grid rebuild keeps the chosen current). Distinct from the domain/h block,
 		// which resets the sim at t=0.
 		QFormLayout* speedForm = new QFormLayout;
 		speedForm->setLabelAlignment(Qt::AlignLeft);
 		u_spin_ = new QDoubleSpinBox;
-		u_spin_->setRange(0.0, 10.0);
+		u_spin_->setRange(0.0, 40.0);
 		u_spin_->setDecimals(3);
 		u_spin_->setSingleStep(0.05);
 		u_spin_->setSuffix(" m/s");
-		u_spin_->setToolTip("Inlet current speed U. Applies live to the running flow (no reset) — the wake/scour evolves toward it; also used when you Apply a new grid.");
+		u_spin_->setToolTip("Inlet current speed U. Applies live to the running flow (no reset) — the wake evolves toward it; also used when you Apply a new grid.");
 		connect(u_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
 			if (worker_) worker_->setInletSpeed(v);
 			if (viewer_) viewer_->setReferenceU(v);
@@ -619,17 +635,44 @@ namespace windcfd::gui
 		gizmo_enable_chk_->setToolTip("Show the transform gizmo on the model and drag its coloured handles: arrows = move along an axis, rings = rotate about an axis, cubes = scale (a grey centre cube scales uniformly) — X red, Y green, Z blue. A left-drag away from any handle still orbits the camera. 'Apply' (Domain & resolution) re-voxelizes the model where you placed it.");
 		connect(gizmo_enable_chk_, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setGizmoEnabled(on); });
 		gizmoCol->addWidget(gizmo_enable_chk_);
+
+		// Undo / Redo the model placement (30 levels). An accidental gizmo move/rotate/scale is reversible
+		// here (or via Ctrl+Z / Ctrl+Shift+Z) without restarting. They ONLY move the model — press Build (or
+		// Apply) afterwards to re-voxelize the new pose.
+		QHBoxLayout* undoRow = new QHBoxLayout;
+		undo_btn_ = new QPushButton("Undo");
+		undo_btn_->setToolTip("Undo the last model move/rotate/scale (Ctrl+Z). Only moves the model — press Build/Apply to re-voxelize the new pose.");
+		undo_btn_->setEnabled(false);
+		connect(undo_btn_, &QPushButton::clicked, this, [this] { undoPlacement(); });
+		redo_btn_ = new QPushButton("Redo");
+		redo_btn_->setToolTip("Redo the last undone placement change (Ctrl+Shift+Z / Ctrl+Y). Press Build/Apply to re-voxelize.");
+		redo_btn_->setEnabled(false);
+		connect(redo_btn_, &QPushButton::clicked, this, [this] { redoPlacement(); });
+		undoRow->addWidget(undo_btn_);
+		undoRow->addWidget(redo_btn_);
+		gizmoCol->addLayout(undoRow);
+
 		QPushButton* resetPlaceBtn = new QPushButton("Reset placement");
-		resetPlaceBtn->setToolTip("Return the model to the default centre-on-bed placement.");
+		resetPlaceBtn->setToolTip("Return the model to the default centre-on-bed placement (undoable with Ctrl+Z).");
 		connect(resetPlaceBtn, &QPushButton::clicked, this, [this] { if (viewer_) viewer_->resetModelPlacement(); });
 		gizmoCol->addWidget(resetPlaceBtn);
 		gizmo_info_ = new QLabel("(load a STEP model)");
 		gizmo_info_->setWordWrap(true);
 		gizmo_info_->setStyleSheet("color:#9aa;");
 		gizmoCol->addWidget(gizmo_info_);
+
+		// Always-visible transform readout (monospaced): translation in metres, rotation decomposed as the
+		// yaw about the vertical Z axis PLUS the full axis-angle, and (near-)uniform scale — so an accidental
+		// gizmo rotation is immediately visible. Refreshed on every placement change + undo/redo/reset.
+		placement_readout_ = new QLabel("(no model)");
+		placement_readout_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		placement_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");
+		placement_readout_->setToolTip("Live model placement: translation (m), rotation (yaw about Z + total axis-angle) and scale.");
+		gizmoCol->addWidget(placement_readout_);
+
 		gizmo_group_ = gizmoGroup;
 		gizmoGroup->setEnabled(false);
-		if (viewer_) connect(viewer_, &SliceViewer::modelPlacementChanged, this, [this] { updateGizmoUi(); });
+		if (viewer_) connect(viewer_, &SliceViewer::modelPlacementChanged, this, [this] { onModelPlacementChanged(); });
 		col->addWidget(gizmoGroup);
 
 		col->addStretch(1);
@@ -834,6 +877,17 @@ namespace windcfd::gui
 			const QSignalBlocker b(gizmo_enable_chk_);
 			gizmo_enable_chk_->setChecked(viewer_->gizmoEnabled()); // keep the box in sync with the viewer
 		}
+
+		// Undo/redo availability: a model must be loaded AND the respective stack non-empty.
+		if (undo_action_) undo_action_->setEnabled(ok && !undo_.empty());
+		if (redo_action_) redo_action_->setEnabled(ok && !redo_.empty());
+		if (undo_btn_) undo_btn_->setEnabled(ok && !undo_.empty());
+		if (redo_btn_) redo_btn_->setEnabled(ok && !redo_.empty());
+
+		// Always-visible transform readout ("(no model)" when none is loaded).
+		if (placement_readout_)
+			placement_readout_->setText(ok ? formatPlacement(viewer_->modelXform()) : QStringLiteral("(no model)"));
+
 		if (!gizmo_info_) return;
 		if (!ok) { gizmo_info_->setText("(load a STEP model)"); return; }
 		const SliceViewer::ModelGizmoXform x = viewer_->modelXform();
@@ -842,6 +896,115 @@ namespace windcfd::gui
 			.arg(x.t.x(), 0, 'f', 2).arg(x.t.y(), 0, 'f', 2).arg(x.t.z(), 0, 'f', 2)
 			.arg(e.x(), 0, 'f', 0).arg(e.y(), 0, 'f', 0).arg(e.z(), 0, 'f', 0)
 			.arg(x.scale.x(), 0, 'f', 2).arg(x.scale.y(), 0, 'f', 2).arg(x.scale.z(), 0, 'f', 2));
+	}
+
+	// Decompose a gizmo transform into a readable, always-visible string. Rotation is reported two
+	// complementary ways: the YAW about the vertical Z axis (how far the building has spun on its base —
+	// the accidental rotation the user cares about) computed directly from the model's rotated local +X
+	// axis, AND the full single axis-angle (unambiguous for any tilt). Scale collapses to one number when
+	// (near-)uniform. Uses modelXform()'s rot/scale/t directly (no dependency on the affine decomposition).
+	QString MainWindow::formatPlacement(const SliceViewer::ModelGizmoXform& x) const
+	{
+		constexpr float kRad2Deg = 57.2957795131f;
+
+		// Yaw about Z: heading of the model's local +X axis projected into the world XY plane.
+		const QVector3D fx = x.rot.rotatedVector(QVector3D(1, 0, 0));
+		float yaw = std::atan2(fx.y(), fx.x()) * kRad2Deg;
+		if (std::abs(yaw) < 0.05f) yaw = 0.0f; // clean up -0.0 / float noise
+
+		// Total rotation as a single axis + angle.
+		QVector3D axis; float ang = 0.0f;
+		x.rot.getAxisAndAngle(&axis, &ang);
+		if (ang > 180.0f) ang -= 360.0f; // report in (-180, 180]
+
+		QString rotLine;
+		if (std::abs(ang) < 0.05f)
+			rotLine = QStringLiteral("  R  none");
+		else
+			rotLine = QString("  R  yaw(Z) %1°   axis(%2, %3, %4) %5°")
+				.arg(yaw, 0, 'f', 1)
+				.arg(axis.x(), 0, 'f', 2).arg(axis.y(), 0, 'f', 2).arg(axis.z(), 0, 'f', 2)
+				.arg(ang, 0, 'f', 1);
+
+		// Scale: single value when near-uniform, else per-axis.
+		const float sx = x.scale.x(), sy = x.scale.y(), sz = x.scale.z();
+		const float smax = std::max(sx, std::max(sy, sz));
+		const bool uniform = (std::abs(sx - sy) + std::abs(sy - sz)) <= 1e-3f * std::max(1.0f, smax);
+		const QString scaleLine = uniform
+			? QString("  S  %1  (uniform)").arg(sx, 0, 'f', 3)
+			: QString("  S  x%1  y%2  z%3").arg(sx, 0, 'f', 3).arg(sy, 0, 'f', 3).arg(sz, 0, 'f', 3);
+
+		return QString("  T  (%1, %2, %3) m\n%4\n%5")
+			.arg(x.t.x(), 0, 'f', 3).arg(x.t.y(), 0, 'f', 3).arg(x.t.z(), 0, 'f', 3)
+			.arg(rotLine).arg(scaleLine);
+	}
+
+	// (Re)seat the undo baseline from the viewer's current placement and clear both stacks. Called on any
+	// programmatic (re)placement that is NOT a user edit: model load/close, grid Apply, scene restore.
+	void MainWindow::initPlacementHistory()
+	{
+		undo_.clear();
+		redo_.clear();
+		last_xform_ = (viewer_ && viewer_->hasModelPlacement())
+			? viewer_->modelXform() : SliceViewer::ModelGizmoXform{};
+		updateGizmoUi(); // refresh the readout + undo/redo enable state
+	}
+
+	// Record the last committed state onto the undo stack (capped at 30), drop the redo future, and adopt
+	// the viewer's current placement as the new baseline. Shared by the drag/reset slot and the CLI nudge.
+	void MainWindow::commitPlacementEdit()
+	{
+		if (!viewer_ || !viewer_->hasModelPlacement()) return;
+		if (last_xform_.valid)
+		{
+			undo_.push_back(last_xform_);
+			if ((int)undo_.size() > kUndoMax) undo_.pop_front();
+			redo_.clear();
+		}
+		last_xform_ = viewer_->modelXform();
+		updateGizmoUi();
+	}
+
+	// SliceViewer emits modelPlacementChanged on a gizmo drag-release, a Reset, or setModelPlacement (scene
+	// restore). While we push a state back during undo/redo, restoring_placement_ suppresses recording so
+	// the stacks aren't polluted (setModelXform does not currently emit the signal, but the guard is correct
+	// regardless — reset/setModelPlacement DO emit). Otherwise the edit is committed to the history.
+	void MainWindow::onModelPlacementChanged()
+	{
+		if (restoring_placement_) { updateGizmoUi(); return; } // programmatic restore — just refresh the readout
+		commitPlacementEdit();
+	}
+
+	void MainWindow::undoPlacement()
+	{
+		if (undo_.empty() || !viewer_ || !viewer_->hasModelPlacement()) return;
+		redo_.push_back(viewer_->modelXform());         // the current pose becomes the redo target
+		if ((int)redo_.size() > kUndoMax) redo_.pop_front();
+		const SliceViewer::ModelGizmoXform x = undo_.back();
+		undo_.pop_back();
+		restoring_placement_ = true;                    // re-entrancy guard (setModelXform may update())
+		viewer_->setModelXform(x);
+		restoring_placement_ = false;
+		last_xform_ = x;                                // the restored state is the new baseline
+		viewer_->update();
+		updateGizmoUi();
+		statusBar()->showMessage("placement undone — press Build/Apply to re-voxelize", 3000);
+	}
+
+	void MainWindow::redoPlacement()
+	{
+		if (redo_.empty() || !viewer_ || !viewer_->hasModelPlacement()) return;
+		undo_.push_back(viewer_->modelXform());
+		if ((int)undo_.size() > kUndoMax) undo_.pop_front();
+		const SliceViewer::ModelGizmoXform x = redo_.back();
+		redo_.pop_back();
+		restoring_placement_ = true;
+		viewer_->setModelXform(x);
+		restoring_placement_ = false;
+		last_xform_ = x;
+		viewer_->update();
+		updateGizmoUi();
+		statusBar()->showMessage("placement redone — press Build/Apply to re-voxelize", 3000);
 	}
 
 	void MainWindow::nudgeModelPlacement(double dx, double dy, double dz, double rzDeg, double scale)
@@ -1443,7 +1606,7 @@ namespace windcfd::gui
 				rec_preset_ = video_dialog_->preset();
 				rec_fps_ = video_dialog_->fps();
 				QString path = video_dialog_->path().trimmed();
-				if (path.isEmpty()) path = "scour_run.mp4";
+				if (path.isEmpty()) path = "windcfd_run.mp4";
 				if (!path.endsWith(".mp4", Qt::CaseInsensitive)) path += ".mp4";
 				startRecording(path);
 			});
