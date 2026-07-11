@@ -38,7 +38,7 @@ namespace windcfd::gui
 	{
 		std::lock_guard<std::mutex> lk(mask_mtx_);
 		mask_snapshot_ = mask;
-		mask_grid_ = core_->grid();
+		mask_grid_ = hostGrid(); // HOST view: the viewer draws the voxel staircase on the main thread
 		mask_gen_.fetch_add(1);
 	}
 
@@ -153,7 +153,7 @@ namespace windcfd::gui
 	void SimWorker::maybe_compute_loads()
 	{
 		if (!core_) return;
-		const MacGrid g = core_->grid();
+		const MacGrid g = hostGrid(); // HOST view: compute_wind_loads is a host loop + reads g.dx (4.3 guard)
 		const std::size_t np = (std::size_t)g.p_count();
 		if (np == 0) return;
 		ls_host_.resize(np);
@@ -182,7 +182,7 @@ namespace windcfd::gui
 		{
 			averager_.add(L, lcp_host_, sim_time_.load());
 			st = averager_.result(&avg_cp_scratch_);
-			st.flow_through_time = (double)g.nx * g.h / std::max(1e-6, std::fabs(prm.u_ref)); // L_x / U_ref [s]
+			st.flow_through_time = g.Lx() / std::max(1e-6, std::fabs(prm.u_ref)); // L_x / U_ref [s] (Lx()=xf[nx] on a graded grid, nx*h uniform)
 			have_avg = true;
 		}
 
@@ -306,7 +306,7 @@ namespace windcfd::gui
 			return;
 		last_flow_pub_ = now;
 
-		MacGrid g = core_->grid();
+		MacGrid g = hostGrid(); // HOST view: published to the main-thread CPU tracer advection
 		fu_back_.resize((size_t)g.u_count());
 		fv_back_.resize((size_t)g.v_count());
 		fw_back_.resize((size_t)g.w_count());

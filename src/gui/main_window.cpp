@@ -761,6 +761,7 @@ namespace windcfd::gui
 		worker_->setAutosaveInterval(autosave_interval_); // keep auto-saving across a rebuild/restore
 		worker_->setDisplayInterval(display_throttle_s_); // keep the "Fast sim" graphics throttle across a rebuild/restore
 		worker_->setWindLoadRho(recipe_.pr.rho);          // dynamic-pressure density = the solver's rho (Cp/Cd consistency)
+		worker_->setMetrics(recipe_.metrics);             // graded fine-core metrics (null ⇒ uniform); host consumers use host_view()
 		// Rebuild factory: a re-inject rebuilds the core from an immutable recipe snapshot, entirely on
 		// the worker thread (make_core is Qt-free and thread-safe).
 		worker_->setRebuildFactory([recipe = recipe_](const std::vector<unsigned char>& solid, int mode)
@@ -1553,7 +1554,10 @@ namespace windcfd::gui
 		// 3) Voxelize the building into the CURRENT domain + resolution (the sim's live grid) — NO auto-resize.
 		//    The user controls the simulation volume via the Domain size + voxel-size controls and Apply. Inject
 		//    the mask as the obstacle through the SAME worker hand-off loadStepFile uses (rebuild off-thread).
-		const MacGrid g = recipe_.grid;
+		// HOST-view grid: on a graded grid recipe_.grid is the DEVICE view (device metric pointers); the
+		// voxelizer runs on this (main) thread and must read host cell coordinates. (Graded-aware wall
+		// voxelization itself is task 4.1; this only keeps the deref host-safe.)
+		const MacGrid g = recipe_.metrics ? recipe_.metrics->host_view() : recipe_.grid;
 		int solid = 0;
 		std::vector<unsigned char> mask = voxelize_building(fp, prm, g, &solid);
 		if (solid <= 0 || (int)mask.size() != g.p_count())
@@ -1727,7 +1731,8 @@ namespace windcfd::gui
 			double mesh_vol = 0.0, voxel_vol = 0.0;
 			int thin = 0;
 			std::vector<float> frac;
-			std::vector<unsigned char> model_solid = voxelize_mesh(model_mesh_, recipe_.grid, place,
+			const MacGrid vg = recipe_.metrics ? recipe_.metrics->host_view() : recipe_.grid; // host view (device-view on graded)
+			std::vector<unsigned char> model_solid = voxelize_mesh(model_mesh_, vg, place,
 				&mesh_vol, &voxel_vol, &frac, &thin);
 
 			// The loaded model REPLACES the config obstacle (the default cylinder): the injected mask is

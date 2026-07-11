@@ -102,9 +102,23 @@ start Phase B until Phase A's oracle is green.
       (host arrays for CPU/geometry consumers + device upload for kernels; `host_view()`/`device_view()`;
       `FineCoreSpec`, `generate()`, `uniform()`, `h_min()`). Verified: 26-cell axis, uniform core at
       h_fine, max ratio 1.1500 ≤ 1.15.
-- [ ] 3.2 Add fine-core config keys (box, `h_fine`, growth ratio) to `config.*` and a graded
+- [x] 3.2 Add fine-core config keys (box, `h_fine`, growth ratio) to `config.*` and a graded
       `configs/building.json` variant
-- [ ] 3.3 Wire the generator into `sim_setup.*` / the Apply path (rebuild at t=0)
+      → Keys parsed in `gui/sim_setup.cpp` (`Config` in config.* is dead code at runtime). A nested
+      `"fine_core": { enabled, x0..z1, h_fine, growth }` object → `FineCoreSpec`. Opt-in: absent/
+      disabled/`h_fine>=voxel_h` ⇒ uniform (byte-identical). Added `configs/g1_viewer_graded.json`.
+- [x] 3.3 Wire the generator into `sim_setup.*` / the Apply path (rebuild at t=0)
+      → `build_sim`: when graded, `GridMetrics::generate(fc)` into a `std::shared_ptr` in the
+      (copyable) `SimRecipe`; `recipe.grid = metrics->device_view()` (GPU core), `info` dims/extent
+      from `host_view()`. Ownership: shared_ptr in the recipe keeps the metric arrays alive across
+      every recipe copy (recipe_, worker factory, scene_io) → outlives the core's device-view grid.
+      Worker gains `metrics_` + `setMetrics()` + `hostGrid()`; host consumers (wind loads, published
+      mask/flow grids, flow-through time via `Lx()`) use `hostGrid()`, GPU path uses the device view.
+      main_window: `setMetrics(recipe_.metrics)` at spawn; voxelizer uses `host_view()`. Apply re-reads
+      the config's `fine_core` → regenerates the graded grid at t=0. VERIFIED headless: graded run
+      42×26×8 @ h_fine=0.05 steps 5176 steps, no crash; uniform run unregressed.
+      NOTE: GUI dock fine-core controls + Apply-override fine-core fields are task 3.4 (deferred); the
+      grid-dims readout still shows uniform-derived dims on a graded grid (cosmetic, 3.4).
 - [ ] 3.4 Add GUI fine-core controls in `main_window.*`; optionally auto-track the placed building
       bbox + margin (see design Open Questions)
 
@@ -114,10 +128,18 @@ start Phase B until Phase A's oracle is green.
       the wall band; the committed `0.5·h·√2` floor (`d648cb6`) becomes a no-op inside the fine core
 - [ ] 4.2 Update the CUDA-GL slice sampler (`slice_field.cu`, `slice_gl.cu`) to sample via the
       world→index mapping
-- [ ] 4.3 **windloads (`windloads.cpp`) — the deliverable**: feed `h_fine` (not a stale global `h`)
+- [x] 4.3 **windloads (`windloads.cpp`) — the deliverable**: feed `h_fine` (not a stale global `h`)
       and **add a guard asserting the building bbox ⊆ the uniform fine core** so all surface faces
       are `h_fine²` and `A_frontal/A_plan/L_ref`/moment arms stay valid; fail loudly if a surface
       cell lands in the graded transition
+      → `g.h` already carries `h_fine`; under the guard the existing scalar math is provably exact
+      (proof: within a uniform sub-block the (i+0.5)h arm proxy differs from the true `xc(i)` by a
+      per-axis constant that cancels in `r = face − centroid`). Added the guard: track building
+      imin..kmax, assert `dx(i)=dy(j)=dz(k)=g.h` over the bbox, else `throw std::runtime_error`. Caller
+      (`sim_worker::maybe_compute_loads`) now passes `hostGrid()` (host metric arrays). VERIFIED in
+      `parity_probe`: building in the core integrates; building reaching the graded transition is
+      rejected. NOTE: a graded run producing loads over a real building also needs task 4.1 (the
+      voxelizer's world→index cell mapping); the guard + host-grid caller are complete.
 - [ ] 4.4 Route `flow_particles.cpp` + `flow_tracers.cpp` locate/sample through the world→index map;
       take domain extent from `xf[nx]`/`yf[ny]`/`zf[nz]`, not `nx·h`
 - [ ] 4.5 Persist/reconstruct the grid in `scene_io.*` (fine-core **recipe**, per design lean +

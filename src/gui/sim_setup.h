@@ -10,6 +10,7 @@
 #pragma once
 
 #include "core/fluid/channel_core.h"
+#include "core/fluid/grid_metrics.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/tri_mesh.h"
 
@@ -34,7 +35,14 @@ namespace windcfd::gui
 	// worker's rebuild factory so a re-inject is a pure worker-thread operation.
 	struct SimRecipe
 	{
-		windcfd::core::MacGrid grid;
+		windcfd::core::MacGrid grid;               // GRADED: the DEVICE-view MacGrid (kernels); UNIFORM: null-metric grid.
+		// Graded fine-core grid (null ⇒ uniform). GridMetrics is move-only, so it is held by shared_ptr:
+		// the recipe is copied (into recipe_, the worker rebuild factory, scene_io) and every copy shares
+		// this one instance, keeping the host+device metric arrays alive as long as any device-view MacGrid
+		// (the core's g_, snapshots) references them. Host consumers use metrics->host_view().
+		std::shared_ptr<windcfd::core::GridMetrics> metrics; // null ⇒ uniform grid
+		windcfd::core::FineCoreSpec fine_core;               // the parsed fine-core spec (for Apply re-grid)
+		bool graded = false;                                 // true ⇒ metrics is set (graded grid active)
 		windcfd::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
 		windcfd::core::ChannelParams pr;
 		std::vector<unsigned char> base_solid;   // config obstacle (procedural cylinder); all-zero if none

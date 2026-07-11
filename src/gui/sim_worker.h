@@ -11,6 +11,7 @@
 #pragma once
 
 #include "core/fluid/channel_core.h"
+#include "core/fluid/grid_metrics.h" // GridMetrics (graded fine-core grid)
 #include "core/windloads.h"     // WindLoads / WindLoadParams / compute_wind_loads
 #include "gui/flow_particles.h" // FlowField
 #include "gui/scene_io.h"       // CheckpointState / CheckpointStatePtr
@@ -115,6 +116,12 @@ namespace windcfd::gui
 		void setRebuildFactory(std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(
 			const std::vector<unsigned char>&, int)> f) { factory_ = std::move(f); }
 
+		// Graded fine-core metrics (shared with the recipe; null ⇒ uniform grid). Lets the worker's
+		// HOST-side consumers (wind loads, the grids published to the viewer) use a HOST-view MacGrid
+		// instead of the core's DEVICE view (whose metric pointers would crash a host dereference). Set
+		// at spawn and after an Apply re-grid; a plain obstacle re-inject keeps the same metrics.
+		void setMetrics(std::shared_ptr<windcfd::core::GridMetrics> m) { metrics_ = std::move(m); }
+
 		// Queue a core rebuild with a new obstacle mask (thread-safe from the main thread). The
 		// worker picks it up at the top of its next loop iteration and rebuilds ON ITS THREAD —
 		// the core is never constructed/replaced from the main/GL thread. Flow is re-initialised.
@@ -214,10 +221,17 @@ namespace windcfd::gui
 		void emit_checkpoint(long long tag); // worker-thread: gather full state → emit checkpointReady
 		void publish_mask(const std::vector<unsigned char>& mask); // worker-thread: snapshot the mask + bump gen
 		void maybe_compute_loads(); // worker-thread: D2H {p,solid} + integrate wind loads → publish (if a building exists)
+		// HOST-view MacGrid for host-side consumers (wind loads, the grids published to the viewer). On a
+		// graded grid core_->grid() is the DEVICE view (device metric pointers) → a host deref crashes; this
+		// returns the host-array view. Uniform (metrics_ null) ⇒ the core's null-metric grid (unchanged).
+		windcfd::core::MacGrid hostGrid() const { return metrics_ ? metrics_->host_view() : core_->grid(); }
 		void service_averaging();   // worker-thread: process start/stop commands + the Pending→Collecting (wall-clock) transition
 		void begin_collecting();    // worker-thread: reset the accumulator + enter Collecting from the current sim-time
 		void reset_averaging();     // worker-thread: return to Idle + invalidate the published averaged snapshot (on rebuild)
 
+		// Graded fine-core metric arrays (shared with the recipe; null ⇒ uniform). The core's device-view
+		// grid points INTO these arrays, so metrics_ must outlive core_ — declared first (destroyed last).
+		std::shared_ptr<windcfd::core::GridMetrics> metrics_;
 		std::unique_ptr<windcfd::core::ChannelFluidCore> core_;
 
 		// Live flow solid-mask snapshot (host), republished only when the mask changes (see above).

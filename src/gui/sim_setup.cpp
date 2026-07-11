@@ -77,8 +77,38 @@ namespace windcfd::gui
 		double Cs = jd(j, "Cs", 0.0);
 		double v_blip = jd(j, "v_blip", 0.05);
 
-		MacGrid g; g.h = h;
-		grid_dims_for(Lx, Ly, Lz, h, g.nx, g.ny, g.nz);
+		// --- Fine-core graded grid (graded-structured-grid change): a uniform-h_fine core around the
+		// building with a geometrically graded coarse far field, so a rounded corner is resolvable without
+		// a fine grid over the whole domain. Opt-in via a "fine_core" object; a missing/disabled/degenerate
+		// spec (or h_fine >= the coarse voxel_h) keeps the uniform grid — BYTE-IDENTICAL to before. The box
+		// is absolute domain metres and must enclose the placed building (windloads asserts bbox ⊆ core).
+		FineCoreSpec fc; fc.Lx = Lx; fc.Ly = Ly; fc.Lz = Lz; fc.h_fine = h; fc.growth = 1.15;
+		bool graded = false;
+		if (j.contains("fine_core") && j.at("fine_core").is_object())
+		{
+			const auto& o = j.at("fine_core");
+			graded = o.value("enabled", true);
+			fc.x0 = jd(o, "x0", 0.0); fc.x1 = jd(o, "x1", 0.0);
+			fc.y0 = jd(o, "y0", 0.0); fc.y1 = jd(o, "y1", 0.0);
+			fc.z0 = jd(o, "z0", 0.0); fc.z1 = jd(o, "z1", 0.0);
+			fc.h_fine = jd(o, "h_fine", h);
+			fc.growth = jd(o, "growth", 1.15);
+			if (!(fc.growth > 1.0)) fc.growth = 1.15;
+			if (!(fc.h_fine > 0.0) || fc.h_fine >= h) graded = false; // no core finer than the coarse grid ⇒ uniform
+		}
+
+		MacGrid g;
+		std::shared_ptr<GridMetrics> metrics;
+		if (graded)
+		{
+			metrics = std::make_shared<GridMetrics>(GridMetrics::generate(fc));
+			g = metrics->device_view(); // device metric pointers for the GPU core (one lazy H2D upload)
+		}
+		else
+		{
+			g.h = h;
+			grid_dims_for(Lx, Ly, Lz, h, g.nx, g.ny, g.nz);
+		}
 
 		// --- No config obstacle: the flow starts as an empty channel. A building is injected
 		// later via the centerline Build workflow (or a loaded STEP model). ------------------
@@ -103,6 +133,9 @@ namespace windcfd::gui
 
 		// --- Fill the recipe (immutable ingredients for re-injection rebuilds) -----
 		recipe.grid = g;
+		recipe.metrics = metrics; // null ⇒ uniform; shared so every recipe copy keeps the metric arrays alive
+		recipe.fine_core = fc;
+		recipe.graded = graded;
 		recipe.bc = bc;
 		recipe.pr = pr;
 		recipe.base_solid = solid;
@@ -112,8 +145,10 @@ namespace windcfd::gui
 		recipe.source_config = config_path; // so the GUI can rebuild this exact sim at another grid
 
 		SimInfo& info = recipe.info;
-		info.nx = g.nx; info.ny = g.ny; info.nz = g.nz; info.h = h;
-		info.Lx = g.nx * h; info.Ly = g.ny * h; info.Lz = g.nz * h;
+		info.nx = g.nx; info.ny = g.ny; info.nz = g.nz;
+		info.h = graded ? fc.h_fine : h; // finest spacing (h_fine on a graded grid)
+		if (graded) { MacGrid hv = metrics->host_view(); info.Lx = hv.Lx(); info.Ly = hv.Ly(); info.Lz = hv.Lz(); }
+		else { info.Lx = g.nx * h; info.Ly = g.ny * h; info.Lz = g.nz * h; }
 		info.U = U; info.rho = rho; info.nu = nu;
 		if (j.contains("name")) info.name = j.at("name").get<std::string>();
 
