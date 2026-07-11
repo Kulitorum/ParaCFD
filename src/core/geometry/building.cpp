@@ -59,24 +59,6 @@ namespace windcfd::core
 			return std::sqrt(best);
 		}
 
-		// Even-odd point-in-polygon over all loops (a courtyard loop punches a hole).
-		bool inside_footprint(double x, double y, const std::vector<Loop2D>& loops)
-		{
-			bool in = false;
-			for (const Loop2D& lp : loops)
-			{
-				const std::size_t m = lp.size();
-				if (m < 3) continue;
-				for (std::size_t i = 0, j = m - 1; i < m; j = i++)
-				{
-					double xi = lp[i][0], yi = lp[i][1], xj = lp[j][0], yj = lp[j][1];
-					if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi))
-						in = !in;
-				}
-			}
-			return in;
-		}
-
 		// Replace each sharp corner of a closed loop with a tangent circular arc of radius r
 		// (clamped to the adjacent edge lengths). Nearly-straight vertices pass through. This
 		// rounds the CENTERLINE; the +/- half-thickness thickening then yields an outer corner
@@ -143,6 +125,41 @@ namespace windcfd::core
 			bool neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
 			bool pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
 			return !(neg && pos);
+		}
+
+		// 2D convex hull (Andrew's monotone chain), CCW, of every point across `loops`.
+		Loop2D convex_hull(const std::vector<Loop2D>& loops)
+		{
+			std::vector<std::array<double, 2>> pts;
+			for (const Loop2D& lp : loops)
+				for (const auto& p : lp) pts.push_back(p);
+			const int n = (int)pts.size();
+			if (n < 3) return {};
+			std::sort(pts.begin(), pts.end(), [](const std::array<double, 2>& a, const std::array<double, 2>& b)
+				{ return a[0] < b[0] || (a[0] == b[0] && a[1] < b[1]); });
+			auto crs = [](const std::array<double, 2>& o, const std::array<double, 2>& a, const std::array<double, 2>& b)
+				{ return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); };
+			Loop2D h(2 * (std::size_t)n);
+			int k = 0;
+			for (int i = 0; i < n; ++i) { while (k >= 2 && crs(h[k - 2], h[k - 1], pts[i]) <= 0.0) --k; h[k++] = pts[i]; }
+			const int lower = k + 1;
+			for (int i = n - 2; i >= 0; --i) { while (k >= lower && crs(h[k - 2], h[k - 1], pts[i]) <= 0.0) --k; h[k++] = pts[i]; }
+			h.resize(k > 0 ? (std::size_t)(k - 1) : 0);
+			return h;
+		}
+
+		// Inside test for a CCW convex polygon (point is left of every edge).
+		bool point_in_convex(double x, double y, const Loop2D& hpts)
+		{
+			const std::size_t m = hpts.size();
+			if (m < 3) return false;
+			for (std::size_t i = 0, j = m - 1; i < m; j = i++)
+			{
+				const double ex = hpts[i][0] - hpts[j][0], ey = hpts[i][1] - hpts[j][1];
+				const double px = x - hpts[j][0], py = y - hpts[j][1];
+				if (ex * py - ey * px < 0.0) return false; // right of an edge -> outside
+			}
+			return true;
 		}
 	} // namespace
 
@@ -343,6 +360,13 @@ namespace windcfd::core
 			return false;
 		};
 
+		// Roof coverage: a SOLID slab over the CONVEX HULL of the footprint, dilated by the
+		// overhang. Using the hull guarantees a filled roof regardless of how the section split
+		// the footprint into loops (a plain point-in-loops test can leave the roof hollow).
+		const Loop2D roof_hull = convex_hull(fp.loops);
+		const std::vector<Loop2D> roof_hull_v{ roof_hull };
+		const double roof_reach = half + prm.roof_overhang;
+
 		// xy region that can possibly be solid (footprint + wall/overhang reach), as cell indices.
 		const double reach = std::max(half, half + prm.roof_overhang) + 1.5 * g.h;
 		auto ci = [&](double v, int n) { int c = (int)std::floor(v / g.h); return c < 0 ? 0 : (c > n - 1 ? n - 1 : c); };
@@ -367,9 +391,9 @@ namespace windcfd::core
 					{
 						if (wall_hit(cx, cy)) { solid = true; ++wall_cells; }
 					}
-					else // inRoof
+					else // inRoof: solid slab over the convex-hull footprint + overhang skirt
 					{
-						if (inside_footprint(cx, cy, fp.loops) || dist_to_loops(cx, cy, fp.loops) <= half + prm.roof_overhang)
+						if (point_in_convex(cx, cy, roof_hull) || dist_to_loops(cx, cy, roof_hull_v) <= roof_reach)
 						{ solid = true; ++roof_cells; }
 					}
 					if (solid) mask[(std::size_t)g.pidx(i, j, k)] = 1;

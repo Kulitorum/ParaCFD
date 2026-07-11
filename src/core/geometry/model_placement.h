@@ -56,4 +56,27 @@ namespace windcfd::core
 		p.tz = -(double)mesh.bbox_min[2];
 		return p;
 	}
+
+	// Return a copy of `mesh` with the placement applied to every vertex position and the bbox
+	// recomputed. Used to section/voxelize a model exactly where the gizmo placed it (normals +
+	// indices are copied as-is; the section/voxelizer use only positions).
+	inline TriMesh placed_mesh(const TriMesh& mesh, const ModelPlacement& p)
+	{
+		TriMesh out = mesh;
+		const std::size_t nv = mesh.vertex_count();
+		double bmin[3] = { 1e300, 1e300, 1e300 }, bmax[3] = { -1e300, -1e300, -1e300 };
+		for (std::size_t i = 0; i < nv; ++i)
+		{
+			double ox, oy, oz;
+			p.apply((double)mesh.positions[3 * i], (double)mesh.positions[3 * i + 1], (double)mesh.positions[3 * i + 2], ox, oy, oz);
+			out.positions[3 * i] = (float)ox;
+			out.positions[3 * i + 1] = (float)oy;
+			out.positions[3 * i + 2] = (float)oz;
+			const double v[3] = { ox, oy, oz };
+			for (int c = 0; c < 3; ++c) { if (v[c] < bmin[c]) bmin[c] = v[c]; if (v[c] > bmax[c]) bmax[c] = v[c]; }
+		}
+		if (nv)
+			for (int c = 0; c < 3; ++c) { out.bbox_min[c] = (float)bmin[c]; out.bbox_max[c] = (float)bmax[c]; }
+		return out;
+	}
 }
