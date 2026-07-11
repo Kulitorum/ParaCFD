@@ -18,15 +18,18 @@ namespace windcfd::core
 		{
 			std::vector<double> w;
 			if (gap <= 1e-12 || h0 <= 0.0) return w;
-			if (gap <= h0 * 1.5) { w.push_back(gap); return w; } // whole gap is a single cell
-			if (g <= 1.0 + 1e-9)                                 // ~uniform: no growth
+			if (gap <= h0) { w.push_back(gap); return w; } // gap smaller than one core cell
+			if (g <= 1.0 + 1e-9)                           // ~uniform: no growth
 			{
 				int m = std::max(1, (int)std::lround(gap / h0));
 				w.assign(m, gap / m);
 				return w;
 			}
-			// Choose m so Σ_{i<m} h0·g^i is closest to gap, then scale to fit exactly. Scaling keeps
-			// every internal ratio = g; the fine↔gap junction ratio becomes the scale factor s (≈1).
+			// Geometric fill with EVERY adjacent ratio held at exactly g (strict growth bound). Choose the
+			// cell count m that best fits, then scale to hit `gap` exactly; scaling preserves the internal
+			// ratio g and makes the core↔gap junction ratio = the scale factor s ∈ [g^-½, g^½] ⊂ (1/g, g),
+			// so no ratio anywhere exceeds g. The junction cell (h0·s) may be a few % below h0 — fine: it
+			// is OUTSIDE the building (the windloads guard only checks the exactly-h_fine core cells).
 			double m_real = std::log(1.0 + gap * (g - 1.0) / h0) / std::log(g);
 			int m = std::max(1, (int)std::lround(m_real));
 			double geom_sum = h0 * (std::pow(g, m) - 1.0) / (g - 1.0);
@@ -34,7 +37,7 @@ namespace windcfd::core
 			w.resize(m);
 			double cur = h0 * s;
 			for (int i = 0; i < m; ++i) { w[i] = cur; cur *= g; }
-			return w;
+			return w; // ordered from core outward: w[0] == h0·s, growing by exactly g
 		}
 	}
 
@@ -51,16 +54,22 @@ namespace windcfd::core
 			for (int i = 0; i <= m; ++i) xf[i] = L * (double)i / m;
 			return xf;
 		}
+		// Core cells are EXACTLY h_fine wide (so the fine core is isotropic h_fine cubes on every axis
+		// and g.h==h_fine==dx==dy==dz there — windloads/the corner comparison rely on this). Snap the
+		// core box to a whole number of h_fine cells centred on the requested box, then clamp to [0,L].
 		int n_fine = std::max(1, (int)std::lround((b - a) / h_fine));
-		double hf = (b - a) / n_fine; // actual fine spacing (≈ h_fine, snaps the core to whole cells)
-		std::vector<double> left = fill_gap(a, hf, growth);       // core(a) → 0, ordered from core out
-		std::vector<double> right = fill_gap(L - b, hf, growth);  // core(b) → L, ordered from core out
+		double half = 0.5 * n_fine * h_fine, centre = 0.5 * (a + b);
+		double na = centre - half, nb = centre + half;
+		if (na < 0.0) { na = 0.0; nb = std::min(L, n_fine * h_fine); }
+		if (nb > L) { nb = L; na = std::max(0.0, L - n_fine * h_fine); }
+		std::vector<double> left = fill_gap(na, h_fine, growth);       // core(na) → 0, ordered from core out
+		std::vector<double> right = fill_gap(L - nb, h_fine, growth);  // core(nb) → L, ordered from core out
 
 		std::vector<double> widths;
 		widths.reserve(left.size() + n_fine + right.size());
-		for (int i = (int)left.size() - 1; i >= 0; --i) widths.push_back(left[i]); // 0 → a (coarse → fine)
-		for (int i = 0; i < n_fine; ++i) widths.push_back(hf);                      // uniform core
-		for (double w : right) widths.push_back(w);                                 // b → L (fine → coarse)
+		for (int i = (int)left.size() - 1; i >= 0; --i) widths.push_back(left[i]); // 0 → na (coarse → fine)
+		for (int i = 0; i < n_fine; ++i) widths.push_back(h_fine);                  // uniform core (exactly h_fine)
+		for (double w : right) widths.push_back(w);                                 // nb → L (fine → coarse)
 
 		std::vector<double> xf(widths.size() + 1);
 		xf[0] = 0.0;

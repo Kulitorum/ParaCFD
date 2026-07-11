@@ -29,6 +29,7 @@
 #include "core/fluid/grid_metrics.h"
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
+#include "core/windloads.h"
 
 #include <cuda_runtime.h>
 
@@ -521,9 +522,10 @@ int main(int argc, char** argv)
 		for (int i = 0; i < n; ++i) if (dxa[i] <= 0.0) mono = false;
 		double maxratio = 0.0;
 		for (int i = 1; i < n; ++i) { double r = dxa[i] > dxa[i - 1] ? dxa[i] / dxa[i - 1] : dxa[i - 1] / dxa[i]; maxratio = std::max(maxratio, r); }
-		double hf_exp = (b - a) / std::lround((b - a) / hf);
-		bool coreok = true;
-		for (int i = 0; i < n; ++i) { double c = 0.5 * (xf[i] + xf[i + 1]); if (c > a && c < b && std::fabs(dxa[i] - hf_exp) > 1e-6 * hf_exp) coreok = false; }
+		int nfine = 0;
+		for (int i = 0; i < n; ++i) if (std::fabs(dxa[i] - hf) < 1e-9) ++nfine;
+		int n_fine_exp = std::max(1, (int)std::lround((b - a) / hf));
+		bool coreok = nfine >= n_fine_exp; // the uniform core is ≥ n_fine cells of EXACTLY h_fine
 		char d1[64]; std::snprintf(d1, sizeof d1, "%d cells, ends 0..L", n);
 		char d3[64]; std::snprintf(d3, sizeof d3, "max ratio %.4f <= %.2f", maxratio, gr);
 		rep.check("gen_monotonic", mono, d1);
@@ -655,6 +657,38 @@ int main(int argc, char** argv)
 		int levels = (int)solver.levels().size();
 		char d[96]; std::snprintf(d, sizeof d, "%dx%dx%d %d lvls %d it relres %.1e", gh.nx, gh.ny, gh.nz, levels, res.iters, res.relres);
 		rep.check("graded_mgpcg_solve", res.converged, d);
+	}
+
+	std::printf("-- windloads bbox-in-uniform-core guard (task 4.3) --\n");
+	{
+		FineCoreSpec spec;
+		spec.Lx = spec.Ly = spec.Lz = 1.0;
+		spec.x0 = spec.y0 = spec.z0 = 0.4; spec.x1 = spec.y1 = spec.z1 = 0.6;
+		spec.h_fine = 0.03; spec.growth = 1.15;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gh = gm.host_view();
+		int NPg = gh.p_count();
+		std::vector<double> pf = filled(NPg, 401, -1.0, 1.0);
+		WindLoadParams prm; prm.rho = 1.225; prm.u_ref = 5.0;
+		auto make_solid = [&](double x0, double x1) {
+			std::vector<unsigned char> s(NPg, 0);
+			for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+			{
+				double cx = gh.xc(i), cy = gh.yc(j), cz = gh.zc(k);
+				if (cx > x0 && cx < x1 && cy > 0.45 && cy < 0.55 && cz > 0.45 && cz < 0.55) s[gh.pidx(i, j, k)] = 1;
+			}
+			return s;
+		};
+		// (a) building entirely inside the uniform fine core → integrates without error.
+		bool ok_inside = false;
+		try { std::vector<unsigned char> s = make_solid(0.45, 0.55); WindLoads L = compute_wind_loads(pf.data(), s.data(), gh, prm, nullptr); ok_inside = L.solid_cells > 0; }
+		catch (...) { ok_inside = false; }
+		rep.check("windloads_in_core_ok", ok_inside, "building in fine core integrates");
+		// (b) building reaching into the graded transition → guard throws (flagged, not silently wrong).
+		bool threw = false;
+		try { std::vector<unsigned char> s = make_solid(0.45, 0.80); (void)compute_wind_loads(pf.data(), s.data(), gh, prm, nullptr); }
+		catch (const std::exception&) { threw = true; }
+		rep.check("windloads_transition_throws", threw, "building in transition rejected");
 	}
 
 	free_all();
