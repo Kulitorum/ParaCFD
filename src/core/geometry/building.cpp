@@ -306,7 +306,18 @@ namespace windcfd::core
 		std::vector<unsigned char> mask((std::size_t)g.p_count(), 0);
 		if (fp.empty() || g.p_count() == 0) { if (out_solid_count) *out_solid_count = 0; return mask; }
 
-		const double half = 0.5 * prm.wall_thickness;
+		// Effective wall half-width used for ALL thickening below (band, sharp wedges, roof skirt).
+		// A wall thinner than ~one cell would fall BETWEEN cell centres and voxelize to a gappy,
+		// leaky shell — each cell is tested by its CENTRE, so a sub-cell band slips through the gaps.
+		// Enforce a minimum half-width of one cell's circumradius (half the cell diagonal): then every
+		// cell the centerline crosses — including corner-clipping cells on diagonal walls — contains a
+		// band point within this distance of its centre, giving a WATERTIGHT wall at least ~1 cell thick
+		// even at wall_thickness == grid h (COBOD prints ~50–80 mm inner+outer wall ribbons). Walls
+		// already thicker than 1 cell keep their exact width (max() is a no-op for them). This is
+		// conservative rasterization of the thickened centerline band; the reported wall_thickness in
+		// the log below is still the user's value (only the voxel coverage is floored).
+		const double cell_circumradius = 0.5 * g.h * std::sqrt(2.0);
+		const double half = std::max(0.5 * prm.wall_thickness, cell_circumradius);
 		const double top = prm.base_z + prm.wall_height;
 		const double roof_top = top + prm.roof_thickness;
 
@@ -403,8 +414,9 @@ namespace windcfd::core
 
 		const int total = wall_cells + roof_cells;
 		if (out_solid_count) *out_solid_count = total;
-		std::printf("[building] voxelize: t=%.3f h=%.2f r=%.3f overhang=%.2f roof=%.2f -> %d solid cells (%d wall + %d roof, %.3f%% of domain)\n",
-			prm.wall_thickness, prm.wall_height, prm.corner_radius, prm.roof_overhang, prm.roof_thickness,
+		const double eff_thickness = 2.0 * half; // voxel band width (floored to ~1 cell for thin walls)
+		std::printf("[building] voxelize: t=%.3f (voxel wall=%.3f, grid h=%.3f) height=%.2f r=%.3f overhang=%.2f roof=%.2f -> %d solid cells (%d wall + %d roof, %.3f%% of domain)\n",
+			prm.wall_thickness, eff_thickness, g.h, prm.wall_height, prm.corner_radius, prm.roof_overhang, prm.roof_thickness,
 			total, wall_cells, roof_cells, 100.0 * total / std::max(1, g.p_count()));
 		return mask;
 	}

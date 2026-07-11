@@ -41,7 +41,7 @@ namespace windcfd::core
 	// Parameters for building a wall+roof mask from a footprint. Distances in metres.
 	struct BuildingParams
 	{
-		double wall_thickness = 0.30; // full wall thickness (band = +/- half of this about the centerline)
+		double wall_thickness = 0.08; // full wall thickness (band = +/- half of this about the centerline); COBOD-printed wall
 		double wall_height = 3.00;    // wall top above base_z
 		double corner_radius = 0.00;  // OUTER corner radius; 0 => "sharp" (currently min radius = half wall)
 		double roof_overhang = 0.50;  // roof extends this far beyond the OUTER wall face (0 => flush)
