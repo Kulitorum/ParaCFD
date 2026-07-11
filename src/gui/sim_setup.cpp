@@ -1,9 +1,7 @@
 // sim_setup.cpp — see sim_setup.h. Parses the viewer JSON directly (not via the strict
 // core Config loader, so viewer-only keys are allowed) and constructs a ChannelFluidCore
-// mirroring the M2 cylinder benchmark plumbing (channel_core + channel_mask).
+// using the channel_core fluid solver.
 #include "gui/sim_setup.h"
-
-#include "core/fluid/channel_mask.h"
 
 #include <nlohmann/json.hpp>
 
@@ -20,7 +18,6 @@ namespace windcfd::gui
 	{
 		double jd(const nlohmann::json& j, const char* k, double d) { return j.contains(k) ? j.at(k).get<double>() : d; }
 		int ji(const nlohmann::json& j, const char* k, int d) { return j.contains(k) ? j.at(k).get<int>() : d; }
-		bool jb(const nlohmann::json& j, const char* k, bool d) { return j.contains(k) ? j.at(k).get<bool>() : d; }
 
 		// If an override is active, replace the domain + voxel size (ONLY the grid) in place.
 		void apply_override(const GridOverride* ov, double& Lx, double& Ly, double& Lz, double& h)
@@ -78,26 +75,17 @@ namespace windcfd::gui
 		if (ov && ov->active && ov->U > 0.0) U = ov->U; // GUI "Input speed": test at a different current
 		double rho = jd(j, "rho", 1.0);
 		double Cs = jd(j, "Cs", 0.0);
-		double Re = jd(j, "Re", 150.0);
 		double v_blip = jd(j, "v_blip", 0.05);
 
 		MacGrid g; g.h = h;
 		grid_dims_for(Lx, Ly, Lz, h, g.nx, g.ny, g.nz);
 
-		// --- Obstacle (procedural cylinder, on by default for visible dynamics) ----
-		nlohmann::json jc = j.contains("cylinder") ? j.at("cylinder") : nlohmann::json::object();
-		bool cyl = jb(jc, "enabled", true);
-		double D = jd(jc, "diameter_m", 0.10 * Ly); // default: 10% of the span
-		double xc = jd(jc, "xc_m", 0.25 * Lx);       // 1/4 downstream
-		double yc = jd(jc, "yc_m", 0.5 * Ly);
-		double R = 0.5 * D;
-
+		// --- No config obstacle: the flow starts as an empty channel. A building is injected
+		// later via the centerline Build workflow (or a loaded STEP model). ------------------
 		std::vector<unsigned char> solid(g.p_count(), 0);
-		if (cyl)
-			build_cylinder_mask(g, xc, yc, R, solid);
 
-		// --- Viscosity: artificial nu = U*D/Re (shedding wake) ---------------------
-		double nu = (cyl && Re > 0.0) ? (U * D / Re) : jd(j, "nu", 1.0e-3);
+		// --- Viscosity from the config (moderate default for a visible developing wake) ------
+		double nu = jd(j, "nu", 1.0e-3);
 		if (nu <= 0.0) nu = 1.0e-3;
 
 		ChannelBC bc;
@@ -126,7 +114,7 @@ namespace windcfd::gui
 		SimInfo& info = recipe.info;
 		info.nx = g.nx; info.ny = g.ny; info.nz = g.nz; info.h = h;
 		info.Lx = g.nx * h; info.Ly = g.ny * h; info.Lz = g.nz * h;
-		info.U = U; info.rho = rho; info.nu = nu; info.cylinder = cyl;
+		info.U = U; info.rho = rho; info.nu = nu;
 		if (j.contains("name")) info.name = j.at("name").get<std::string>();
 
 		return make_core(recipe, recipe.base_solid, recipe.base_solid_mode);

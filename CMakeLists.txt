@@ -48,13 +48,11 @@ add_library(libwindcfd STATIC
 	src/core/fluid/mgpcg.cu
 	src/core/fluid/stam_fluid_core.cu
 	src/core/fluid/cavity.cpp
-	# M2 — open channel + obstacles (inlet/Orlanski/lid, voxel mask, cylinder gate)
+	# M2 — open channel + obstacles (inlet/Orlanski/lid, voxelized obstacle mask)
 	src/core/fluid/channel_ops.cu
 	src/core/fluid/channel_pressure.cu
-	src/core/fluid/channel_mask.cpp
 	src/core/fluid/channel_core.cu
 	src/core/fluid/channel_porous.cu
-	src/core/fluid/cylinder.cu
 	src/core/fluid/channel_empty.cpp
 	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor
 	src/core/fluid/bedshear.cu

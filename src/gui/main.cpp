@@ -228,9 +228,8 @@ int main(int argc, char** argv)
 	std::unique_ptr<windcfd::core::ChannelFluidCore> core = build_sim(config, recipe, warn);
 	const SimInfo& info = recipe.info;
 	if (!warn.empty()) std::fprintf(stderr, "[G1] %s\n", warn.c_str());
-	std::fprintf(stderr, "[G1] sim '%s': %dx%dx%d cells, h=%.3f m, U=%.3f m/s, nu=%.3e, %s\n",
-		info.name.c_str(), info.nx, info.ny, info.nz, info.h, info.U, info.nu,
-		info.cylinder ? "cylinder" : "empty channel");
+	std::fprintf(stderr, "[G1] sim '%s': %dx%dx%d cells, h=%.3f m, U=%.3f m/s, nu=%.3e\n",
+		info.name.c_str(), info.nx, info.ny, info.nz, info.h, info.U, info.nu);
 
 	MainWindow win(std::move(core), recipe);
 	win.show();

@@ -1,21 +1,14 @@
 {
 	"name": "g1_viewer",
-	"_doc": "G1 slice-viewer bundled config. A reduced open-channel run with a procedural cylinder so the live slice shows a developing wake. Sized so steps are a few ms and the scripted 10 s auto-close launch renders many frames. Viewer-only keys (U, Re, cylinder) are parsed directly by gui/sim_setup.cpp (not the strict core Config loader).",
+	"_doc": "G1 slice-viewer bundled config: a small empty open-channel run. A building is injected via the centerline Build workflow (or a loaded STEP model). Sized so steps are a few ms. Viewer keys are parsed directly by gui/sim_setup.cpp, not the strict core Config loader.",
 	"domain_x": 10.0,
 	"domain_y": 5.0,
 	"domain_z": 0.5,
 	"voxel_h": 0.05,
 	"U": 1.0,
 	"rho": 1.0,
-	"Re": 150.0,
 	"Cs": 0.0,
 	"v_blip": 0.05,
-	"cylinder": {
-		"enabled": true,
-		"diameter_m": 0.6,
-		"xc_m": 2.5,
-		"yc_m": 2.5
-	},
 	"proj_tol": 1e-3,
 	"proj_max_iter": 40
 }

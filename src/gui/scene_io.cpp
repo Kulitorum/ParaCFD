@@ -176,7 +176,7 @@ namespace windcfd::gui
 		nlohmann::json info_json(const SimInfo& s)
 		{
 			return { {"nx", s.nx}, {"ny", s.ny}, {"nz", s.nz}, {"h", s.h}, {"Lx", s.Lx}, {"Ly", s.Ly},
-				{"Lz", s.Lz}, {"U", s.U}, {"rho", s.rho}, {"nu", s.nu}, {"cylinder", s.cylinder}, {"name", s.name} };
+				{"Lz", s.Lz}, {"U", s.U}, {"rho", s.rho}, {"nu", s.nu}, {"name", s.name} };
 		}
 		SimInfo info_from(const nlohmann::json& j)
 		{
@@ -185,7 +185,7 @@ namespace windcfd::gui
 			s.nx = j.value("nx", s.nx); s.ny = j.value("ny", s.ny); s.nz = j.value("nz", s.nz);
 			s.h = j.value("h", s.h); s.Lx = j.value("Lx", s.Lx); s.Ly = j.value("Ly", s.Ly); s.Lz = j.value("Lz", s.Lz);
 			s.U = j.value("U", s.U); s.rho = j.value("rho", s.rho); s.nu = j.value("nu", s.nu);
-			s.cylinder = j.value("cylinder", s.cylinder); s.name = j.value("name", s.name);
+			s.name = j.value("name", s.name);
 			return s;
 		}
 		// --- path helpers --------------------------------------------------------------

@@ -27,7 +27,6 @@ namespace windcfd::gui
 		double U = 1.0;                // reference inlet speed [m/s]
 		double rho = 1.0;              // density [kg/m^3]
 		double nu = 0.0;               // kinematic viscosity used [m^2/s]
-		bool cylinder = false;
 		std::string name = "g1_viewer";
 	};
 
