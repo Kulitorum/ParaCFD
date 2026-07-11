@@ -54,6 +54,8 @@ add_library(libwindcfd STATIC
 	src/core/fluid/channel_core.cu
 	src/core/fluid/channel_porous.cu
 	src/core/fluid/channel_empty.cpp
+	# Graded structured grid — fine-core → per-axis metric arrays (host) + device upload owner.
+	src/core/fluid/grid_metrics.cpp
 	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor
 	src/core/fluid/bedshear.cu
 	src/core/fluid/channel_periodic.cu

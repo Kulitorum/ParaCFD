@@ -25,6 +25,7 @@
 // entry sets WORKING_DIRECTORY to the repo root so that path resolves.
 #include "core/fluid/channel_bc.h"
 #include "core/fluid/channel_ops.h"
+#include "core/fluid/grid_metrics.h"
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
 
@@ -177,6 +178,24 @@ namespace
 			}
 			if (!ok) ++failed;
 			std::printf("  %-22s parity=%.2e  %-16s  %s\n", name.c_str(), par, gtag.c_str(), ok ? "PASS" : "FAIL");
+		}
+
+		// GPU-vs-CPU parity ONLY (no golden) — for a genuinely graded grid, which has no scalar-h
+		// reference. Proves the metric-reading kernels are self-consistent on non-uniform spacing.
+		void report_parity(const std::string& name, const std::vector<double>& gpu, const std::vector<double>& cpu)
+		{
+			++total;
+			double par = rel_maxnorm(gpu, cpu);
+			bool ok = par <= 1e-5;
+			if (!ok) ++failed;
+			std::printf("  %-22s parity=%.2e  (graded)          %s\n", name.c_str(), par, ok ? "PASS" : "FAIL");
+		}
+
+		void check(const std::string& name, bool ok, const std::string& detail)
+		{
+			++total;
+			if (!ok) ++failed;
+			std::printf("  %-22s %-24s  %s\n", name.c_str(), detail.c_str(), ok ? "PASS" : "FAIL");
 		}
 	};
 }
@@ -487,6 +506,130 @@ int main(int argc, char** argv)
 			std::vector<double> cu(NU), cv(NV), cw(NW); ch_advect_cpu(u, v, w, cu, cv, cw, solid, nearsolid, gh, cbc, dt); rep.report("ch_advect_u", back(duo, NU), cu, true); }
 		{ double* du = dev(u), *dv = dev(v), *dw = dev(w), *dscr = dev_zero(NP); double gp = ch_max_div_gpu(du, dv, dw, dscr, dsolid, gd);
 			double cp = ch_max_div_cpu(u, v, w, solid, gh); rep.report("ch_max_div", {gp}, {cp}, true); }
+	}
+
+	// ==================== Phase-B: fine-core generator + graded validation =======
+	std::printf("-- graded-grid generator properties (task 3.1) --\n");
+	{
+		const double L = 1.0, a = 0.4, b = 0.6, hf = 0.025, gr = 1.15;
+		std::vector<double> xf = graded_axis_faces(L, a, b, hf, gr);
+		int n = (int)xf.size() - 1;
+		std::vector<double> dxa(n);
+		for (int i = 0; i < n; ++i) dxa[i] = xf[i + 1] - xf[i];
+		bool mono = std::fabs(xf[0]) < 1e-12 && std::fabs(xf[n] - L) < 1e-9;
+		for (int i = 0; i < n; ++i) if (dxa[i] <= 0.0) mono = false;
+		double maxratio = 0.0;
+		for (int i = 1; i < n; ++i) { double r = dxa[i] > dxa[i - 1] ? dxa[i] / dxa[i - 1] : dxa[i - 1] / dxa[i]; maxratio = std::max(maxratio, r); }
+		double hf_exp = (b - a) / std::lround((b - a) / hf);
+		bool coreok = true;
+		for (int i = 0; i < n; ++i) { double c = 0.5 * (xf[i] + xf[i + 1]); if (c > a && c < b && std::fabs(dxa[i] - hf_exp) > 1e-6 * hf_exp) coreok = false; }
+		char d1[64]; std::snprintf(d1, sizeof d1, "%d cells, ends 0..L", n);
+		char d3[64]; std::snprintf(d3, sizeof d3, "max ratio %.4f <= %.2f", maxratio, gr);
+		rep.check("gen_monotonic", mono, d1);
+		rep.check("gen_core_uniform", coreok, "core cells == h_fine");
+		rep.check("gen_growth_bound", maxratio <= gr * 1.0001, d3);
+	}
+
+	std::printf("-- GPU-vs-CPU parity on a GENUINELY GRADED grid (task 5.3) --\n");
+	{
+		FineCoreSpec spec;
+		spec.Lx = spec.Ly = spec.Lz = 1.0;
+		spec.x0 = spec.y0 = spec.z0 = 0.4; spec.x1 = spec.y1 = spec.z1 = 0.6;
+		spec.h_fine = 0.03; spec.growth = 1.15;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gd = gm.device_view(), gh = gm.host_view();
+		int gNP = gh.p_count(), gNU = gh.u_count(), gNV = gh.v_count(), gNW = gh.w_count();
+		int gNMAX = gNU > gNV ? (gNU > gNW ? gNU : gNW) : (gNV > gNW ? gNV : gNW);
+		std::printf("   graded grid %dx%dx%d  h_fine=%.3f  h_min=%.4f  Lx=%.3f\n", gh.nx, gh.ny, gh.nz, gm.h_fine(), gm.h_min(), gh.Lx());
+
+		// solid box near the fine core + its 1-cell dilation
+		std::vector<unsigned char> gsolid(gNP, 0), gnear(gNP, 0);
+		for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+		{
+			double cx = gh.xc(i), cy = gh.yc(j), cz = gh.zc(k);
+			if (cx > 0.45 && cx < 0.55 && cy > 0.45 && cy < 0.55 && cz > 0.45 && cz < 0.55) gsolid[gh.pidx(i, j, k)] = 1;
+		}
+		for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+		{
+			bool nb = false;
+			for (int dk = -1; dk <= 1 && !nb; ++dk) for (int dj = -1; dj <= 1 && !nb; ++dj) for (int di = -1; di <= 1 && !nb; ++di)
+			{ int ii = i + di, jj = j + dj, kk = k + dk; if (ii >= 0 && ii < gh.nx && jj >= 0 && jj < gh.ny && kk >= 0 && kk < gh.nz && gsolid[gh.pidx(ii, jj, kk)]) nb = true; }
+			if (nb) gnear[gh.pidx(i, j, k)] = 1;
+		}
+		unsigned char* gds = dev_u8(gsolid);
+		unsigned char* gdn = dev_u8(gnear);
+		std::vector<double> gu = filled(gNU, 201, -1, 1), gv = filled(gNV, 202, -1, 1), gw = filled(gNW, 203, -1, 1);
+		std::vector<double> gp = filled(gNP, 204, -1, 1), grhs = filled(gNP, 205, -1, 1), gnut = filled(gNP, 206, 0, 0.05);
+
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *duo = dev_zero(gNU), *dvo = dev_zero(gNV), *dwo = dev_zero(gNW), *ds = dev_zero(gNMAX);
+			mac_advect_gpu(du, dv, dw, duo, dvo, dwo, ds, gd, mbc, dt, 1);
+			std::vector<double> cu(gNU), cv(gNV), cw(gNW); mac_advect_cpu(gu, gv, gw, cu, cv, cw, gh, mbc, dt, 1); rep.report_parity("mac_advect_u", back(duo, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dn = dev_zero(gNP); smagorinsky_nut_gpu(du, dv, dw, dn, gd, mbc, Cs);
+			std::vector<double> cn(gNP); smagorinsky_nut_cpu(gu, gv, gw, cn, gh, mbc, Cs); rep.report_parity("smagorinsky_nut", back(dn, gNP), cn); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dn = dev(gnut), *duo = dev_zero(gNU), *dvo = dev_zero(gNV), *dwo = dev_zero(gNW);
+			mac_diffuse_gpu(du, dv, dw, duo, dvo, dwo, dn, gd, mbc, dt, nu);
+			std::vector<double> cu(gNU), cv(gNV), cw(gNW); mac_diffuse_cpu(gu, gv, gw, cu, cv, cw, &gnut, gh, mbc, dt, nu); rep.report_parity("mac_diffuse_u", back(duo, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dr = dev_zero(gNP); poisson_rhs_gpu(du, dv, dw, dr, gd, rho, dt);
+			std::vector<double> cr(gNP); poisson_rhs_cpu(gu, gv, gw, cr, gh, rho, dt); rep.report_parity("poisson_rhs", back(dr, gNP), cr); }
+		{ double* dp = dev(gp), *da = dev_zero(gNP); poisson_apply_gpu(dp, da, gd);
+			std::vector<double> ca(gNP); poisson_apply_cpu(gp, ca, gh); rep.report_parity("poisson_apply", back(da, gNP), ca); }
+		{ double* dp = dev(gp), *dr = dev(grhs), *ds = dev_zero(gNP); jacobi_smooth_gpu(dp, dr, ds, gd, omega, sweeps);
+			std::vector<double> cp = gp; jacobi_smooth_cpu(cp, grhs, gh, omega, sweeps); rep.report_parity("jacobi_smooth", back(dp, gNP), cp); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dp = dev(gp); subtract_gradient_gpu(du, dv, dw, dp, gd, rho, dt);
+			std::vector<double> cu = gu, cv = gv, cw = gw; subtract_gradient_cpu(cu, cv, cw, gp, gh, rho, dt); rep.report_parity("subtract_gradient_u", back(du, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *duo = dev_zero(gNU), *dvo = dev_zero(gNV), *dwo = dev_zero(gNW), *ds = dev_zero(gNMAX);
+			ch_advect_gpu(du, dv, dw, duo, dvo, dwo, ds, gds, gdn, gd, cbc, dt);
+			std::vector<double> cu(gNU), cv(gNV), cw(gNW); ch_advect_cpu(gu, gv, gw, cu, cv, cw, gsolid, gnear, gh, cbc, dt); rep.report_parity("ch_advect_u", back(duo, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dn = dev_zero(gNP); ch_smagorinsky_gpu(du, dv, dw, dn, gds, gd, cbc, Cs);
+			std::vector<double> cn(gNP); ch_smagorinsky_cpu(gu, gv, gw, cn, gsolid, gh, cbc, Cs); rep.report_parity("ch_smagorinsky", back(dn, gNP), cn); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dn = dev(gnut), *duo = dev_zero(gNU), *dvo = dev_zero(gNV), *dwo = dev_zero(gNW);
+			ch_diffuse_gpu(du, dv, dw, duo, dvo, dwo, dn, gds, gd, cbc, dt, nu);
+			std::vector<double> cu(gNU), cv(gNV), cw(gNW); ch_diffuse_cpu(gu, gv, gw, cu, cv, cw, &gnut, gsolid, gh, cbc, dt, nu); rep.report_parity("ch_diffuse_u", back(duo, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dr = dev_zero(gNP); ch_poisson_rhs_gpu(du, dv, dw, dr, gds, gd, rho, dt);
+			std::vector<double> cr(gNP); ch_poisson_rhs_cpu(gu, gv, gw, cr, gsolid, gh, rho, dt); rep.report_parity("ch_poisson_rhs", back(dr, gNP), cr); }
+		{ double* dp = dev(gp), *da = dev_zero(gNP); ch_poisson_apply_gpu(dp, da, gds, gd, dir_xmax);
+			std::vector<double> ca(gNP); ch_poisson_apply_cpu(gp, ca, gsolid, gh, dir_xmax); rep.report_parity("ch_poisson_apply", back(da, gNP), ca); }
+		{ double* dp = dev(gp), *dr = dev(grhs), *ds = dev_zero(gNP); ch_jacobi_gpu(dp, dr, ds, gds, gd, dir_xmax, omega, sweeps);
+			std::vector<double> cp = gp; ch_jacobi_cpu(cp, grhs, gsolid, gh, dir_xmax, omega, sweeps); rep.report_parity("ch_jacobi", back(dp, gNP), cp); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *dp = dev(gp); ch_subtract_gradient_gpu(du, dv, dw, dp, gds, gd, cbc, rho, dt, dir_xmax);
+			std::vector<double> cu = gu, cv = gv, cw = gw; ch_subtract_gradient_cpu(cu, cv, cw, gp, gsolid, gh, cbc, rho, dt, dir_xmax); rep.report_parity("ch_subtract_gradient_u", back(du, gNU), cu); }
+		{ double* du = dev(gu), *dv = dev(gv), *dw = dev(gw), *ds = dev_zero(gNP); double a = ch_max_div_gpu(du, dv, dw, ds, gds, gd);
+			double c = ch_max_div_cpu(gu, gv, gw, gsolid, gh); rep.report_parity("ch_max_div", {a}, {c}); }
+	}
+
+	std::printf("-- MMS: FV Laplacian order-of-accuracy under grading (task 5.2) --\n");
+	{
+		// Manufactured p = sin(kx)sin(ky)sin(kz); the FV operator Ap ≈ (kx²+ky²+kz²)·p. Measure the
+		// L2 error over the interior (away from the box-Neumann boundary) at two h_fine and estimate
+		// the observed order. Graceful degradation on stretched cells ⇒ expect ≳1st order.
+		const double PI = 3.14159265358979323846, k = 2.0 * PI, k2 = 3.0 * k * k;
+		double err[2], hf[2] = {0.04, 0.02};
+		for (int r = 0; r < 2; ++r)
+		{
+			FineCoreSpec spec; spec.Lx = spec.Ly = spec.Lz = 1.0;
+			spec.x0 = spec.y0 = spec.z0 = 0.3; spec.x1 = spec.y1 = spec.z1 = 0.7;
+			spec.h_fine = hf[r]; spec.growth = 1.12;
+			GridMetrics gm = GridMetrics::generate(spec);
+			MacGrid gh = gm.host_view();
+			int NPg = gh.p_count();
+			std::vector<double> pp(NPg), Ap;
+			for (int kk = 0; kk < gh.nz; ++kk) for (int jj = 0; jj < gh.ny; ++jj) for (int ii = 0; ii < gh.nx; ++ii)
+				pp[gh.pidx(ii, jj, kk)] = std::sin(k * gh.xc(ii)) * std::sin(k * gh.yc(jj)) * std::sin(k * gh.zc(kk));
+			poisson_apply_cpu(pp, Ap, gh);
+			double num = 0.0, den = 0.0;
+			for (int kk = 0; kk < gh.nz; ++kk) for (int jj = 0; jj < gh.ny; ++jj) for (int ii = 0; ii < gh.nx; ++ii)
+			{
+				double cx = gh.xc(ii), cy = gh.yc(jj), cz = gh.zc(kk);
+				if (cx < 0.15 || cx > 0.85 || cy < 0.15 || cy > 0.85 || cz < 0.15 || cz > 0.85) continue; // skip boundary layers
+				double exact = k2 * pp[gh.pidx(ii, jj, kk)];
+				double e = Ap[gh.pidx(ii, jj, kk)] - exact;
+				num += e * e; den += exact * exact;
+			}
+			err[r] = std::sqrt(num / den);
+		}
+		double order = std::log(err[0] / err[1]) / std::log(hf[0] / hf[1]);
+		char d[96]; std::snprintf(d, sizeof d, "err %.2e->%.2e  order=%.2f", err[0], err[1], order);
+		rep.check("mms_laplacian_order", order >= 0.9 && err[1] < err[0], d);
 	}
 
 	free_all();

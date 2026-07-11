@@ -93,8 +93,12 @@ start Phase B until Phase A's oracle is green.
 
 ## 3. Phase B — Grid generation & config
 
-- [ ] 3.1 Implement the fine-core → metric-array generator (uniform core + geometric growth,
+- [x] 3.1 Implement the fine-core → metric-array generator (uniform core + geometric growth,
       ratio-bounded)
+      → `grid_metrics.{h,cpp}`: `graded_axis_faces()` (pure host, testable) + `GridMetrics` owner
+      (host arrays for CPU/geometry consumers + device upload for kernels; `host_view()`/`device_view()`;
+      `FineCoreSpec`, `generate()`, `uniform()`, `h_min()`). Verified: 26-cell axis, uniform core at
+      h_fine, max ratio 1.1500 ≤ 1.15.
 - [ ] 3.2 Add fine-core config keys (box, `h_fine`, growth ratio) to `config.*` and a graded
       `configs/building.json` variant
 - [ ] 3.3 Wire the generator into `sim_setup.*` / the Apply path (rebuild at t=0)
@@ -119,11 +123,18 @@ start Phase B until Phase A's oracle is green.
 
 ## 5. Phase B — Verification tests
 
-- [ ] 5.1 Add the permanent "grading collapses to uniform" regression (all `dx=h` ⇒ matches
+- [x] 5.1 Add the permanent "grading collapses to uniform" regression (all `dx=h` ⇒ matches
       uniform reference ≤ 1e-5)
-- [ ] 5.2 Add the MMS Laplacian order-of-accuracy test on a sequence of graded grids
-- [ ] 5.3 Add metric-aware parity tests for advection, diffusion, projection on a genuinely graded
+      → The `parity_probe` golden gate IS this regression (32 kernels null-path + 9 uniform-metric-
+      ARRAY checks, all ≤7e-15 vs the scalar-`h` goldens). `GridMetrics::uniform()` also builds
+      explicit all-`h` metrics for it.
+- [x] 5.2 Add the MMS Laplacian order-of-accuracy test on a sequence of graded grids
+      → `mms_laplacian_order` in `parity_probe`: manufactured sin·sin·sin, FV operator vs analytic
+      k²·p on the interior; error 1.36e-2→5.14e-3 as h_fine halves ⇒ **order 1.40** (≳1st, as designed).
+- [x] 5.3 Add metric-aware parity tests for advection, diffusion, projection on a genuinely graded
       grid
+      → 15 kernels (both families) GPU-vs-CPU on a generated graded 23³ grid, all ≤3e-15. Proves the
+      metric-reading kernels are correct on non-uniform spacing (not just collapsing to uniform).
 - [ ] 5.4 Add a scene round-trip test (graded save/reload; legacy uniform load)
 
 ## 6. Corner-resolution workflow
