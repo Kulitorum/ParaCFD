@@ -166,8 +166,9 @@ namespace windcfd::core
 			reduce_max_abs_gpu(wA_, g_.w_count()), std::fabs(bc_.U_inlet)});
 		double numax = pr_.nu;
 		if (pr_.Cs > 0.0) { ch_smagorinsky_gpu(uA_, vA_, wA_, nut_, solid_, g_, bc_, pr_.Cs); numax = pr_.nu + reduce_max_abs_gpu(nut_, g_.p_count()); }
-		double dt_adv = (maxu > 1e-12) ? pr_.cfl * g_.h / maxu : 1e30;
-		double dt_diff = (numax > 0.0) ? g_.h * g_.h / (6.0 * numax) : 1e30;
+		double hmin = g_.h_min(); // graded grid: the smallest cell sets the stable dt (else the fine core blows up)
+		double dt_adv = (maxu > 1e-12) ? pr_.cfl * hmin / maxu : 1e30;
+		double dt_diff = (numax > 0.0) ? hmin * hmin / (6.0 * numax) : 1e30;
 		return pr_.safety * std::min(dt_adv, dt_diff);
 	}
 

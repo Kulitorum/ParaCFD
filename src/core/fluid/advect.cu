@@ -15,9 +15,9 @@ namespace windcfd::core
 	{
 		WINDCFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
 		{
-			if (comp == 0) { x = i * g.h; y = (j + 0.5) * g.h; z = (k + 0.5) * g.h; }
-			else if (comp == 1) { x = (i + 0.5) * g.h; y = j * g.h; z = (k + 0.5) * g.h; }
-			else { x = (i + 0.5) * g.h; y = (j + 0.5) * g.h; z = k * g.h; }
+			if (comp == 0) { x = g.xf(i); y = g.yc(j); z = g.zc(k); }
+			else if (comp == 1) { x = g.xc(i); y = g.yf(j); z = g.zc(k); }
+			else { x = g.xc(i); y = g.yc(j); z = g.zf(k); }
 		}
 
 		WINDCFD_HD inline double sample_comp(int comp, const double* f, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)

@@ -1,7 +1,10 @@
 // turbulence.cu — explicit Smagorinsky eddy viscosity and explicit diffusion of the
-// MAC velocity field. nu_t = (Cs*h)^2*|S|, |S| = sqrt(2 S_ij S_ij) at cell centres;
-// diffusion is treated explicitly (h^2/6nu >> advective dt), Stam's implicit solve is
-// dropped. RESEARCH §3.4 (verified research/08 item 6). M1 gate runs Cs=0.
+// MAC velocity field. nu_t = (Cs*Δ)^2*|S|, |S| = sqrt(2 S_ij S_ij) at cell centres with
+// per-cell filter width Δ = (dx·dy·dz)^(1/3) (graded-structured-grid change; ⇒ Cs·h on a
+// uniform grid); diffusion is treated explicitly (h^2/6nu >> advective dt), Stam's implicit
+// solve is dropped. RESEARCH §3.4 (verified research/08 item 6). M1 gate runs Cs=0. Strain
+// gradients + the diffusion Laplacian use local metric spacings (d2_axis), collapsing exactly
+// to the uniform stencil when every spacing equals h.
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
 
@@ -22,20 +25,23 @@ namespace windcfd::core
 		WINDCFD_HD inline double smag_nut(const double* u, const double* v, const double* w,
 			MacGrid g, BC bc, double Cs, int i, int j, int k)
 		{
-			double inv = 1.0 / g.h, inv2 = 0.5 / g.h;
-			double dudx = (fetch_u(u, g, bc, i + 1, j, k) - fetch_u(u, g, bc, i, j, k)) * inv;
-			double dvdy = (fetch_v(v, g, bc, i, j + 1, k) - fetch_v(v, g, bc, i, j, k)) * inv;
-			double dwdz = (fetch_w(w, g, bc, i, j, k + 1) - fetch_w(w, g, bc, i, j, k)) * inv;
-			double dudy = (uc(u, g, bc, i, j + 1, k) - uc(u, g, bc, i, j - 1, k)) * inv2;
-			double dudz = (uc(u, g, bc, i, j, k + 1) - uc(u, g, bc, i, j, k - 1)) * inv2;
-			double dvdx = (vc(v, g, bc, i + 1, j, k) - vc(v, g, bc, i - 1, j, k)) * inv2;
-			double dvdz = (vc(v, g, bc, i, j, k + 1) - vc(v, g, bc, i, j, k - 1)) * inv2;
-			double dwdx = (wc(w, g, bc, i + 1, j, k) - wc(w, g, bc, i - 1, j, k)) * inv2;
-			double dwdy = (wc(w, g, bc, i, j + 1, k) - wc(w, g, bc, i, j - 1, k)) * inv2;
+			// Diagonal strains over the local cell width; cross strains over the 2-cell centre span
+			// (gap(i-1)+gap(i) = 2h uniform). OOB-safe via the gap accessors' mirror-ghost widths.
+			double invx = 1.0 / g.dx(i), invy = 1.0 / g.dy(j), invz = 1.0 / g.dz(k);
+			double sx = 1.0 / (g.gapx(i - 1) + g.gapx(i)), sy = 1.0 / (g.gapy(j - 1) + g.gapy(j)), sz = 1.0 / (g.gapz(k - 1) + g.gapz(k));
+			double dudx = (fetch_u(u, g, bc, i + 1, j, k) - fetch_u(u, g, bc, i, j, k)) * invx;
+			double dvdy = (fetch_v(v, g, bc, i, j + 1, k) - fetch_v(v, g, bc, i, j, k)) * invy;
+			double dwdz = (fetch_w(w, g, bc, i, j, k + 1) - fetch_w(w, g, bc, i, j, k)) * invz;
+			double dudy = (uc(u, g, bc, i, j + 1, k) - uc(u, g, bc, i, j - 1, k)) * sy;
+			double dudz = (uc(u, g, bc, i, j, k + 1) - uc(u, g, bc, i, j, k - 1)) * sz;
+			double dvdx = (vc(v, g, bc, i + 1, j, k) - vc(v, g, bc, i - 1, j, k)) * sx;
+			double dvdz = (vc(v, g, bc, i, j, k + 1) - vc(v, g, bc, i, j, k - 1)) * sz;
+			double dwdx = (wc(w, g, bc, i + 1, j, k) - wc(w, g, bc, i - 1, j, k)) * sx;
+			double dwdy = (wc(w, g, bc, i, j + 1, k) - wc(w, g, bc, i, j - 1, k)) * sy;
 			double Sxx = dudx, Syy = dvdy, Szz = dwdz;
 			double Sxy = 0.5 * (dudy + dvdx), Sxz = 0.5 * (dudz + dwdx), Syz = 0.5 * (dvdz + dwdy);
 			double Smag = sqrt(2.0 * (Sxx * Sxx + Syy * Syy + Szz * Szz + 2.0 * (Sxy * Sxy + Sxz * Sxz + Syz * Syz)));
-			double cd = Cs * g.h;
+			double cd = Cs * cbrt(g.dx(i) * g.dy(j) * g.dz(k));
 			return cd * cd * Smag;
 		}
 
@@ -47,22 +53,23 @@ namespace windcfd::core
 			nut[g.pidx(i, j, k)] = smag_nut(u, v, w, g, bc, Cs, i, j, k);
 		}
 
-		// diffuse one component (comp: 0=u,1=v,2=w) into out.
+		// diffuse one component (comp: 0=u,1=v,2=w) into out. The Laplacian is the sum of three
+		// non-uniform second derivatives (d2_axis): the component's NORMAL axis is face-spaced (dx/dy/dz),
+		// the two TANGENTIAL axes are centre-spaced (gap*). Uniform spacings ⇒ the (Σnb − 6c)/h² stencil.
 		WINDCFD_HD inline void diffuse_node(int comp, const double* field, const double* nut,
 			double* out, MacGrid g, BC bc, double dt, double nu, int i, int j, int k)
 		{
-			int idx; // interior test inlined per comp
+			int idx;
 			double val;
-			double h2 = g.h * g.h;
 			if (comp == 0)
 			{
 				idx = g.uidx(i, j, k);
 				bool interior = i >= 1 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 				if (!interior) { out[idx] = field[idx]; return; }
 				double c = field[idx];
-				double lap = (fetch_u(field, g, bc, i + 1, j, k) + fetch_u(field, g, bc, i - 1, j, k)
-					+ fetch_u(field, g, bc, i, j + 1, k) + fetch_u(field, g, bc, i, j - 1, k)
-					+ fetch_u(field, g, bc, i, j, k + 1) + fetch_u(field, g, bc, i, j, k - 1) - 6.0 * c) / h2;
+				double lap = d2_axis(fetch_u(field, g, bc, i - 1, j, k), c, fetch_u(field, g, bc, i + 1, j, k), g.dx(i - 1), g.dx(i))
+					+ d2_axis(fetch_u(field, g, bc, i, j - 1, k), c, fetch_u(field, g, bc, i, j + 1, k), g.gapy(j - 1), g.gapy(j))
+					+ d2_axis(fetch_u(field, g, bc, i, j, k - 1), c, fetch_u(field, g, bc, i, j, k + 1), g.gapz(k - 1), g.gapz(k));
 				double nut_f = nut ? 0.5 * (nut[g.pidx(i - 1, j, k)] + nut[g.pidx(i, j, k)]) : 0.0;
 				val = c + dt * (nu + nut_f) * lap;
 			}
@@ -72,9 +79,9 @@ namespace windcfd::core
 				bool interior = i >= 0 && i <= g.nx - 1 && j >= 1 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 				if (!interior) { out[idx] = field[idx]; return; }
 				double c = field[idx];
-				double lap = (fetch_v(field, g, bc, i + 1, j, k) + fetch_v(field, g, bc, i - 1, j, k)
-					+ fetch_v(field, g, bc, i, j + 1, k) + fetch_v(field, g, bc, i, j - 1, k)
-					+ fetch_v(field, g, bc, i, j, k + 1) + fetch_v(field, g, bc, i, j, k - 1) - 6.0 * c) / h2;
+				double lap = d2_axis(fetch_v(field, g, bc, i - 1, j, k), c, fetch_v(field, g, bc, i + 1, j, k), g.gapx(i - 1), g.gapx(i))
+					+ d2_axis(fetch_v(field, g, bc, i, j - 1, k), c, fetch_v(field, g, bc, i, j + 1, k), g.dy(j - 1), g.dy(j))
+					+ d2_axis(fetch_v(field, g, bc, i, j, k - 1), c, fetch_v(field, g, bc, i, j, k + 1), g.gapz(k - 1), g.gapz(k));
 				double nut_f = nut ? 0.5 * (nut[g.pidx(i, j - 1, k)] + nut[g.pidx(i, j, k)]) : 0.0;
 				val = c + dt * (nu + nut_f) * lap;
 			}
@@ -84,9 +91,9 @@ namespace windcfd::core
 				bool interior = i >= 0 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 1 && k <= g.nz - 1;
 				if (!interior) { out[idx] = field[idx]; return; }
 				double c = field[idx];
-				double lap = (fetch_w(field, g, bc, i + 1, j, k) + fetch_w(field, g, bc, i - 1, j, k)
-					+ fetch_w(field, g, bc, i, j + 1, k) + fetch_w(field, g, bc, i, j - 1, k)
-					+ fetch_w(field, g, bc, i, j, k + 1) + fetch_w(field, g, bc, i, j, k - 1) - 6.0 * c) / h2;
+				double lap = d2_axis(fetch_w(field, g, bc, i - 1, j, k), c, fetch_w(field, g, bc, i + 1, j, k), g.gapx(i - 1), g.gapx(i))
+					+ d2_axis(fetch_w(field, g, bc, i, j - 1, k), c, fetch_w(field, g, bc, i, j + 1, k), g.gapy(j - 1), g.gapy(j))
+					+ d2_axis(fetch_w(field, g, bc, i, j, k - 1), c, fetch_w(field, g, bc, i, j, k + 1), g.dz(k - 1), g.dz(k));
 				double nut_f = nut ? 0.5 * (nut[g.pidx(i, j, k - 1)] + nut[g.pidx(i, j, k)]) : 0.0;
 				val = c + dt * (nu + nut_f) * lap;
 			}

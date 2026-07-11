@@ -39,11 +39,27 @@ namespace windcfd::core
 			return s;
 		}
 
+		// Finite-volume divergence: each face flux over the LOCAL cell width (graded-aware; ⇒ /h uniform).
 		WINDCFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
-			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]
-				+ v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]
-				+ w[g.widx(i, j, k + 1)] - w[g.widx(i, j, k)]) / g.h;
+			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]) / g.dx(i)
+				+ (v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]) / g.dy(j)
+				+ (w[g.widx(i, j, k + 1)] - w[g.widx(i, j, k)]) / g.dz(k);
+		}
+
+		// Variable-coefficient FV Poisson stencil for the all-Neumann box (out-of-box faces dropped,
+		// dp/dn=0). Per face f: weight w_f = A_f/(d_f·V_cell) = 1/(d_centre-to-centre · cell_width_normal).
+		// Returns diag = Σ_f w_f and wnb = Σ_f w_f·p_nb, so Ap = diag·p_c − wnb. Uniform ⇒ each w_f=1/h²,
+		// diag=count/h², wnb=nbsum/h² — exactly the old (count·p_c − nbsum)/h² operator. Stays SPD.
+		WINDCFD_HD inline void fv_stencil(const double* p, MacGrid g, int i, int j, int k, double& diag, double& wnb)
+		{
+			diag = 0.0; wnb = 0.0;
+			if (i > 0) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i - 1, j, k)]; }
+			if (i < g.nx - 1) { double w = 1.0 / (g.dxc(i + 1) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i + 1, j, k)]; }
+			if (j > 0) { double w = 1.0 / (g.dyc(j) * g.dy(j)); diag += w; wnb += w * p[g.pidx(i, j - 1, k)]; }
+			if (j < g.ny - 1) { double w = 1.0 / (g.dyc(j + 1) * g.dy(j)); diag += w; wnb += w * p[g.pidx(i, j + 1, k)]; }
+			if (k > 0) { double w = 1.0 / (g.dzc(k) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k - 1)]; }
+			if (k < g.nz - 1) { double w = 1.0 / (g.dzc(k + 1) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k + 1)]; }
 		}
 
 		__global__ void k_rhs(const double* u, const double* v, const double* w, double* rhs, MacGrid g, double rho, double dt, int n)
@@ -56,22 +72,23 @@ namespace windcfd::core
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
-			Ap[t] = (nnb_count(g, i, j, k) * p[t] - nb_sum(p, g, i, j, k)) / (g.h * g.h);
+			double diag, wnb; fv_stencil(p, g, i, j, k, diag, wnb);
+			Ap[t] = diag * p[t] - wnb;
 		}
 		__global__ void k_residual(const double* p, const double* rhs, double* r, MacGrid g, int n)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
-			r[t] = rhs[t] - (nnb_count(g, i, j, k) * p[t] - nb_sum(p, g, i, j, k)) / (g.h * g.h);
+			double diag, wnb; fv_stencil(p, g, i, j, k, diag, wnb);
+			r[t] = rhs[t] - (diag * p[t] - wnb);
 		}
 		__global__ void k_jacobi(const double* p, const double* rhs, double* pout, MacGrid g, double omega, int n)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
-			int cnt = nnb_count(g, i, j, k);
-			if (cnt == 0) { pout[t] = p[t]; return; }
-			double diag = cnt / (g.h * g.h);
-			double Ap = (cnt * p[t] - nb_sum(p, g, i, j, k)) / (g.h * g.h);
+			double diag, wnb; fv_stencil(p, g, i, j, k, diag, wnb);
+			if (diag == 0.0) { pout[t] = p[t]; return; }
+			double Ap = diag * p[t] - wnb;
 			pout[t] = p[t] + omega * (rhs[t] - Ap) / diag;
 		}
 		__global__ void k_gs_color(double* p, const double* rhs, MacGrid g, int band, int color, int n)
@@ -81,8 +98,9 @@ namespace windcfd::core
 			if (((i + j + k) & 1) != color) return;
 			bool inband = i < band || i >= g.nx - band || j < band || j >= g.ny - band || k < band || k >= g.nz - band;
 			if (!inband) return;
-			int cnt = nnb_count(g, i, j, k); if (cnt == 0) return;
-			p[t] = (rhs[t] * g.h * g.h + nb_sum(p, g, i, j, k)) / cnt;
+			double diag, wnb; fv_stencil(p, g, i, j, k, diag, wnb);
+			if (diag == 0.0) return;
+			p[t] = (rhs[t] + wnb) / diag;
 		}
 
 		// factor-2 transfer: fine cell fi maps to coarse index space cpos = fi/2 - 0.25.
@@ -132,17 +150,17 @@ namespace windcfd::core
 			if (t < nu)
 			{
 				int i = t % (g.nx + 1), j = (t / (g.nx + 1)) % g.ny, k = t / ((g.nx + 1) * g.ny);
-				if (i >= 1 && i <= g.nx - 1) u[t] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.h;
+				if (i >= 1 && i <= g.nx - 1) u[t] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.dxc(i);
 			}
 			else if (t < nu + nv)
 			{
 				int s = t - nu; int i = s % g.nx, j = (s / g.nx) % (g.ny + 1), k = s / (g.nx * (g.ny + 1));
-				if (j >= 1 && j <= g.ny - 1) v[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.h;
+				if (j >= 1 && j <= g.ny - 1) v[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.dyc(j);
 			}
 			else if (t < nu + nv + nw)
 			{
 				int s = t - nu - nv; int i = s % g.nx, j = (s / g.nx) % g.ny, k = s / (g.nx * g.ny);
-				if (k >= 1 && k <= g.nz - 1) w[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.h;
+				if (k >= 1 && k <= g.nz - 1) w[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.dzc(k);
 			}
 		}
 		__global__ void k_divabs(const double* u, const double* v, const double* w, double* out, MacGrid g, int n)
@@ -225,13 +243,13 @@ namespace windcfd::core
 	{
 		Ap.assign(g.p_count(), 0.0);
 		for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
-			Ap[g.pidx(i, j, k)] = (nnb_count(g, i, j, k) * p[g.pidx(i, j, k)] - nb_sum(p.data(), g, i, j, k)) / (g.h * g.h);
+			{ double diag, wnb; fv_stencil(p.data(), g, i, j, k, diag, wnb); Ap[g.pidx(i, j, k)] = diag * p[g.pidx(i, j, k)] - wnb; }
 	}
 	void poisson_residual_cpu(const std::vector<double>& p, const std::vector<double>& rhs, std::vector<double>& r, MacGrid g)
 	{
 		r.assign(g.p_count(), 0.0);
 		for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
-			r[g.pidx(i, j, k)] = rhs[g.pidx(i, j, k)] - (nnb_count(g, i, j, k) * p[g.pidx(i, j, k)] - nb_sum(p.data(), g, i, j, k)) / (g.h * g.h);
+			{ double diag, wnb; fv_stencil(p.data(), g, i, j, k, diag, wnb); r[g.pidx(i, j, k)] = rhs[g.pidx(i, j, k)] - (diag * p[g.pidx(i, j, k)] - wnb); }
 	}
 	void jacobi_smooth_cpu(std::vector<double>& p, const std::vector<double>& rhs, MacGrid g, double omega, int sweeps)
 	{
@@ -240,10 +258,10 @@ namespace windcfd::core
 		{
 			for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
 			{
-				int c = g.pidx(i, j, k); int cnt = nnb_count(g, i, j, k);
-				if (cnt == 0) { pout[c] = p[c]; continue; }
-				double diag = cnt / (g.h * g.h);
-				double Ap = (cnt * p[c] - nb_sum(p.data(), g, i, j, k)) / (g.h * g.h);
+				int c = g.pidx(i, j, k); double diag, wnb; fv_stencil(p.data(), g, i, j, k, diag, wnb);
+				if (diag == 0.0) { pout[c] = p[c]; continue; }
+				double Ap = diag * p[c] - wnb;
+				// (Ap computed above from the FV stencil)
 				pout[c] = p[c] + omega * (rhs[c] - Ap) / diag;
 			}
 			p = pout;
@@ -260,8 +278,8 @@ namespace windcfd::core
 					if (((i + j + k) & 1) != color) continue;
 					bool inband = i < band || i >= g.nx - band || j < band || j >= g.ny - band || k < band || k >= g.nz - band;
 					if (!inband) continue;
-					int cnt = nnb_count(g, i, j, k); if (cnt == 0) continue;
-					p[g.pidx(i, j, k)] = (rhs[g.pidx(i, j, k)] * g.h * g.h + nb_sum(p.data(), g, i, j, k)) / cnt;
+					double diag, wnb; fv_stencil(p.data(), g, i, j, k, diag, wnb); if (diag == 0.0) continue;
+					p[g.pidx(i, j, k)] = (rhs[g.pidx(i, j, k)] + wnb) / diag;
 				}
 			}
 	}
@@ -301,11 +319,11 @@ namespace windcfd::core
 	{
 		double coef = dt / rho;
 		for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 1; i <= g.nx - 1; ++i)
-			u[g.uidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.h;
+			u[g.uidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.dxc(i);
 		for (int k = 0; k < g.nz; ++k) for (int j = 1; j <= g.ny - 1; ++j) for (int i = 0; i < g.nx; ++i)
-			v[g.vidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.h;
+			v[g.vidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.dyc(j);
 		for (int k = 1; k <= g.nz - 1; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
-			w[g.widx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.h;
+			w[g.widx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.dzc(k);
 	}
 	double max_abs_divergence_cpu(const std::vector<double>& u, const std::vector<double>& v, const std::vector<double>& w, MacGrid g)
 	{

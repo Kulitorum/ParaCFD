@@ -74,7 +74,7 @@ namespace windcfd::core
 		if (bc.inlet_mode == INLET_UNIFORM) up = bc.U_inlet;
 		else
 		{
-			double z = (k + 0.5) * g.h - bc.bed_datum;         // height above the inlet bed top
+			double z = g.zc(k) - bc.bed_datum;                 // height above the inlet bed top
 			if (z < bc.z0 * 1.0000001) z = bc.z0 * 1.0000001;  // guard log domain; ⇒ ~0 at/below the bed
 			up = (bc.ustar / bc.kappa) * log(z / bc.z0);
 		}
@@ -160,7 +160,7 @@ namespace windcfd::core
 	// ---- Trilinear samplers (component node spaces identical to mac_grid.h) ------
 	WINDCFD_HD inline double ch_trilerp_u(const double* u, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
-		double gx = x / g.h, gy = y / g.h - 0.5, gz = z / g.h - 0.5;
+		double gx = grid_fx(g, x), gy = grid_cy(g, y), gz = grid_cz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
 		double fx = gx - i0, fy = gy - j0, fz = gz - k0;
 		double c[2][2][2];
@@ -180,7 +180,7 @@ namespace windcfd::core
 	}
 	WINDCFD_HD inline double ch_trilerp_v(const double* v, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
-		double gx = x / g.h - 0.5, gy = y / g.h, gz = z / g.h - 0.5;
+		double gx = grid_cx(g, x), gy = grid_fy(g, y), gz = grid_cz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
 		double fx = gx - i0, fy = gy - j0, fz = gz - k0;
 		double c[2][2][2];
@@ -200,7 +200,7 @@ namespace windcfd::core
 	}
 	WINDCFD_HD inline double ch_trilerp_w(const double* w, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
-		double gx = x / g.h - 0.5, gy = y / g.h - 0.5, gz = z / g.h;
+		double gx = grid_cx(g, x), gy = grid_cy(g, y), gz = grid_fz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
 		double fx = gx - i0, fy = gy - j0, fz = gz - k0;
 		double c[2][2][2];
