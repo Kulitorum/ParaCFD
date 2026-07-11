@@ -72,16 +72,19 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
     centre (used by `building_probe`; the GUI places via `placed_mesh` instead, so no centring).
   - `voxelize_building(fp, prm, g)` → the mask (1=solid/0=fluid, `ChannelBC` cell field,
     `g.pidx`). A cell is **solid** when it lies within **± half `wall_thickness`** of the
-    (optionally corner-rounded) footprint over the wall height `[base_z, base_z+wall_height]`,
-    **plus** a **SOLID convex-hull flat roof slab** over `[top, top+roof_thickness]` dilated by
+    (optionally corner-rounded) footprint over the wall height `[base_z, base_z+wall_height]` —
+    the half-width is **floored to one cell's circumradius `0.5·h·√2`** so a wall thinner than
+    ~1 cell still voxelizes **watertight** (a printed 50–80 mm COBOD wall stays a solid band even
+    at `wall_thickness ≈ h`; walls already ≥ ~1.4 cells keep their exact width, `max()` is a
+    no-op) — **plus** a **SOLID convex-hull flat roof slab** over `[top, top+roof_thickness]` dilated by
     `roof_overhang` (hull guarantees a filled roof regardless of how the section split into
     loops). **Rounded** corners: a 2D fillet pre-rounds the centerline (`round_loop`) so the
     outer radius ≈ `corner_radius`. **TRUE sharp** corners (`corner_radius`≈0): start from the
     ±half distance band (which is naturally round) and square off each **convex** corner by
     adding an outward **miter WEDGE** triangle (local + robust on non-convex outlines,
     miter-limited to bevel spikes); curved walls stay rounded via an angle threshold.
-  - `BuildingParams`: `wall_thickness`, `wall_height`, `corner_radius`, `roof_overhang`,
-    `roof_thickness`, `base_z` (all metres).
+  - `BuildingParams`: `wall_thickness` (default **0.08 m** — a COBOD-printed wall), `wall_height`,
+    `corner_radius`, `roof_overhang`, `roof_thickness`, `base_z` (all metres).
   - **`tools/building_probe`** (dev CLI, `windcfd_geometry`-linked) — load a centerline STEP →
     section → voxelize headlessly and print stats, to verify the pipeline before the GUI.
 - **Wind loads** (`src/core/windloads.{h,cpp}`) — integrate the **pressure** load on the
@@ -131,7 +134,11 @@ publishes device snapshots under a display mutex; integrates + publishes `WindLo
 setters for inlet speed/profile, flow direction, tidal reversal; a **run gate** so it can be
 held paused), `sim_setup.{h,cpp}` (builds the sim from JSON; parses directly so viewer-only keys
 like U/Re are allowed; `GridOverride` for the Apply-resize path), `scene_io.{h,cpp}` (Qt-free
-`.scn` save/restore — self-contained binary container of recipe + mesh + live fields),
+`.scn` save/restore — self-contained binary container of recipe + the **source STEP** (embedded
+as the source of truth; the display mesh is **regenerated** from it on load via
+`load_step_mesh_from_memory`, not stored — legacy mesh-blob scenes still load) + live fields; a
+`mesh_is_centerline` flag routes a restored model back to the centerline pipeline so **Build works
+after a scene load** instead of "no centerline loaded"),
 `flow_particles.{h,cpp}` / `flow_tracers.{h,cpp}` (Qt-free CPU tracer field drawn as an
 instanced GL arrow glyph), `video_recorder.{h,cpp}` + `video_settings_dialog.{h,cpp}`
 (fixed-cadence frame capture), `colormap.h` (the one shared colour ramp), `gl_thread_check.h`,
@@ -225,8 +232,14 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
 
 ## Key conventions & invariants (preserve these)
 
-- **Every CUDA kernel has a CPU reference + a GPU-vs-CPU parity test** at rel. max-norm **1e-5**
-  (fluid kernels, MGPCG, channel kernels, the slice colour kernel — the last is exact).
+- **Every CUDA kernel keeps a matching CPU reference twin** (`*_cpu`, e.g. `ch_poisson_apply_cpu`)
+  as the design contract, intended for GPU-vs-CPU checks at rel. max-norm **1e-5**. ⚠ **The gtest
+  parity harness itself is NOT in the tree right now** — there is no test target / `add_test` /
+  gtest, the `_cpu` twins are uncalled, and the CMake "geometry test" references are **stale**. So
+  the 1e-5 suite is a contract to *restore*, not an oracle you can currently run. Any large solver
+  refactor (e.g. the graded grid — see `openspec/changes/graded-structured-grid/`) must **first**
+  rebuild this harness or a golden-master field-snapshot oracle before touching the kernels;
+  preserve the `_cpu` twins meanwhile.
 - **Layering**: `libwindcfd` stays Qt-free, OCC-free and GL-free. OpenCascade lives only in
   `windcfd_geometry`; GL headers only in `windcfd_gui_cuda`'s `slice_gl.cu`. Keep new OCC/GL
   code inside those islands. (`building.*` and `windloads.*` are host-only + OCC-free.)
@@ -283,6 +296,23 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   and SEM inlet exist as infrastructure but aren't wired into the building configs.
 - **Building viscosity is a moderate `nu = 1e-3` default** (`configs/building.json`), not the
   true air Re — a numerically-forgiving value, not a physically-resolved one.
+- **NEXT — resolution decouple (graded grid).** The uniform grid welds feature resolution to
+  domain size, so at `h=0.25 m` a ~0.30 m corner is only ~1.2 cells — **rounded voxelizes ≈ sharp
+  and the effect the tool exists to measure is invisible**. The chosen fix is an axis-separable
+  **graded structured grid** (fine core around the building, coarse far field); full proposal +
+  design + tasks in `openspec/changes/graded-structured-grid/`. This replaces `MacGrid`'s scalar
+  `h` with per-axis metric arrays — a core refactor gated on first restoring the parity oracle
+  (above). NOTE for that work: `windloads.cpp` and `flow_particles/flow_tracers` also carry a
+  scalar `h` and must be metric-aware.
+- **DEAD-END (tried + reverted): open far-field BC.** An opt-in Dirichlet-p=0 "open" mode on the
+  top/side faces (to relieve blockage in a small domain) gave textbook Cp at ≤~5% blockage but
+  **backflow-diverges at higher blockage** — the regime where it's needed. Not committed; the
+  graded grid (big cheap domain) is the path instead. A robust version would need a
+  convective/backflow-stabilised outflow, not a raw pressure outlet.
+- **Blockage caveat (in the meantime).** With closed free-slip top/side walls, keep the domain
+  large enough that frontal **blockage < ~5%** or Cp inflates badly (a small domain gave windward
+  Cp ~10 vs the physical ~+1) — the flow nozzles around the building. This is exactly what the
+  graded grid lets you afford cheaply.
 
 ## History
 

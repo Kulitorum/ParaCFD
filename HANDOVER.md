@@ -30,7 +30,9 @@ roof** — a bluff body in an atmospheric boundary layer (ABL).
   - horizontally sectioned (`mesh_horizontal_section`) into **2D footprint loops**;
   - voxelized **directly** (`voxelize_building`) — no watertight solid: a cell is solid when
     it lies within ± half `wall_thickness` of the (optionally corner-rounded) centerline over
-    the wall height, which is leak-proof by construction;
+    the wall height, which is leak-proof by construction. The half-width is **floored to ~1 cell**
+    (`0.5·h·√2`) so a thin printed wall (default **`wall_thickness = 0.08 m`**) stays **watertight**
+    even at `wall_thickness ≈ h`; walls already ≥ ~1.4 cells keep their exact width;
   - plus a **solid flat roof** = convex hull of the footprint dilated by the roof overhang,
     over `roof_thickness`.
   - Corners are configurable: a **ROUNDED** outer radius is obtained by pre-filleting the
@@ -65,6 +67,13 @@ roof** — a bluff body in an atmospheric boundary layer (ABL).
   - The building voxel overlay is **coloured by Cp** (diverging ramp) with a legend and a
     "Colour building by Cp" toggle.
   - **Input speed U is capped at 40 m/s**.
+- **Scene save/restore** (`scene_io.{h,cpp}`, `.scn`): a scene now **embeds the source STEP**
+  (source of truth) and **regenerates** the display/centerline mesh on load (`load_step_mesh_from_memory`)
+  rather than persisting the triangulation; a `mesh_is_centerline` flag routes a restored model back
+  to the centerline pipeline so **Build works after loading a scene**. Legacy mesh-blob `.scn` still load.
+- **Converged time-averaged loads** (`LoadAverager` / `WindLoadStats`): "Start averaging" /
+  "Start in N h" / Stop accumulate **mean / RMS / peak** Cd/Cl/Cs + a **time-averaged Cp** over a
+  user-controlled window (this was the old "next step #1" — now shipped).
 - **Configs** (`configs/`): **`building.json`** — a ~40×30×15 m AIR wind-tunnel default at
   h=0.25 m (~1.15M cells), **auto-selected** when `--load-centerline` is passed without
   `--config`. The **cylinder validation configs were removed**; `g1_viewer*` are now
@@ -118,14 +127,26 @@ not for visual checks. Other CLI flags (see `src/gui/main.cpp`): `--load-step`,
 `--save-scene`/`--load-scene`, `--record`.
 
 ## 5. Immediate next steps (priority order)
-1. **Convergence + time-averaging (highest priority).** The live Cd/Cl/Cs and Cp are
-   **instantaneous** values read off an **unsettled** flow, so the rounded-vs-sharp
-   comparison is **not yet trustworthy**. Add flow-steadiness detection, then **mean / RMS /
-   peak** load accumulation, and a batch/CSV **corner-radius sweep** (headless) so a
-   sharp-vs-rounded comparison can be produced repeatably.
+0. **Restore the parity/verification oracle FIRST.** CLAUDE.md advertises a "1e-5 GPU-vs-CPU
+   parity test per kernel" invariant, but **that gtest harness is not in the tree** — no test
+   target / `add_test` / gtest, and the `*_cpu` reference twins are uncalled (the CMake "geometry
+   test" refs are stale). Any solver refactor (esp. #1) is unverifiable until this is rebuilt, or
+   a golden-master field-snapshot oracle is set up. This is a prerequisite, not optional.
+1. **Resolution decouple — graded structured grid (highest priority).** At `h = 0.25 m` a ~0.30 m
+   corner is only ~1.2 cells, so **rounded voxelizes ≈ sharp and the rounded-vs-sharp effect is
+   invisible**. A full **proposal + design + tasks** for an axis-separable graded grid (fine core
+   around the building, coarse far field; replaces `MacGrid`'s scalar `h` with per-axis metric
+   arrays) is in `openspec/changes/graded-structured-grid/` — being taken forward separately.
+   Gotchas for that work: it hinges on step 0's oracle; and `windloads.cpp` +
+   `flow_particles/flow_tracers` also use a scalar `h` and must be made metric-aware.
+   (An **open far-field BC** was tried as a cheaper alternative and **reverted** — stable/physical
+   at ≤~5% blockage but backflow-diverges above it. Until the graded grid lands, keep frontal
+   **blockage < ~5%** or Cp inflates badly.)
 2. **ABL wind inflow profile.** Inflow is currently **uniform**; wire in a log-law / power-law
    ABL velocity profile plus inlet turbulence, reusing the existing log-law wall model and the
    Jarrin SEM synthetic-eddy inlet infrastructure.
 3. **Building Reynolds number.** `configs/building.json` uses a **moderate `nu = 1.0e-3`**
    (numerical stability aid), not true air ν — revisit once the flow settles and the ABL inlet
    is in, so the building runs at a physical Re.
+
+(The old #1, "convergence + time-averaging," is **done** — see `LoadAverager` in section 2.)
