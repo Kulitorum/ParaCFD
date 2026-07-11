@@ -388,7 +388,7 @@ namespace windcfd::gui
 		buildingCol->addLayout(buildingForm);
 
 		build_btn_ = new QPushButton("Build");
-		build_btn_->setToolTip("Size the domain around the building (with wind clearance), rebuild the sim at that grid, then voxelize the thickened walls + overhanging flat roof and inject them as the flow obstacle. Load a centerline via File ▸ Open centerline STEP… first.");
+		build_btn_->setToolTip("Voxelize the placed centerline model (thickened walls + overhanging flat roof, rounded or sharp corners) into the CURRENT domain and inject it as the flow obstacle. Set the domain size + voxel size via the Domain controls first; load a centerline via File ▸ Open centerline STEP…");
 		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
 		buildingCol->addWidget(build_btn_);
 

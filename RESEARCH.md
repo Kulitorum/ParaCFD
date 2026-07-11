@@ -2,10 +2,12 @@
 
 This is the single authoritative physics/numerics spec for **WindCFD**, a GPU (CUDA) 3D
 incompressible-flow LES solver (`namespace windcfd::core`). Every model below is grounded in the
-solver that actually exists in `src/core/fluid/` and `src/core/geometry/`; forward-looking
-quantities the solver must still be extended to compute are called out in a clearly-labelled
-section (§7). Where a value is quoted, use it exactly as written — do not "improve" constants from
-memory. Fluid-relevant derivations live in the `research/` notes (index in §10).
+solver that actually exists in `src/core/fluid/`, `src/core/geometry/` and `src/core/windloads.*`.
+The wind-load extraction and the printed-building geometry pipeline are now **implemented** (§6, §7);
+the remaining physics work (time-averaging the loads, an ABL design inflow) is called out in a
+clearly-labelled section (§7.6, §9). Where a value is quoted, use it exactly as written — do not
+"improve" constants from memory. Fluid-relevant derivations live in the `research/` notes (index in
+§10).
 
 **Product context.** COBOD 3D-prints concrete buildings. Because a printer lays down curved and
 straight walls at the same cost, a building's corners can be **sharp or rounded** at will. WindCFD
@@ -19,8 +21,9 @@ aerodynamics in air — not water, not sediment.
 > `stam_fluid_core.h`, `channel_periodic.h`, and `bedshear.h` all default `rho = 1027 kg/m³` and
 > `nu = 1.36e-6 m²/s`. For wind these **must** be set to **air** (§1). This is a defaults bug to fix,
 > not a description of the intended physics. Likewise the wall model still derives its roughness
-> length from a `d50` "grain size" (`z0 = d50/12`); for wind, `z0` must be supplied directly as an
-> **aerodynamic terrain roughness length** (§5.2).
+> length from a `d50` "grain size" (`z0 = d50/12`); for wind, z0 must be supplied directly as an
+> **aerodynamic terrain roughness length** (§5.2). (The wind-load module `windloads.*` already
+> defaults to air: ρ = 1.225 kg/m³.)
 
 ---
 
@@ -144,9 +147,9 @@ for LES accuracy (the scheme is stable to ~2). Explicit-diffusion stability dt �
 checked but rarely binding. A fixed dt mode exists for uniform-rate sampling (Strouhal FFT).
 
 **Per-step loop:** advect (MacCormack) → add body force / diffuse with ν+ν_t (explicit) → apply
-boundary conditions & any porous sink → **project** (MGPCG) to enforce ∇·u = 0 → (optional) sample
-surface pressure/shear for load statistics (§7). Vorticity confinement is **off** (a graphics energy
-injector that corrupts quantitative transport).
+boundary conditions & any porous sink → **project** (MGPCG) to enforce ∇·u = 0 → (optional) integrate
+surface pressure into wind loads (§7). Vorticity confinement is **off** (a graphics energy injector
+that corrupts quantitative transport).
 
 ---
 
@@ -161,9 +164,10 @@ floor, and a voxel solid mask for the building.
 - **Mean profile** (`channel_inlet_u`, `INLET_LOGLAW`): a rough-wall log law
   `u(z) = (u\*/κ)·ln(z/z0)`, κ = 0.40, referenced to the ground datum so u → 0 at the surface. u\* is
   chosen to flux-match a target reference speed over the domain height (`loglaw_ustar_for_U`). A
-  uniform top-hat inlet (`INLET_UNIFORM`) is available for canonical benchmarks (cylinder). *Target
-  (§7): add a selectable **power-law** mean profile `u/u_ref = (z/z_ref)^α` (α ≈ 0.11–0.33 by terrain
-  category) and terrain-category presets, so the inflow matches a design-code ABL.*
+  uniform top-hat inlet (`INLET_UNIFORM`) is available for canonical benchmarks (cylinder) and is
+  what the current building configs use. *Target (§7.6): a selectable **power-law** mean profile
+  `u/u_ref = (z/z_ref)^α` (α ≈ 0.11–0.33 by terrain category) and terrain-category presets, so the
+  inflow matches a design-code ABL.*
 - **Synthetic turbulence — SEM** (`sem_inlet.*`, Jarrin 2006). N compact tent eddies convect through
   a box straddling the inlet; their superposition is coloured by the Cholesky factor of a
   Reynolds-stress tensor to produce divergence-carrying inflow fluctuations that the MGPCG projection
@@ -218,75 +222,119 @@ drag on the face-normal velocity before projection.
 
 ---
 
-## 6. Geometry pipeline (STEP → mesh → voxel mask)
+## 6. Geometry pipeline (printed centerline → footprint → voxel mask)
 
-1. **STEP import** (`step_import.*`). OpenCascade reads the CAD building (STEP, native millimetres)
-   and triangulates it to a Qt-free `TriMesh` in **metres** (BRepMesh linear deflection ~0.1 mm
-   default). `load_step_mesh` returns the merged display/voxelization mesh; `load_step_solids` returns
-   one mesh per solid (for future per-piece handling). OCC is isolated in the `windcfd_geometry`
-   static lib so the solver stays OCC-free.
-2. **Placement** (`model_placement.h`). A single shared affine transform `world(v) = M·v + t`
-   (rotation·scale + translation) positions the mesh; `place_model_on_bed` centres it in x/y and rests
-   its lowest vertex on the ground. The viewer and the voxelizer use the **same** transform so the
-   solid mask lands exactly where the building is drawn.
-3. **Ray-parity voxelizer** (`voxelize.*`). Watertight inside test by an axis-aligned **+z ray**,
-   even-odd (parity) count of triangle crossings, robust to edge grazing via inclusive barycentric
-   tests. Each cell is probed with a K×K×K sub-point grid (default K = 3) and marked solid iff its
-   inside-fraction > 0.5 (**supersampled majority fill**); the per-cell fraction is retained as a
-   cut-cell volume fraction for later use. A **thin-wall safeguard** keeps sealed any wall thinner
-   than half a cell (over-thicken beats leak). Output is the `ChannelBC` cell mask (1 = solid,
-   0 = fluid, `g.pidx`); `voxelize_mesh_instances` ORs several placements into one rigid structure.
+WindCFD does **not** need a watertight CAD solid — the flow sees only the solid/fluid cell mask. So
+for a 3D-printed building the geometry pipeline works directly from the **wall centerline** the printer
+follows, thickening it into a solid mask by a distance test. This is inherently **leak-proof** (no
+thin-wall gaps a ray-parity voxelizer could tunnel through) and makes the **corner style a first-class
+parameter** — exactly the rounded-vs-sharp knob the project exists to study.
 
-**Rounded-vs-sharp caveat.** The mask is a binary voxel staircase, so a rounded corner at coarse h is
-indistinguishable from a chamfered/sharp one. Faithful rounded-corner separation needs fine h (many
-cells across the fillet radius) and/or the retained cut-cell fractions promoted to real **cut-cell
+1. **STEP import** (`step_import.*`). OpenCascade reads the printed **centerline** STEP (vertical wall
+   surface *ribbons* — the swept toolpath, not a closed solid), native millimetres, and triangulates
+   it to a Qt-free `TriMesh` in **metres** (BRepMesh linear deflection ~0.1 mm default). OCC is
+   isolated in the `windcfd_geometry` static lib so the solver and `windloads.*` stay OCC-free.
+2. **Placement** (`model_placement.h`). A single shared affine transform positions the mesh; the
+   viewer and the geometry stage use the **same** transform so the solid mask lands exactly where the
+   building is drawn. `center_footprint` provides the simple "drop it in the middle of the wind
+   tunnel" placement (footprint bbox centre → domain centre in x/y, base at `base_z`).
+3. **Horizontal section → 2D footprint** (`building.cpp`, `mesh_horizontal_section`). Intersect the
+   centerline ribbons with a horizontal plane at mid-height (a tiny z-nudge avoids exact
+   vertex/seam hits) to get section segments, then greedily endpoint-chain them into closed
+   **centerline loops** — a `Footprint` of 2D polylines in the xy-plane. This collapses the vertical
+   ribbons to the plan-view wall path.
+4. **Direct voxelization** (`voxelize_building`). For each cell centre within the wall height band
+   (`base_z ≤ z ≤ base_z + wall_height`), the cell is marked **solid iff its distance to the footprint
+   loops ≤ half the wall thickness** — i.e. the wall is the ± half-thickness band swept along the
+   centerline. Corner treatment:
+   - **Rounded corners** (`corner_radius > 0`): the centerline loops are **pre-filleted** by a
+     procedural 2D fillet (`round_loop`, tangent circular arc of radius `corner_radius − half`), so the
+     ± half-thickness band yields an **outer corner radius ≈ corner_radius**. Configurable radius; the
+     bare distance band alone already rounds outer corners by half the wall thickness.
+   - **True sharp corners** (`corner_radius ≈ 0`): start from the rounded distance band, then **square
+     off each genuine convex corner** by adding an outward **miter wedge** triangle (edge-normal
+     bisector, with a miter limit that bevels very acute spikes). This is local and robust on
+     non-convex outlines — no global offset polygon to self-intersect — and leaves gently-curved walls
+     rounded via a turn-angle threshold.
+5. **Flat roof slab** (`voxelize_building`, roof band `top < z ≤ top + roof_thickness`). A **solid**
+   flat roof = the **convex hull of the footprint**, dilated outward by the **overhang** (a cell is
+   roof-solid if it is inside the hull, or within `half + roof_overhang` of it). Using the convex hull
+   guarantees a filled, non-hollow roof regardless of how the section split the footprint into loops,
+   and gives the eaves/overhang for free.
+
+Output is the `ChannelBC` cell mask (size `g.p_count()`, indexed `g.pidx`, 1 = solid / 0 = fluid),
+fed straight to the solver's obstacle (§5.5). A general **watertight ray-parity voxelizer**
+(`voxelize.*`, +z ray even-odd parity, K³-supersampled majority fill, retained cut-cell fractions)
+remains available for arbitrary closed STEP solids; the centerline pipeline above is the production
+path for printed buildings.
+
+**Rounded-vs-sharp caveat.** The mask is still a binary voxel staircase, so a rounded corner at coarse
+h is indistinguishable from a chamfered/sharp one. Faithful rounded-corner separation needs fine h
+(many cells across the fillet radius) and/or promoting retained cut-cell fractions to real **cut-cell
 surface physics** (§9).
 
 ---
 
-## 7. TARGET wind-load quantities — **to be implemented**
+## 7. Wind-load extraction — **implemented** (`src/core/windloads.{h,cpp}`)
 
-The current solver computes the velocity/pressure fields, the SEM/precursor inflow, the ground wall
-stress, and the voxel building mask. It does **not yet** integrate wind loads. This section specifies
-the quantities WindCFD must be extended to compute; they are the deliverable of the project.
+The solver integrates the engineering wind loads directly from the pressure field over the voxelized
+building. The building is the solid-cell mask of §6; its surface is the set of **exposed voxel faces**
+— faces between a solid cell and a fluid neighbour (the 6-neighbour test in `compute_wind_loads`).
+The whole module is host-only and OCC-free (in `libwindcfd`); wind is assumed along **+x** (the inlet).
 
-**7.1 Surface pressure coefficient.**
+**7.1 Surface pressure (exposed-face integration).** For each exposed face the **surface pressure is
+taken as the adjacent fluid cell's pressure** (cell-centred, physical Pa). The **reference pressure
+`p_ref`** is the mean pressure over the fluid cells of the **upstream inlet slab** (the first ~2 cell
+layers at xmin — the freestream). The gauge pressure on the face is `p_face − p_ref`.
+
+**7.2 Pressure force & moment.** Only the **pressure** load is integrated — skin friction is small
+for a bluff body with fixed corner separation and is omitted (consistent with the production free-slip
+building surface, §3). Summing over exposed faces of area `h²` with outward unit normal `n̂`
+(solid → fluid):
+
 ```
-Cp = (p − p∞) / (½ρU_ref²)
+F = − Σ_faces (p_face − p_ref) · n̂ · h²          (pressure pushes inward)
+M = Σ_faces r × dF ,   r = face-centre − building-centroid
 ```
-Sampled on the building envelope (façade + roof) from the pressure field at fluid cells adjacent to
-**exposed solid faces** — the exposed faces are already identifiable from the voxel mask. p∞ is the
-reference static pressure and U_ref the reference speed (both at a stated reference height). Because
-p is defined only to a gauge, use a consistent p∞ (e.g. inlet/freestream reference).
 
-**7.2 Integrated force & moment coefficients.** Integrate surface traction (pressure dominates for
-bluff bodies; add wall shear when a surface wall model exists) over the envelope:
+**7.3 Coefficients.** With dynamic pressure `q = ½ρU_ref²` (ρ, U_ref from `WindLoadParams`, default
+air ρ = 1.225):
+
 ```
-F = ∮ (−p n + τ_w) dA,     C_D = F_x/(½ρU_ref²A),  C_L = F_z/(½ρU_ref²A),  C_S = F_y/(½ρU_ref²A)
-M = ∮ r × (−p n) dA,       C_M = M/(½ρU_ref²A·L_ref)
+Cp = (p − p_ref)/q            (per exposed face; a per-solid-cell mean Cp is also exported for colouring)
+Cd = F_x /(q·A_frontal)       drag  (+x)
+Cs = F_y /(q·A_frontal)       side  (+y)
+Cl = F_z /(q·A_plan)          lift / roof uplift (+z)
+CMx,CMy,CMz = M /(q·A_ref·L_ref)   moments about the building centroid
 ```
-A = reference area (frontal area for drag; plan area for roof uplift); L_ref = a reference length
-(H for the base overturning moment). Report drag, lift/uplift, side force, and the base overturning
-and torsional moments.
 
-**7.3 Roof uplift.** Net upward roof load = ∮_roof (p∞ − p) dA (external suction), reported as an
-uplift force and coefficient. Internal pressure (a GCpi-type assumption for sealed vs dominant-opening
-enclosures) is a **parameter to add**, since WindCFD resolves the external flow only.
+Reference areas are the **projected** solid extents: `A_frontal` = frontal (y–z) projection,
+`A_plan` = plan (x–y) projection, each `= (projected cell count)·h²`; `L_ref` = building height
+(solid z-extent). Drag/side normalise on the frontal area, lift/uplift on the plan area.
 
-**7.4 Mean, fluctuating, and peak pressures.** After spin-up, accumulate per-face time statistics:
-mean C̄p, RMS C′p, and **peak** (min/max over the record) Cp. Peak **suctions** (large-magnitude
-negative Cp) at windward roof edges/corners and along leading façade edges govern cladding/fixing
-design and are the headline output. Track true min/max (and/or a peak factor g ≈ 3–4).
+**7.4 Convention check (why Cp needs no extra factor).** The projection updates velocity as
+`u −= (dt/ρ) ∇p` (`mac_ops.h::subtract_gradient`, §4.3), so the solved `p` is a **physical static
+pressure in Pa**, not a kinematic `p/ρ`. Therefore `Cp = (p − p_ref)/q` with `q = ½ρU_ref²` is
+dimensionally correct as written — no extra ρ factor. This is the single easiest place to introduce a
+factor-of-ρ error, so it is called out explicitly.
 
-**7.5 Rounded-vs-sharp comparison.** For matched inflow, compare between the sharp and rounded
-variants: Cp fields, C_D, across-wind C_L RMS and its shedding Strouhal, peak roof-edge suctions,
-**separation and reattachment** locations, the roof **corner/conical-vortex** structure, and the wake
-width and base pressure. The expected result — rounding delays separation, narrows the wake, and cuts
-both mean drag and peak suctions — is precisely what these diagnostics must quantify.
+**7.5 Validation of the load path.** On a roughly symmetric test "house" the integration reproduces
+the physically expected signatures: **windward stagnation Cp ≈ 1.0** (Bernoulli — the front face
+recovers the full dynamic pressure), **Cd ≈ 1.2** (blunt bluff-body drag), and a **side force ≈ 0**
+(symmetry). These are the sanity gates on the exposed-face integrator itself.
 
-**7.6 ABL design inflow.** Add a selectable design-wind ABL inflow (log-law **and** power-law mean +
-matched turbulence-intensity/length-scale profiles by terrain category, §5.1), so loads correspond to
-a code-defined wind climate rather than a generic channel profile.
+**7.6 Not yet done — makes the current live loads provisional.**
+- **Time-averaging (the key remaining physics step).** `compute_wind_loads` returns an
+  **instantaneous** snapshot; the GUI currently reads it off an **unsettled** flow. Trustworthy
+  rounded-vs-sharp comparison needs **mean / RMS / peak** loads and Cp accumulated over the
+  statistically-steady window after spin-up (peak roof-edge/corner **suctions** — large-magnitude
+  negative Cp — govern cladding and are the headline output; track true min/max and/or a peak factor
+  g ≈ 3–4). Until this lands, treat all reported coefficients as provisional single-frame values.
+- **ABL design inflow (§5.1).** The building configs run a **uniform** inlet; add a selectable design
+  ABL profile (log-law **and** power-law mean + matched turbulence-intensity/length-scale by terrain
+  category) so loads correspond to a code-defined wind climate rather than a uniform stream.
+- **Internal pressure** for roof uplift (a GCpi-type sealed vs dominant-opening assumption) is a
+  parameter still to add — WindCFD resolves only the external flow.
 
 ---
 
@@ -300,8 +348,11 @@ a code-defined wind climate rather than a generic channel profile.
 | V2 | Open-channel / neutral-ABL log law (`channel_periodic.*`) | analytic log law (κ, z0) | recover u\* within 10 %; recover κ within 5 % from a log-law fit of the mean profile. |
 | V3 | Flow past a cylinder (`cylinder.*`) — bluff-body drag & shedding | Re = 100: Cd ≈ 1.33–1.40, St ≈ 0.164–0.168. Re = 1e4 (LES): Cd ≈ 1.1–1.2, St ≈ 0.19–0.20 | Re = 100: Cd within 5–10 %, St within 3–5 %. Re = 1e4: Cd within 15 %, St within 10 %. Uses a **resolved no-slip** surface so the Kármán street forms. |
 
-**Future wind-engineering validation targets** (add as §7 lands — canonical bluff-body-in-ABL cases
-with published surface-pressure and load data):
+**Wind-load sanity gates** (the §7 integrator): windward stagnation **Cp ≈ 1.0**, blunt-body
+**Cd ≈ 1.2**, and **side force ≈ 0** on a symmetric test house (§7.5).
+
+**Wind-engineering validation targets** (fold in as the §7.6 time-averaging + ABL inflow land —
+canonical bluff-body-in-ABL cases with published surface-pressure and load data):
 - **Surface-mounted cube** (Silsoe 6 m cube; Castro & Robins 1977 wind-tunnel cube) — the archetypal
   sharp-cornered bluff body in an ABL, with extensive Cp, separation/reattachment, and roof-suction
   data. The primary rounded-vs-sharp-relevant benchmark.
@@ -321,14 +372,18 @@ Franke et al. 2007) for domain sizing, grid convergence, inflow specification, a
 
 1. **Seawater config defaults** (callout at top): ρ, ν, and the roughness input are still fork
    legacies. Set ρ = 1.225, ν = 1.5e-5, and supply z0 as a terrain roughness before trusting any
-   number.
-2. **No load post-processing yet** (§7): Cp, force/moment coefficients, roof uplift, and
-   mean/RMS/peak pressure statistics are unimplemented — the current core produces the fields these
-   integrals will consume.
-3. **Inlet turbulence is open-channel, not ABL**: the SEM Reynolds stresses use Nezu–Nakagawa
-   profiles; retune to an ABL intensity/length-scale spectrum for design-representative inflow.
+   number. (The `windloads.*` module already defaults ρ to air.)
+2. **Loads are instantaneous, not time-averaged** (§7.6): `compute_wind_loads` reports a single-frame
+   snapshot read off an unsettled flow. Mean/RMS/peak accumulation over the statistically-steady
+   window is the key remaining physics step — until it lands, the **rounded-vs-sharp comparison is
+   not yet trustworthy**.
+3. **Inlet is uniform / open-channel, not an ABL** (§5.1, §7.6): the building configs run a uniform
+   inlet, and the SEM Reynolds stresses (when used) follow Nezu–Nakagawa open-channel profiles.
+   Add a design-wind ABL mean (log-law + power-law) and retune the turbulence to an ABL
+   intensity/length-scale spectrum for design-representative inflow.
 4. **Building surfaces are free-slip at production resolution**: no wall function on the building
-   itself, so skin friction and rounded-corner separation are not yet faithfully captured.
+   itself, so skin friction is omitted (§7.2) and rounded-corner separation is not yet faithfully
+   captured.
 5. **Voxel stair-stepping**: binary voxels cannot distinguish a rounded corner from a sharp one at
    coarse h. Resolving the rounding benefit needs fine grids or promoting the retained cut-cell
    fractions to true cut-cell surface physics (Batty et al. 2007-style variational projection).
