@@ -56,7 +56,7 @@ namespace scour::core
 		// Reject unknown keys so typos surface loudly instead of silently doing nothing.
 		static const std::set<std::string> known = {
 			"name", "domain_x", "domain_y", "domain_z", "voxel_h",
-			"rho", "nu", "U", "rho_s", "d50", "porosity", "phi_repose_deg", "out_dir"};
+			"rho", "nu", "U", "d50", "out_dir"};
 		for (auto it = j.begin(); it != j.end(); ++it)
 		{
 			if (known.find(it.key()) == known.end())
@@ -72,14 +72,9 @@ namespace scour::core
 		get_pos(j, "rho", c.rho);
 		get_pos(j, "nu", c.nu);
 		get_pos(j, "U", c.U);
-		get_pos(j, "rho_s", c.rho_s);
 		get_pos(j, "d50", c.d50);
-		get_pos(j, "porosity", c.porosity);
-		get_pos(j, "phi_repose_deg", c.phi_repose_deg);
 		get_str(j, "out_dir", c.out_dir);
 
-		if (c.porosity >= 1.0)
-			throw std::runtime_error("config 'porosity' must be < 1");
 		if (c.voxel_h > c.domain_x || c.voxel_h > c.domain_y || c.voxel_h > c.domain_z)
 			throw std::runtime_error("config 'voxel_h' larger than a domain extent");
 
@@ -107,10 +102,7 @@ namespace scour::core
 		j["rho"] = rho;
 		j["nu"] = nu;
 		j["U"] = U;
-		j["rho_s"] = rho_s;
 		j["d50"] = d50;
-		j["porosity"] = porosity;
-		j["phi_repose_deg"] = phi_repose_deg;
 		j["out_dir"] = out_dir;
 		return j.dump(2);
 	}

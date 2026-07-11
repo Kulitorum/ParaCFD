@@ -26,11 +26,8 @@ namespace scour::core
 		double nu = 1.36e-6;     // m^2/s   10 C seawater
 		double U = 1.0;          // m/s     depth-averaged current
 
-		// --- Sediment (RESEARCH §1) ---
-		double rho_s = 2650.0;   // kg/m^3  quartz
-		double d50 = 0.35e-3;    // m       median grain size
-		double porosity = 0.36;  // -       bed porosity p (c_pack = 0.64)
-		double phi_repose_deg = 32.0; // deg angle of repose (sand)
+		// --- Bed roughness (log-law wall model) ---
+		double d50 = 0.35e-3;    // m  grain size -> wall roughness ks = 2.5*d50, z0 = d50/12
 
 		// --- Output ---
 		std::string out_dir = "out";
