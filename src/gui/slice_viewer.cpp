@@ -1960,8 +1960,10 @@ void main()
 		prog_.setUniformValue("uClipPlane", clipPlane);
 		glDisable(GL_CLIP_DISTANCE0);
 
-		// Slice mesh (per-vertex CUDA colours). Hidden by the "Show slice" toggle. Never clipped.
-		if (show_slice_)
+		// Slice mesh (per-vertex CUDA colours). Hidden by the "Show slice" toggle. Also suppressed while the
+		// grid overlay is on, so "Show grid on slice" shows the bare cell wireframe (not the filled colours).
+		// Never clipped.
+		if (show_slice_ && !show_grid_)
 		{
 			prog_.setUniformValue("uFlat", 0);
 			glBindVertexArray(slice_vao_);
