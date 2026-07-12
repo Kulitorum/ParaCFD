@@ -322,7 +322,12 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   `MacGrid` now carries nullable per-axis metric arrays (`dx/dy/dz`, `xc/yc/zc`, `xf/yf/zf`) with
   accessors that fall back to the exact uniform closed form when null, so a uniform grid is
   byte-identical. Every operator, the voxelizers, windloads, the slice sampler, and the flow tracers
-  are metric-aware; `adaptive_dt` keys off `h_min()`. Opt-in via a config `"fine_core": {enabled,
+  are metric-aware; `adaptive_dt` keys off `h_min()`. ⚠ The **Orlanski convective outlet**
+  (`ch_orlanski_gpu`) must divide by the LOCAL outlet cell width `g.dx(nx-1)` (or `dx(0)` reversed) —
+  NOT the scalar `h`: on a graded grid the exit sits in the coarse far field (`dx ≫ h_fine`), so `/h`
+  over-convects the outlet by `dx/h` and pumps a boundary instability that runs away from the exit-ground
+  corner (the `Cylinder_Exploded.scn` failure — u/p piled up at `i=nx, k=0`). `coef` is formed in-kernel
+  so the device metric deref is on-device. Opt-in via a config `"fine_core": {enabled,
   x0..z1, h_fine, growth}` object (parsed in `sim_setup.cpp`; `configs/g1_viewer_graded.json`);
   `.scn` persists the spec + regenerates. All gated by the `parity_probe` oracle (above).
   **windloads asserts the building bbox ⊆ the uniform fine core** (its `h_fine²`-face math is exact

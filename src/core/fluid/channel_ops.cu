@@ -262,19 +262,24 @@ namespace windcfd::core
 			int iplane = bc.flow_sign < 0 ? g.nx : 0; // reversed tide: Dirichlet inlet on the xmax face
 			u[g.uidx(iplane, j, k)] = channel_inlet_u(bc, g, k);
 		}
-		__global__ void k_orlanski(double* u, MacGrid g, ChannelBC bc, double coef, int njk)
+		__global__ void k_orlanski(double* u, MacGrid g, ChannelBC bc, double Uc_dt, int njk)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= njk) return;
 			int j = t % g.ny, k = t / g.ny;
+			// coef = Uc·dt/Δx with Δx the LOCAL outlet cell width — NOT the scalar h. On a graded grid the
+			// outlet sits in the coarse far field (dx(nx-1) ≫ h_fine), so dividing by h would over-convect the
+			// outlet by dx/h (≈6× here) and pump an instability upstream from the exit. Uniform ⇒ dx==h (same).
 			if (bc.flow_sign < 0)
 			{
 				// Reversed tide: outlet on the xmin face; outflow is −x, so clamp to ≤ 0 (an incoming +x
 				// jet at this exit is what the flux-rescale would otherwise amplify).
+				double coef = Uc_dt / g.dx(0); if (coef > 1.0) coef = 1.0; else if (coef < 0.0) coef = 0.0;
 				double ub = u[g.uidx(0, j, k)], uin = u[g.uidx(1, j, k)];
 				double uo = ub - coef * (ub - uin); u[g.uidx(0, j, k)] = uo < 0.0 ? uo : 0.0;
 			}
 			else
 			{
+				double coef = Uc_dt / g.dx(g.nx - 1); if (coef > 1.0) coef = 1.0; else if (coef < 0.0) coef = 0.0;
 				double ub = u[g.uidx(g.nx, j, k)], uin = u[g.uidx(g.nx - 1, j, k)];
 				double uo = ub - coef * (ub - uin); u[g.uidx(g.nx, j, k)] = uo > 0.0 ? uo : 0.0; // outflow-only: clamp reversed inflow at the +X exit (else the flux-rescale amplifies a reversed jet — the seabed exit runaway)
 			}
@@ -455,7 +460,7 @@ namespace windcfd::core
 	void ch_apply_inlet_gpu(double* u, MacGrid g, ChannelBC bc)
 	{ int njk = g.ny * g.nz; k_inlet<<<gsz(njk), 256>>>(u, g, bc, njk); }
 	void ch_orlanski_gpu(double* u, MacGrid g, ChannelBC bc, double dt)
-	{ int njk = g.ny * g.nz; double coef = bc.Uc * dt / g.h; if (coef > 1.0) coef = 1.0; if (coef < 0.0) coef = 0.0; k_orlanski<<<gsz(njk), 256>>>(u, g, bc, coef, njk); }
+	{ int njk = g.ny * g.nz; k_orlanski<<<gsz(njk), 256>>>(u, g, bc, bc.Uc * dt, njk); } // coef=Uc·dt/dx(outlet) computed in-kernel (device metric deref; graded-correct)
 	void ch_apply_solid_bc_gpu(double* u, double* v, double* w, const unsigned char* solid, MacGrid g)
 	{ int n = g.u_count() + g.v_count() + g.w_count(); k_solidbc<<<gsz(n), 256>>>(u, v, w, solid, g); }
 	double ch_uplane_flux_gpu(const double* u, double* planeScratch, MacGrid g, int i_plane)

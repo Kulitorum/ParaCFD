@@ -46,7 +46,9 @@ namespace windcfd::core
 	// Inlet: set u-face plane i=0 to the Dirichlet profile; v,w at i=0 plane left as is
 	// (cross-flow handled by fetch). Also zeroes v,w on the inlet cell column for cleanliness.
 	void ch_apply_inlet_gpu(double* u, MacGrid g, ChannelBC bc);
-	// Orlanski convective outlet on the i=nx u-plane: u_b += -(Uc*dt/h)*(u[nx]-u[nx-1]).
+	// Orlanski convective outlet on the i=nx u-plane: u_b += -(Uc*dt/dx_out)*(u[nx]-u[nx-1]), where
+	// dx_out is the LOCAL outlet cell width g.dx(nx-1) (graded-correct; == h on a uniform grid). The
+	// coefficient is formed inside the kernel so the device metric arrays are dereferenced on-device.
 	void ch_orlanski_gpu(double* u, MacGrid g, ChannelBC bc, double dt);
 	// Zero the interior solid faces (u·n=0 on obstacle surfaces & inside).
 	void ch_apply_solid_bc_gpu(double* u, double* v, double* w, const unsigned char* solid, MacGrid g);
