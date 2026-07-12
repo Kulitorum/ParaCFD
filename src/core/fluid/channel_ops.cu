@@ -308,7 +308,11 @@ namespace windcfd::core
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= njk) return;
 			int j = t % g.ny, k = t / g.ny;
-			out[t] = u[g.uidx(iplane, j, k)];
+			// Weight by the TRUE face area dy(j)·dz(k) — NOT a uniform h². On a graded grid the inlet/outlet
+			// plane has non-uniform cells; a plain Σu·h² over-counts the fine cells, so q_in/q_out ≠ 1 even
+			// when mass IS conserved, and the outlet mass-rescale then injects a spurious kick every step
+			// (the corner blow-up). dy·dz == h² on a uniform grid, so this is byte-identical there.
+			out[t] = u[g.uidx(iplane, j, k)] * g.dy(j) * g.dz(k);
 		}
 		__global__ void k_scale_uplane(double* u, MacGrid g, int iplane, double s, int njk)
 		{
@@ -467,7 +471,7 @@ namespace windcfd::core
 	{
 		int njk = g.ny * g.nz;
 		k_gather_uplane<<<gsz(njk), 256>>>(u, planeScratch, g, i_plane, njk);
-		return reduce_sum_gpu(planeScratch, njk) * g.h * g.h;
+		return reduce_sum_gpu(planeScratch, njk); // face-area (dy·dz) folded into the gather; uniform ⇒ Σu·h² as before
 	}
 	void ch_scale_uplane_gpu(double* u, MacGrid g, int i_plane, double s)
 	{ int njk = g.ny * g.nz; k_scale_uplane<<<gsz(njk), 256>>>(u, g, i_plane, s, njk); }

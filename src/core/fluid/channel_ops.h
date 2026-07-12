@@ -52,7 +52,8 @@ namespace windcfd::core
 	void ch_orlanski_gpu(double* u, MacGrid g, ChannelBC bc, double dt);
 	// Zero the interior solid faces (u·n=0 on obstacle surfaces & inside).
 	void ch_apply_solid_bc_gpu(double* u, double* v, double* w, const unsigned char* solid, MacGrid g);
-	// Sum u over an x-face plane i_plane, times h^2 (volumetric flux [m^3/s]).
+	// Volumetric flux [m^3/s] through the x-face plane i_plane: Σ u·dy(j)·dz(k) (true face areas, so it is
+	// correct on a graded grid; == Σu·h² on a uniform grid).
 	double ch_uplane_flux_gpu(const double* u, double* planeScratch, MacGrid g, int i_plane);
 	// Rescale the outlet u-plane (i=nx) by factor s.
 	void ch_scale_uplane_gpu(double* u, MacGrid g, int i_plane, double s);
