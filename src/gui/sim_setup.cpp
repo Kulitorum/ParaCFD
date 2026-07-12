@@ -84,7 +84,15 @@ namespace windcfd::gui
 		// is absolute domain metres and must enclose the placed building (windloads asserts bbox ⊆ core).
 		FineCoreSpec fc; fc.Lx = Lx; fc.Ly = Ly; fc.Lz = Lz; fc.h_fine = h; fc.growth = 1.15;
 		bool graded = false;
-		if (j.contains("fine_core") && j.at("fine_core").is_object())
+		if (ov && ov->active && ov->set_fine_core)
+		{
+			// GUI dock is authoritative for the fine core (the config's fine_core is ignored on Apply).
+			graded = ov->graded;
+			fc = ov->fine_core; fc.Lx = Lx; fc.Ly = Ly; fc.Lz = Lz;
+			if (!(fc.growth > 1.0)) fc.growth = 1.15;
+			if (!(fc.h_fine > 0.0) || fc.h_fine >= h) graded = false;
+		}
+		else if (j.contains("fine_core") && j.at("fine_core").is_object())
 		{
 			const auto& o = j.at("fine_core");
 			graded = o.value("enabled", true);
@@ -147,6 +155,7 @@ namespace windcfd::gui
 		SimInfo& info = recipe.info;
 		info.nx = g.nx; info.ny = g.ny; info.nz = g.nz;
 		info.h = graded ? fc.h_fine : h; // finest spacing (h_fine on a graded grid)
+		info.coarse_h = h;               // the "Voxel/cell size" control value (nominal coarse voxel; = h_fine's parent)
 		if (graded) { MacGrid hv = metrics->host_view(); info.Lx = hv.Lx(); info.Ly = hv.Ly(); info.Lz = hv.Lz(); }
 		else { info.Lx = g.nx * h; info.Ly = g.ny * h; info.Lz = g.nz * h; }
 		info.U = U; info.rho = rho; info.nu = nu;

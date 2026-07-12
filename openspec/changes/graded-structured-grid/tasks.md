@@ -119,12 +119,19 @@ start Phase B until Phase A's oracle is green.
       42×26×8 @ h_fine=0.05 steps 5176 steps, no crash; uniform run unregressed.
       NOTE: GUI dock fine-core controls + Apply-override fine-core fields are task 3.4 (deferred); the
       grid-dims readout still shows uniform-derived dims on a graded grid (cosmetic, 3.4).
-- [ ] 3.4 Add GUI fine-core controls in `main_window.*`; optionally auto-track the placed building
+- [x] 3.4 Add GUI fine-core controls in `main_window.*`; optionally auto-track the placed building
       bbox + margin (see design Open Questions)
-      → **DEFERRED (usability, not verifiable headlessly).** The graded grid is fully usable today via
-      the config `fine_core` object + Apply (re-reads the config). Dock spinboxes (h_fine/growth/box or
-      auto-track the placed building bbox + margin) + Apply-override fine-core fields + the grid-dims
-      readout using metric dims are GUI polish needing interactive testing (offscreen renders 0 frames).
+      → "Fine core (graded grid)" dock group: enable checkbox + h_fine/growth/margin spinboxes. On Apply,
+      `fillFineCoreOverride` fills a `GridOverride` (extended with `set_fine_core`/`graded`/`FineCoreSpec`)
+      — the box **auto-tracks the placed building/model bbox + margin** (`placed_mesh`), else preserves a
+      config/scene box, else a centred default. `build_sim` honours the override (GUI authoritative on
+      Apply; config otherwise). `syncFineCoreControls` seeds the dock from the loaded recipe so Apply
+      doesn't silently drop a config/scene graded grid. Added `SimInfo::coarse_h` so the voxel-size
+      control shows the coarse h (not h_fine). The grid readout computes the TRUE graded dims via
+      `GridMetrics::generate` (accurate cell count + VRAM guard) and labels it "(graded, h_fine=…)".
+      VERIFIED headless: uniform unregressed; graded config runs; graded config + `--apply-h` preserves
+      grading, no crash. (Visual dock cannot be exercised via `--offscreen`; the voxel-staircase overlay
+      spacing is still a known display-polish item.)
 
 ## 4. Phase B — Consumers
 

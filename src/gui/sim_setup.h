@@ -23,7 +23,8 @@ namespace windcfd::gui
 	struct SimInfo
 	{
 		int nx = 0, ny = 0, nz = 0;
-		double h = 0.05;               // voxel edge [m]
+		double h = 0.05;               // FINEST cell edge [m] (= h_fine on a graded grid, else the voxel size)
+		double coarse_h = 0.05;        // nominal coarse voxel size [m] (the "Voxel/cell size" control; = h if uniform)
 		double Lx = 0, Ly = 0, Lz = 0; // domain extents [m]
 		double U = 1.0;                // reference inlet speed [m/s]
 		double rho = 1.0;              // density [kg/m^3]
@@ -69,6 +70,14 @@ namespace windcfd::gui
 		double Lx = 0.0, Ly = 0.0, Lz = 0.0; // domain extents [m]
 		double h = 0.05;                     // voxel / cell size [m]
 		double U = 0.0;                      // inlet (current) speed [m/s]; > 0 overrides the config U
+
+		// Fine-core (graded grid) override from the GUI dock. When `set_fine_core` is true the GUI is
+		// authoritative for the fine core (the config's `fine_core` is ignored): `graded` is the enable
+		// checkbox and `fine_core` carries h_fine/growth + the auto-tracked box (absolute domain metres;
+		// Lx/Ly/Lz are re-set from the resolved domain). set_fine_core=false ⇒ use the config's fine_core.
+		bool set_fine_core = false;
+		bool graded = false;
+		windcfd::core::FineCoreSpec fine_core;
 	};
 
 	// Derive the integer grid dimensions from a domain + voxel size, EXACTLY as the sim builder does

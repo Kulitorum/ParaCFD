@@ -247,6 +247,16 @@ namespace windcfd::gui
 		QDoubleSpinBox* tidal_ramp_spin_ = nullptr;
 		void syncTidal();
 
+		// Fine-core (graded grid) dock controls. On Apply, when enabled, the fine core is regenerated
+		// with these params + a box auto-tracked around the placed building (+ margin). fillFineCoreOverride
+		// fills the GridOverride from the dock; syncFineCoreControls seeds the dock from the loaded recipe.
+		QCheckBox* fine_core_chk_ = nullptr;
+		QDoubleSpinBox* fc_hfine_spin_ = nullptr;
+		QDoubleSpinBox* fc_growth_spin_ = nullptr;
+		QDoubleSpinBox* fc_margin_spin_ = nullptr;
+		void fillFineCoreOverride(GridOverride& ov) const; // dock → override (auto-tracks the placed building bbox)
+		void syncFineCoreControls();                       // recipe_ → dock (reflect the loaded config/scene)
+
 		QLabel* grid_readout_ = nullptr;
 		QPushButton* apply_btn_ = nullptr;
 		QPushButton* play_btn_ = nullptr; // so a rebuild can honour the current play/pause state

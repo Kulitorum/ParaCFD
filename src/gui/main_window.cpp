@@ -345,6 +345,34 @@ namespace windcfd::gui
 		gridCol->addWidget(apply_btn_);
 		col->addWidget(gridGroup);
 
+		// --- Fine core (graded grid) — a UNIFORM h_fine core around the building inside a geometrically
+		// graded coarse far field, so a rounded corner is resolvable without a fine grid everywhere. Enable
+		// it, set h_fine / growth / margin, then Apply: the fine-core box AUTO-TRACKS the placed building
+		// bbox + margin and the grid is regenerated at t=0. Off ⇒ the uniform grid above (opt-in).
+		QGroupBox* fcGroup = new QGroupBox("Fine core (graded grid)");
+		QVBoxLayout* fcCol = new QVBoxLayout(fcGroup);
+		fine_core_chk_ = new QCheckBox("Enable graded fine core");
+		fine_core_chk_->setToolTip("Refine a uniform h_fine core around the building and grade coarser to the domain edges. Apply regenerates the grid. Off ⇒ the uniform grid above.");
+		fcCol->addWidget(fine_core_chk_);
+		QFormLayout* fcForm = new QFormLayout;
+		fcForm->setLabelAlignment(Qt::AlignLeft);
+		fc_hfine_spin_ = new QDoubleSpinBox;
+		fc_hfine_spin_->setRange(0.005, 1.0); fc_hfine_spin_->setDecimals(3); fc_hfine_spin_->setSingleStep(0.005); fc_hfine_spin_->setSuffix(" m"); fc_hfine_spin_->setValue(0.03);
+		fc_hfine_spin_->setToolTip("Fine-core cell size h_fine. Rule: ≈ r/10 for a corner radius r (≥10 cells across it). h_fine ≥ r/4 is below the resolution floor (rounded ≈ sharp).");
+		fc_growth_spin_ = new QDoubleSpinBox;
+		fc_growth_spin_->setRange(1.01, 1.30); fc_growth_spin_->setDecimals(2); fc_growth_spin_->setSingleStep(0.01); fc_growth_spin_->setValue(1.15);
+		fc_growth_spin_->setToolTip("Max adjacent-cell growth ratio in the graded far field (≤ 1.15 keeps near-2nd-order accuracy).");
+		fc_margin_spin_ = new QDoubleSpinBox;
+		fc_margin_spin_->setRange(0.0, 20.0); fc_margin_spin_->setDecimals(2); fc_margin_spin_->setSingleStep(0.25); fc_margin_spin_->setSuffix(" m"); fc_margin_spin_->setValue(1.0);
+		fc_margin_spin_->setToolTip("Margin the fine core extends beyond the placed building bbox (captures the near-wake before grading coarsens). MUST enclose the building — windloads asserts it.");
+		fcForm->addRow("Fine cell h_fine", fc_hfine_spin_);
+		fcForm->addRow("Growth ratio", fc_growth_spin_);
+		fcForm->addRow("Core margin", fc_margin_spin_);
+		fcCol->addLayout(fcForm);
+		connect(fine_core_chk_, &QCheckBox::toggled, this, [this](bool) { updateGridReadout(); });
+		connect(fc_hfine_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { updateGridReadout(); });
+		col->addWidget(fcGroup);
+
 		// --- Building group (centerline STEP → thickened walls + overhanging flat roof solid) ---------
 		// Load a 3D-printing CENTERLINE STEP (File ▸ Open centerline STEP…), dial in the wall/roof params
 		// here, then Build: the domain is sized around the sectioned footprint (with wind clearance) and
@@ -902,14 +930,69 @@ namespace windcfd::gui
 		lx_spin_->setValue(info.Lx);
 		ly_spin_->setValue(info.Ly);
 		lz_spin_->setValue(info.Lz);
-		h_spin_->setValue(info.h);
+		h_spin_->setValue(info.coarse_h); // the coarse voxel size (NOT h_fine on a graded grid)
 		u_spin_->setValue(info.U);
+		syncFineCoreControls(); // reflect the loaded graded fine-core state in the dock
 		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
 			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == windcfd::core::INLET_LOGLAW ? 1 : 0);
 		}
 		updateGridReadout();
+	}
+
+	// Dock → GridOverride: on Apply the GUI is authoritative for the fine core. The box AUTO-TRACKS the
+	// placed building/model bbox + the margin (design lean: auto-track, overridable); with no model yet a
+	// centred default is used. Off ⇒ graded=false ⇒ the uniform grid. The box MUST enclose the building —
+	// windloads asserts bbox ⊆ the uniform fine core.
+	void MainWindow::fillFineCoreOverride(GridOverride& ov) const
+	{
+		ov.set_fine_core = true;
+		ov.graded = fine_core_chk_ && fine_core_chk_->isChecked();
+		if (!ov.graded) return;
+		windcfd::core::FineCoreSpec& fc = ov.fine_core;
+		fc.Lx = ov.Lx; fc.Ly = ov.Ly; fc.Lz = ov.Lz; // complete the spec so GridMetrics::generate can use it directly
+		fc.h_fine = fc_hfine_spin_ ? fc_hfine_spin_->value() : 0.03;
+		fc.growth = fc_growth_spin_ ? fc_growth_spin_->value() : 1.15;
+		const double margin = fc_margin_spin_ ? fc_margin_spin_->value() : 1.0;
+		const windcfd::core::TriMesh& src = !centerline_mesh_.empty() ? centerline_mesh_ : model_mesh_;
+		if (!src.empty())
+		{
+			const windcfd::core::ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
+				? viewer_->modelPlacement()
+				: windcfd::core::place_model_on_bed(src, ov.Lx, ov.Ly);
+			const windcfd::core::TriMesh placed = windcfd::core::placed_mesh(src, place);
+			fc.x0 = (double)placed.bbox_min[0] - margin; fc.x1 = (double)placed.bbox_max[0] + margin;
+			fc.y0 = (double)placed.bbox_min[1] - margin; fc.y1 = (double)placed.bbox_max[1] + margin;
+			fc.z0 = 0.0; fc.z1 = (double)placed.bbox_max[2] + margin; // ground → building top + margin (covers the roof)
+		}
+		else if (recipe_.graded && recipe_.fine_core.h_fine > 0.0)
+		{
+			// No model to auto-track, but a config/scene already defines the box — preserve it across Apply.
+			fc.x0 = recipe_.fine_core.x0; fc.x1 = recipe_.fine_core.x1;
+			fc.y0 = recipe_.fine_core.y0; fc.y1 = recipe_.fine_core.y1;
+			fc.z0 = recipe_.fine_core.z0; fc.z1 = recipe_.fine_core.z1;
+		}
+		else
+		{
+			fc.x0 = 0.30 * ov.Lx; fc.x1 = 0.70 * ov.Lx; // centred default until a building is placed
+			fc.y0 = 0.30 * ov.Ly; fc.y1 = 0.70 * ov.Ly;
+			fc.z0 = 0.0; fc.z1 = 0.50 * ov.Lz;
+		}
+	}
+
+	// recipe_ → dock: reflect the loaded config/scene fine-core state so a subsequent Apply preserves it
+	// (else pressing Apply with the checkbox off would silently drop a config/scene graded grid to uniform).
+	void MainWindow::syncFineCoreControls()
+	{
+		if (!fine_core_chk_) return;
+		const QSignalBlocker b0(fine_core_chk_), b1(fc_hfine_spin_), b2(fc_growth_spin_);
+		fine_core_chk_->setChecked(recipe_.graded);
+		if (recipe_.graded && recipe_.fine_core.h_fine > 0.0)
+		{
+			fc_hfine_spin_->setValue(recipe_.fine_core.h_fine);
+			fc_growth_spin_->setValue(recipe_.fine_core.growth);
+		}
 	}
 
 	// Apply grid cap sized to the actual device: ~80% of TOTAL VRAM at the ~240 B/cell gauge below. Using
@@ -937,14 +1020,30 @@ namespace windcfd::gui
 		if (!grid_readout_ || !lx_spin_) return;
 		int nx = 0, ny = 0, nz = 0;
 		grid_dims_for(lx_spin_->value(), ly_spin_->value(), lz_spin_->value(), h_spin_->value(), nx, ny, nz);
+		// Graded fine core: the actual cell count is set by the generator (fine core + graded far field), not
+		// the coarse-uniform floor(L/h) — compute the real dims so the readout + the VRAM guard are truthful.
+		bool graded = false;
+		if (fine_core_chk_ && fine_core_chk_->isChecked())
+		{
+			GridOverride ov; ov.active = true;
+			ov.Lx = lx_spin_->value(); ov.Ly = ly_spin_->value(); ov.Lz = lz_spin_->value(); ov.h = h_spin_->value();
+			fillFineCoreOverride(ov);
+			if (ov.graded && ov.fine_core.h_fine > 0.0 && ov.fine_core.h_fine < ov.h)
+			{
+				const windcfd::core::GridMetrics gm = windcfd::core::GridMetrics::generate(ov.fine_core);
+				nx = gm.nx(); ny = gm.ny(); nz = gm.nz(); graded = true;
+			}
+		}
 		const long long cells = (long long)nx * ny * nz;
 		const long long cap = maxCells();
 		// Rough device-memory gauge (fluid + snapshot double fields) — an order-of-magnitude hint, not an
 		// allocation contract. Shown against the card's total VRAM so it's clear how much room is left.
 		const double gb = cells * 240.0 / (1024.0 * 1024.0 * 1024.0);
 		const bool ok = cells > 0 && cells <= cap;
-		QString txt = QString("→ %1 × %2 × %3 = %4 cells\n  (~%5 GB")
-			.arg(nx).arg(ny).arg(nz).arg(cells).arg(gb, 0, 'f', 1);
+		QString txt = QString("→ %1 × %2 × %3 = %4 cells%5\n  (~%6 GB")
+			.arg(nx).arg(ny).arg(nz).arg(cells)
+			.arg(graded ? QString("  (graded, h_fine=%1 m)").arg(fc_hfine_spin_->value(), 0, 'f', 3) : QString())
+			.arg(gb, 0, 'f', 1);
 		if (vram_total_gb_ > 0.0) txt += QString(" of %1 GB").arg(vram_total_gb_, 0, 'f', 0);
 		txt += " VRAM)";
 		if (!ok) txt += QString("\n⚠ too large (> %1 M cells ≈ 80%% of VRAM) — increase h").arg(cap / 1000000);
@@ -1126,6 +1225,7 @@ namespace windcfd::gui
 			statusBar()->showMessage("invalid domain/voxel size", 4000);
 			return;
 		}
+		fillFineCoreOverride(ov); // GUI drives the fine core on Apply: enable + h_fine/growth + auto-tracked box
 
 		// Rebuild the fluid viewer at the new grid: re-run build_sim with only the domain + h overridden —
 		// every other physics parameter is preserved. A loaded STEP model is kept (re-displayed and
