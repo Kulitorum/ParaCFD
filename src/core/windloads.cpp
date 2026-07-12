@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace windcfd::core
 {
@@ -35,7 +36,7 @@ namespace windcfd::core
 		std::vector<char> front((std::size_t)ny * nz, 0), plan((std::size_t)nx * ny, 0);
 		double cx = 0, cy = 0, cz = 0;
 		long long scnt = 0;
-		int kmin = nz, kmax = -1;
+		int imin = nx, imax = -1, jmin = ny, jmax = -1, kmin = nz, kmax = -1;
 		for (int k = 0; k < nz; ++k)
 			for (int j = 0; j < ny; ++j)
 				for (int i = 0; i < nx; ++i)
@@ -45,12 +46,33 @@ namespace windcfd::core
 						cy += (j + 0.5) * h;
 						cz += (k + 0.5) * h;
 						++scnt;
+						if (i < imin) imin = i;
+						if (i > imax) imax = i;
+						if (j < jmin) jmin = j;
+						if (j > jmax) jmax = j;
 						if (k < kmin) kmin = k;
 						if (k > kmax) kmax = k;
 						front[(std::size_t)k * ny + j] = 1;
 						plan[(std::size_t)j * nx + i] = 1;
 					}
 		if (scnt == 0) return L;
+
+		// Task 4.3 guard (graded grid): this integration assumes every exposed building face is a
+		// h_fine² square (area=h·h, A_frontal=count·area, L_ref=count·h, arms=(i+0.5)h). That holds
+		// ONLY where the building sits in the UNIFORM fine core (all local dx=dy=dz=g.h=h_fine). A
+		// surface cell in the graded transition (dx≠h_fine) breaks A_frontal=count·area, so treat it
+		// as an error rather than silently reporting wrong coefficients — enlarge the fine-core box to
+		// enclose the building. On a legacy uniform grid dx(i)==g.h everywhere, so this is a no-op.
+		// (g MUST be a HOST-view MacGrid here — the accessors deref host metric arrays; see sim_worker.)
+		{
+			const double tol = 1e-6 * h;
+			for (int i = imin; i <= imax; ++i)
+				if (std::fabs(g.dx(i) - h) > tol) throw std::runtime_error("windloads: building x-extent leaves the uniform fine core (enlarge fine_core box)");
+			for (int j = jmin; j <= jmax; ++j)
+				if (std::fabs(g.dy(j) - h) > tol) throw std::runtime_error("windloads: building y-extent leaves the uniform fine core (enlarge fine_core box)");
+			for (int k = kmin; k <= kmax; ++k)
+				if (std::fabs(g.dz(k) - h) > tol) throw std::runtime_error("windloads: building z-extent leaves the uniform fine core (enlarge fine_core box)");
+		}
 		cx /= scnt;
 		cy /= scnt;
 		cz /= scnt;

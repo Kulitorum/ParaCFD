@@ -90,6 +90,7 @@ int main(int argc, char** argv)
 	std::string tidal_arg;
 	std::string clip_arg;
 	bool tracers_on = false;
+	bool show_grid = false;
 	int tracers_density = 0;
 	std::string save_scene, load_scene;
 	std::string model_place_arg;
@@ -115,6 +116,7 @@ int main(int argc, char** argv)
 		else if (a == "--tidal" && i + 1 < argc) tidal_arg = argv[++i];
 		else if (a == "--clip" && i + 1 < argc) clip_arg = argv[++i];
 		else if (a == "--tracers") { tracers_on = true; if (i + 1 < argc && argv[i + 1][0] != '-') tracers_density = std::atoi(argv[++i]); }
+		else if (a == "--show-grid") show_grid = true;
 		else if (a == "--autosave" && i + 1 < argc) autosave = std::atoi(argv[++i]);
 		else if (a == "--load-scene" && i + 1 < argc) load_scene = argv[++i];
 		else if (a == "--save-scene" && i + 1 < argc) save_scene = argv[++i];
@@ -348,6 +350,13 @@ int main(int argc, char** argv)
 		win.viewer()->setTracerGridDensity(dens);
 		win.viewer()->setTracerMode3D(true);
 		win.viewer()->setShowTracers(true);
+	}
+
+	// Optional headless smoke of the "Show grid on slice" overlay (graded-cell wireframe on the plane).
+	if (show_grid && win.viewer())
+	{
+		std::fprintf(stderr, "[G1] --show-grid: enabling the grid overlay on the slice plane\n");
+		win.viewer()->setShowGrid(true);
 	}
 
 	// Optional headless smoke of the "Fast sim" graphics throttle (worker snapshot + repaint cadence).

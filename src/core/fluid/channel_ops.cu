@@ -26,9 +26,9 @@ namespace windcfd::core
 		{ return comp == 0 ? g.uidx(i, j, k) : comp == 1 ? g.vidx(i, j, k) : g.widx(i, j, k); }
 		WINDCFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
 		{
-			if (comp == 0) { x = i * g.h; y = (j + 0.5) * g.h; z = (k + 0.5) * g.h; }
-			else if (comp == 1) { x = (i + 0.5) * g.h; y = j * g.h; z = (k + 0.5) * g.h; }
-			else { x = (i + 0.5) * g.h; y = (j + 0.5) * g.h; z = k * g.h; }
+			if (comp == 0) { x = g.xf(i); y = g.yc(j); z = g.zc(k); }
+			else if (comp == 1) { x = g.xc(i); y = g.yf(j); z = g.zc(k); }
+			else { x = g.xc(i); y = g.yc(j); z = g.zf(k); }
 		}
 		// advection updates the interior faces; inlet(i=0)/outlet(i=nx) u-faces and the
 		// free-slip normal v/w faces are set by the BC steps, so copy them through.
@@ -49,7 +49,7 @@ namespace windcfd::core
 		// ---- advection helpers ------------------------------------------------
 		WINDCFD_HD inline bool cell_of_point_solid(MacGrid g, const unsigned char* solid, double x, double y, double z)
 		{
-			int i = (int)floor(x / g.h), j = (int)floor(y / g.h), k = (int)floor(z / g.h);
+			int i = (int)floor(grid_fx(g, x)), j = (int)floor(grid_fy(g, y)), k = (int)floor(grid_fz(g, z));
 			return ch_is_solid(solid, g, i, j, k);
 		}
 		// Pull a backtrace/forward-trace endpoint out of any solid it landed in, by
@@ -165,20 +165,20 @@ namespace windcfd::core
 			MacGrid g, ChannelBC bc, double Cs, int i, int j, int k)
 		{
 			if (ch_is_solid(solid, g, i, j, k)) return 0.0;
-			double inv = 1.0 / g.h, inv2 = 0.5 / g.h;
-			double dudx = (ch_fetch_u(u, g, bc, i + 1, j, k) - ch_fetch_u(u, g, bc, i, j, k)) * inv;
-			double dvdy = (ch_fetch_v(v, g, bc, i, j + 1, k) - ch_fetch_v(v, g, bc, i, j, k)) * inv;
-			double dwdz = (ch_fetch_w(w, g, bc, i, j, k + 1) - ch_fetch_w(w, g, bc, i, j, k)) * inv;
-			double dudy = (uc_(u, g, bc, i, j + 1, k) - uc_(u, g, bc, i, j - 1, k)) * inv2;
-			double dudz = (uc_(u, g, bc, i, j, k + 1) - uc_(u, g, bc, i, j, k - 1)) * inv2;
-			double dvdx = (vc_(v, g, bc, i + 1, j, k) - vc_(v, g, bc, i - 1, j, k)) * inv2;
-			double dvdz = (vc_(v, g, bc, i, j, k + 1) - vc_(v, g, bc, i, j, k - 1)) * inv2;
-			double dwdx = (wc_(w, g, bc, i + 1, j, k) - wc_(w, g, bc, i - 1, j, k)) * inv2;
-			double dwdy = (wc_(w, g, bc, i, j + 1, k) - wc_(w, g, bc, i, j - 1, k)) * inv2;
+			double invx = 1.0 / g.dx(i), invy = 1.0 / g.dy(j), invz = 1.0 / g.dz(k), sx = 1.0 / (g.gapx(i - 1) + g.gapx(i)), sy = 1.0 / (g.gapy(j - 1) + g.gapy(j)), sz = 1.0 / (g.gapz(k - 1) + g.gapz(k));
+			double dudx = (ch_fetch_u(u, g, bc, i + 1, j, k) - ch_fetch_u(u, g, bc, i, j, k)) * invx;
+			double dvdy = (ch_fetch_v(v, g, bc, i, j + 1, k) - ch_fetch_v(v, g, bc, i, j, k)) * invy;
+			double dwdz = (ch_fetch_w(w, g, bc, i, j, k + 1) - ch_fetch_w(w, g, bc, i, j, k)) * invz;
+			double dudy = (uc_(u, g, bc, i, j + 1, k) - uc_(u, g, bc, i, j - 1, k)) * sy;
+			double dudz = (uc_(u, g, bc, i, j, k + 1) - uc_(u, g, bc, i, j, k - 1)) * sz;
+			double dvdx = (vc_(v, g, bc, i + 1, j, k) - vc_(v, g, bc, i - 1, j, k)) * sx;
+			double dvdz = (vc_(v, g, bc, i, j, k + 1) - vc_(v, g, bc, i, j, k - 1)) * sz;
+			double dwdx = (wc_(w, g, bc, i + 1, j, k) - wc_(w, g, bc, i - 1, j, k)) * sx;
+			double dwdy = (wc_(w, g, bc, i, j + 1, k) - wc_(w, g, bc, i, j - 1, k)) * sy;
 			double Sxx = dudx, Syy = dvdy, Szz = dwdz;
 			double Sxy = 0.5 * (dudy + dvdx), Sxz = 0.5 * (dudz + dwdx), Syz = 0.5 * (dvdz + dwdy);
 			double Smag = sqrt(2.0 * (Sxx * Sxx + Syy * Syy + Szz * Szz + 2.0 * (Sxy * Sxy + Sxz * Sxz + Syz * Syz)));
-			double cd = Cs * g.h; return cd * cd * Smag;
+			double cd = Cs * cbrt(g.dx(i) * g.dy(j) * g.dz(k)); return cd * cd * Smag;
 		}
 		__global__ void k_nut(const double* u, const double* v, const double* w, double* nut, const unsigned char* solid,
 			MacGrid g, ChannelBC bc, double Cs, int total)
@@ -197,7 +197,7 @@ namespace windcfd::core
 			int idx = comp_idx(comp, g, i, j, k);
 			if (comp_solidface(comp, solid, g, i, j, k)) { out[idx] = 0.0; return; }
 			if (!comp_interior(comp, g, i, j, k)) { out[idx] = field[idx]; return; }
-			double c = field[idx], h2 = g.h * g.h;
+			double c = field[idx]; double hL, hR;
 			int na = normal_axis(comp);
 			double lap = 0.0;
 			// x pair
@@ -206,7 +206,8 @@ namespace windcfd::core
 				if (na == 0) { np = chf(comp, field, g, bc, i + 1, j, k); nm = chf(comp, field, g, bc, i - 1, j, k); }
 				else { np = comp_solidface(comp, solid, g, i + 1, j, k) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i + 1, j, k);
 					nm = comp_solidface(comp, solid, g, i - 1, j, k) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i - 1, j, k); }
-				lap += (np - c) + (nm - c);
+				hL = (na == 0) ? g.dx(i - 1) : g.gapx(i - 1); hR = (na == 0) ? g.dx(i) : g.gapx(i);
+				lap += d2_axis(nm, c, np, hL, hR);
 			}
 			// y pair
 			{
@@ -214,7 +215,8 @@ namespace windcfd::core
 				if (na == 1) { np = chf(comp, field, g, bc, i, j + 1, k); nm = chf(comp, field, g, bc, i, j - 1, k); }
 				else { np = comp_solidface(comp, solid, g, i, j + 1, k) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i, j + 1, k);
 					nm = comp_solidface(comp, solid, g, i, j - 1, k) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i, j - 1, k); }
-				lap += (np - c) + (nm - c);
+				hL = (na == 1) ? g.dy(j - 1) : g.gapy(j - 1); hR = (na == 1) ? g.dy(j) : g.gapy(j);
+				lap += d2_axis(nm, c, np, hL, hR);
 			}
 			// z pair
 			{
@@ -222,9 +224,9 @@ namespace windcfd::core
 				if (na == 2) { np = chf(comp, field, g, bc, i, j, k + 1); nm = chf(comp, field, g, bc, i, j, k - 1); }
 				else { np = comp_solidface(comp, solid, g, i, j, k + 1) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i, j, k + 1);
 					nm = comp_solidface(comp, solid, g, i, j, k - 1) ? wall_ghost(c, bc) : chf(comp, field, g, bc, i, j, k - 1); }
-				lap += (np - c) + (nm - c);
+				hL = (na == 2) ? g.dz(k - 1) : g.gapz(k - 1); hR = (na == 2) ? g.dz(k) : g.gapz(k);
+				lap += d2_axis(nm, c, np, hL, hR);
 			}
-			lap /= h2;
 			double nut_f = 0.0;
 			if (nut)
 			{
@@ -260,19 +262,24 @@ namespace windcfd::core
 			int iplane = bc.flow_sign < 0 ? g.nx : 0; // reversed tide: Dirichlet inlet on the xmax face
 			u[g.uidx(iplane, j, k)] = channel_inlet_u(bc, g, k);
 		}
-		__global__ void k_orlanski(double* u, MacGrid g, ChannelBC bc, double coef, int njk)
+		__global__ void k_orlanski(double* u, MacGrid g, ChannelBC bc, double Uc_dt, int njk)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= njk) return;
 			int j = t % g.ny, k = t / g.ny;
+			// coef = Uc·dt/Δx with Δx the LOCAL outlet cell width — NOT the scalar h. On a graded grid the
+			// outlet sits in the coarse far field (dx(nx-1) ≫ h_fine), so dividing by h would over-convect the
+			// outlet by dx/h (≈6× here) and pump an instability upstream from the exit. Uniform ⇒ dx==h (same).
 			if (bc.flow_sign < 0)
 			{
 				// Reversed tide: outlet on the xmin face; outflow is −x, so clamp to ≤ 0 (an incoming +x
 				// jet at this exit is what the flux-rescale would otherwise amplify).
+				double coef = Uc_dt / g.dx(0); if (coef > 1.0) coef = 1.0; else if (coef < 0.0) coef = 0.0;
 				double ub = u[g.uidx(0, j, k)], uin = u[g.uidx(1, j, k)];
 				double uo = ub - coef * (ub - uin); u[g.uidx(0, j, k)] = uo < 0.0 ? uo : 0.0;
 			}
 			else
 			{
+				double coef = Uc_dt / g.dx(g.nx - 1); if (coef > 1.0) coef = 1.0; else if (coef < 0.0) coef = 0.0;
 				double ub = u[g.uidx(g.nx, j, k)], uin = u[g.uidx(g.nx - 1, j, k)];
 				double uo = ub - coef * (ub - uin); u[g.uidx(g.nx, j, k)] = uo > 0.0 ? uo : 0.0; // outflow-only: clamp reversed inflow at the +X exit (else the flux-rescale amplifies a reversed jet — the seabed exit runaway)
 			}
@@ -301,7 +308,11 @@ namespace windcfd::core
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= njk) return;
 			int j = t % g.ny, k = t / g.ny;
-			out[t] = u[g.uidx(iplane, j, k)];
+			// Weight by the TRUE face area dy(j)·dz(k) — NOT a uniform h². On a graded grid the inlet/outlet
+			// plane has non-uniform cells; a plain Σu·h² over-counts the fine cells, so q_in/q_out ≠ 1 even
+			// when mass IS conserved, and the outlet mass-rescale then injects a spurious kick every step
+			// (the corner blow-up). dy·dz == h² on a uniform grid, so this is byte-identical there.
+			out[t] = u[g.uidx(iplane, j, k)] * g.dy(j) * g.dz(k);
 		}
 		__global__ void k_scale_uplane(double* u, MacGrid g, int iplane, double s, int njk)
 		{
@@ -326,11 +337,28 @@ namespace windcfd::core
 			if (k > 0 && !ch_is_solid(solid, g, i, j, k - 1)) { ++count; nbsum += p[g.pidx(i, j, k - 1)]; }
 			if (k < g.nz - 1 && !ch_is_solid(solid, g, i, j, k + 1)) { ++count; nbsum += p[g.pidx(i, j, k + 1)]; }
 		}
+		// Variable-coefficient FV Poisson stencil (masked + Dirichlet-outlet), the metric-aware form of
+		// nb_stencil. Per real fluid face f: w_f = 1/(d_centre-to-centre · cell_width_normal). The
+		// Dirichlet-outlet ghost (p=0) on the domain x-face uses d_f = the edge cell width (the existing
+		// mirror-cell convention, weight 1/dx² uniform). diag = Σ w_f, wnb = Σ w_f·p_nb ⇒ Ap = diag·p_c − wnb.
+		// Uniform spacings ⇒ (count·p_c − nbsum)/h², identical to nb_stencil. Stays SPD.
+		WINDCFD_HD inline void fv_stencil_ch(const double* p, const unsigned char* solid, MacGrid g, int dir_xmax, int i, int j, int k, double& diag, double& wnb)
+		{
+			diag = 0.0; wnb = 0.0;
+			if (i > 0 && !ch_is_solid(solid, g, i - 1, j, k)) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i - 1, j, k)]; }
+			else if (i == 0 && dir_xmax < 0) diag += 1.0 / (g.dx(0) * g.dx(0)); // reversed outlet Dirichlet p=0 at xmin
+			if (i < g.nx - 1) { if (!ch_is_solid(solid, g, i + 1, j, k)) { double w = 1.0 / (g.dxc(i + 1) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i + 1, j, k)]; } }
+			else if (dir_xmax > 0) diag += 1.0 / (g.dx(g.nx - 1) * g.dx(g.nx - 1)); // outlet Dirichlet p=0 at xmax
+			if (j > 0 && !ch_is_solid(solid, g, i, j - 1, k)) { double w = 1.0 / (g.dyc(j) * g.dy(j)); diag += w; wnb += w * p[g.pidx(i, j - 1, k)]; }
+			if (j < g.ny - 1 && !ch_is_solid(solid, g, i, j + 1, k)) { double w = 1.0 / (g.dyc(j + 1) * g.dy(j)); diag += w; wnb += w * p[g.pidx(i, j + 1, k)]; }
+			if (k > 0 && !ch_is_solid(solid, g, i, j, k - 1)) { double w = 1.0 / (g.dzc(k) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k - 1)]; }
+			if (k < g.nz - 1 && !ch_is_solid(solid, g, i, j, k + 1)) { double w = 1.0 / (g.dzc(k + 1) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k + 1)]; }
+		}
 		WINDCFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
-			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]
-				+ v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]
-				+ w[g.widx(i, j, k + 1)] - w[g.widx(i, j, k)]) / g.h;
+			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]) / g.dx(i)
+				+ (v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]) / g.dy(j)
+				+ (w[g.widx(i, j, k + 1)] - w[g.widx(i, j, k)]) / g.dz(k);
 		}
 		__global__ void k_rhs(const double* u, const double* v, const double* w, double* rhs, const unsigned char* solid, MacGrid g, double rho, double dt, int n)
 		{
@@ -343,26 +371,26 @@ namespace windcfd::core
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
 			if (ch_is_solid(solid, g, i, j, k)) { Ap[t] = 0.0; return; }
-			int count; double nbsum; nb_stencil(p, solid, g, dir_xmax, i, j, k, count, nbsum);
-			Ap[t] = (count * p[t] - nbsum) / (g.h * g.h);
+			double diag, wnb; fv_stencil_ch(p, solid, g, dir_xmax, i, j, k, diag, wnb);
+			Ap[t] = diag * p[t] - wnb;
 		}
 		__global__ void k_residual(const double* p, const double* rhs, double* r, const unsigned char* solid, MacGrid g, int dir_xmax, int n)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
 			if (ch_is_solid(solid, g, i, j, k)) { r[t] = 0.0; return; }
-			int count; double nbsum; nb_stencil(p, solid, g, dir_xmax, i, j, k, count, nbsum);
-			r[t] = rhs[t] - (count * p[t] - nbsum) / (g.h * g.h);
+			double diag, wnb; fv_stencil_ch(p, solid, g, dir_xmax, i, j, k, diag, wnb);
+			r[t] = rhs[t] - (diag * p[t] - wnb);
 		}
 		__global__ void k_jacobi(const double* p, const double* rhs, double* pout, const unsigned char* solid, MacGrid g, int dir_xmax, double omega, int n)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= n) return;
 			int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
 			if (ch_is_solid(solid, g, i, j, k)) { pout[t] = 0.0; return; }
-			int count; double nbsum; nb_stencil(p, solid, g, dir_xmax, i, j, k, count, nbsum);
-			if (count == 0) { pout[t] = p[t]; return; }
-			double diag = count / (g.h * g.h);
-			double Ap = (count * p[t] - nbsum) / (g.h * g.h);
+			double diag, wnb; fv_stencil_ch(p, solid, g, dir_xmax, i, j, k, diag, wnb);
+			if (diag == 0.0) { pout[t] = p[t]; return; }
+			/* diag already set by fv_stencil_ch */
+			double Ap = diag * p[t] - wnb;
 			pout[t] = p[t] + omega * (rhs[t] - Ap) / diag;
 		}
 		__global__ void k_gs(double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax, int band, int color, int n)
@@ -373,9 +401,79 @@ namespace windcfd::core
 			bool inband = i < band || i >= g.nx - band || j < band || j >= g.ny - band || k < band || k >= g.nz - band;
 			if (!inband) return;
 			if (ch_is_solid(solid, g, i, j, k)) return;
-			int count; double nbsum; nb_stencil(p, solid, g, dir_xmax, i, j, k, count, nbsum);
-			if (count == 0) return;
-			p[t] = (rhs[t] * g.h * g.h + nbsum) / count;
+			double diag, wnb; fv_stencil_ch(p, solid, g, dir_xmax, i, j, k, diag, wnb);
+			if (diag == 0.0) return;
+			p[t] = (rhs[t] + wnb) / diag;
+		}
+		// ---- zebra line smoother (graded anisotropy) --------------------------
+		// Tridiagonal row of the FV operator at (i,j,k) restricted to a line along `axis`:
+		// a/c = −(coupling to the prev/next line cell), b = the FULL FV diagonal, d = rhs +
+		// Σ transverse w·p_nb. The face weights REPRODUCE fv_stencil_ch exactly (same
+		// expressions, fv_stencil_ch itself untouched to keep the uniform golden bitwise).
+		// Solid cells and isolated fluid cells (diag==0) become identity rows, matching
+		// k_jacobi/k_zero_solids.
+		WINDCFD_HD inline void fv_line_row(const double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax,
+			int i, int j, int k, int axis, double& a, double& b, double& c, double& d)
+		{
+			int idx = g.pidx(i, j, k);
+			if (ch_is_solid(solid, g, i, j, k)) { a = 0.0; b = 1.0; c = 0.0; d = 0.0; return; }
+			double diag = 0.0, tr = 0.0, wlo = 0.0, wup = 0.0;
+			if (i > 0 && !ch_is_solid(solid, g, i - 1, j, k)) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; if (axis == 0) wlo = w; else tr += w * p[g.pidx(i - 1, j, k)]; }
+			else if (i == 0 && dir_xmax < 0) diag += 1.0 / (g.dx(0) * g.dx(0)); // reversed outlet Dirichlet p=0 at xmin
+			if (i < g.nx - 1) { if (!ch_is_solid(solid, g, i + 1, j, k)) { double w = 1.0 / (g.dxc(i + 1) * g.dx(i)); diag += w; if (axis == 0) wup = w; else tr += w * p[g.pidx(i + 1, j, k)]; } }
+			else if (dir_xmax > 0) diag += 1.0 / (g.dx(g.nx - 1) * g.dx(g.nx - 1)); // outlet Dirichlet p=0 at xmax
+			if (j > 0 && !ch_is_solid(solid, g, i, j - 1, k)) { double w = 1.0 / (g.dyc(j) * g.dy(j)); diag += w; if (axis == 1) wlo = w; else tr += w * p[g.pidx(i, j - 1, k)]; }
+			if (j < g.ny - 1 && !ch_is_solid(solid, g, i, j + 1, k)) { double w = 1.0 / (g.dyc(j + 1) * g.dy(j)); diag += w; if (axis == 1) wup = w; else tr += w * p[g.pidx(i, j + 1, k)]; }
+			if (k > 0 && !ch_is_solid(solid, g, i, j, k - 1)) { double w = 1.0 / (g.dzc(k) * g.dz(k)); diag += w; if (axis == 2) wlo = w; else tr += w * p[g.pidx(i, j, k - 1)]; }
+			if (k < g.nz - 1 && !ch_is_solid(solid, g, i, j, k + 1)) { double w = 1.0 / (g.dzc(k + 1) * g.dz(k)); diag += w; if (axis == 2) wup = w; else tr += w * p[g.pidx(i, j, k + 1)]; }
+			if (diag == 0.0) { a = 0.0; b = 1.0; c = 0.0; d = p[idx]; return; }
+			a = -wlo; b = diag; c = -wup; d = rhs[idx] + tr;
+		}
+		// Solve one whole line exactly (Thomas), in place in p. In-place is race-free under
+		// zebra colouring: a line's transverse reads all land on OPPOSITE-colour lines, and a
+		// row's own old p is consumed before its slot is reused for the swept RHS d'. Solid
+		// faces zero the along-line coupling (a=0), so the chain segments itself across
+		// obstacles. A pure-Neumann segment (no transverse fluid coupling anywhere, no
+		// Dirichlet end) is singular — its last pivot vanishes; that row degrades to identity.
+		// The trigger depends only on matrix coefficients (never on rhs/p), so the smoother
+		// stays one fixed linear operator.
+		WINDCFD_HD inline void line_solve_ch(double* p, const double* rhs, double* cprime, const unsigned char* solid,
+			MacGrid g, int dir_xmax, int axis, int line)
+		{
+			int n, stride, i = 0, j = 0, k = 0;
+			if (axis == 0) { n = g.nx; stride = 1; j = line % g.ny; k = line / g.ny; }
+			else if (axis == 1) { n = g.ny; stride = g.nx; i = line % g.nx; k = line / g.nx; }
+			else { n = g.nz; stride = g.nx * g.ny; i = line % g.nx; j = line / g.nx; }
+			int base = g.pidx(i, j, k); // axis coordinate is 0 here
+			double cp = 0.0, dp = 0.0;
+			for (int m = 0; m < n; ++m)
+			{
+				int ii = i, jj = j, kk = k;
+				if (axis == 0) ii = m; else if (axis == 1) jj = m; else kk = m;
+				int idx = base + m * stride;
+				double a, b, c, d;
+				fv_line_row(p, rhs, solid, g, dir_xmax, ii, jj, kk, axis, a, b, c, d);
+				double denom = b - a * cp;
+				if (fabs(denom) > 1e-12 * (fabs(b) + fabs(a * cp))) { cp = c / denom; dp = (d - a * dp) / denom; }
+				else { cp = 0.0; dp = p[idx]; } // singular pivot: keep this cell (identity row)
+				cprime[idx] = cp;
+				p[idx] = dp;
+			}
+			double x = p[base + (n - 1) * stride];
+			for (int m = n - 2; m >= 0; --m)
+			{
+				int idx = base + m * stride;
+				x = p[idx] - cprime[idx] * x;
+				p[idx] = x;
+			}
+		}
+		__global__ void k_line_smooth(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color, int nlines)
+		{
+			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= nlines) return;
+			int t1 = (axis == 0) ? t % g.ny : t % g.nx;
+			int t2 = (axis == 0) ? t / g.ny : t / g.nx;
+			if (((t1 + t2) & 1) != color) return;
+			line_solve_ch(p, rhs, cprime, solid, g, dir_xmax, axis, t);
 		}
 		__global__ void k_subgrad(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, double coef, int dir_xmax)
 		{
@@ -387,24 +485,24 @@ namespace windcfd::core
 				if (i >= 1 && i <= g.nx - 1)
 				{
 					if (!ch_is_solid(solid, g, i - 1, j, k) && !ch_is_solid(solid, g, i, j, k))
-						u[t] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.h;
+						u[t] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.dxc(i);
 				}
 				else if (i == g.nx && dir_xmax > 0 && !ch_is_solid(solid, g, g.nx - 1, j, k))
-					u[t] -= coef * (0.0 - p[g.pidx(g.nx - 1, j, k)]) / g.h; // outlet ghost p=0 at xmax
+					u[t] -= coef * (0.0 - p[g.pidx(g.nx - 1, j, k)]) / g.dx(g.nx - 1); // outlet ghost p=0 at xmax
 				else if (i == 0 && dir_xmax < 0 && !ch_is_solid(solid, g, 0, j, k))
-					u[t] -= coef * (p[g.pidx(0, j, k)] - 0.0) / g.h; // reversed outlet ghost p=0 at xmin
+					u[t] -= coef * (p[g.pidx(0, j, k)] - 0.0) / g.dx(0); // reversed outlet ghost p=0 at xmin
 			}
 			else if (t < nu + nv)
 			{
 				int s = t - nu; int i = s % g.nx, j = (s / g.nx) % (g.ny + 1), k = s / (g.nx * (g.ny + 1));
 				if (j >= 1 && j <= g.ny - 1 && !ch_is_solid(solid, g, i, j - 1, k) && !ch_is_solid(solid, g, i, j, k))
-					v[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.h;
+					v[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.dyc(j);
 			}
 			else if (t < nu + nv + nw)
 			{
 				int s = t - nu - nv; int i = s % g.nx, j = (s / g.nx) % g.ny, k = s / (g.nx * g.ny);
 				if (k >= 1 && k <= g.nz - 1 && !ch_is_solid(solid, g, i, j, k - 1) && !ch_is_solid(solid, g, i, j, k))
-					w[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.h;
+					w[s] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.dzc(k);
 			}
 		}
 		__global__ void k_divabs(const double* u, const double* v, const double* w, double* out, const unsigned char* solid, MacGrid g, int n)
@@ -436,14 +534,14 @@ namespace windcfd::core
 	void ch_apply_inlet_gpu(double* u, MacGrid g, ChannelBC bc)
 	{ int njk = g.ny * g.nz; k_inlet<<<gsz(njk), 256>>>(u, g, bc, njk); }
 	void ch_orlanski_gpu(double* u, MacGrid g, ChannelBC bc, double dt)
-	{ int njk = g.ny * g.nz; double coef = bc.Uc * dt / g.h; if (coef > 1.0) coef = 1.0; if (coef < 0.0) coef = 0.0; k_orlanski<<<gsz(njk), 256>>>(u, g, bc, coef, njk); }
+	{ int njk = g.ny * g.nz; k_orlanski<<<gsz(njk), 256>>>(u, g, bc, bc.Uc * dt, njk); } // coef=Uc·dt/dx(outlet) computed in-kernel (device metric deref; graded-correct)
 	void ch_apply_solid_bc_gpu(double* u, double* v, double* w, const unsigned char* solid, MacGrid g)
 	{ int n = g.u_count() + g.v_count() + g.w_count(); k_solidbc<<<gsz(n), 256>>>(u, v, w, solid, g); }
 	double ch_uplane_flux_gpu(const double* u, double* planeScratch, MacGrid g, int i_plane)
 	{
 		int njk = g.ny * g.nz;
 		k_gather_uplane<<<gsz(njk), 256>>>(u, planeScratch, g, i_plane, njk);
-		return reduce_sum_gpu(planeScratch, njk) * g.h * g.h;
+		return reduce_sum_gpu(planeScratch, njk); // face-area (dy·dz) folded into the gather; uniform ⇒ Σu·h² as before
 	}
 	void ch_scale_uplane_gpu(double* u, MacGrid g, int i_plane, double s)
 	{ int njk = g.ny * g.nz; k_scale_uplane<<<gsz(njk), 256>>>(u, g, i_plane, s, njk); }
@@ -469,6 +567,11 @@ namespace windcfd::core
 			k_gs<<<gsz(n), 256>>>(p, rhs, solid, g, dir_xmax, band, c0, n);
 			k_gs<<<gsz(n), 256>>>(p, rhs, solid, g, dir_xmax, band, c1, n);
 		}
+	}
+	void ch_line_smooth_gpu(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color)
+	{
+		int nlines = axis == 0 ? g.ny * g.nz : axis == 1 ? g.nx * g.nz : g.nx * g.ny;
+		k_line_smooth<<<gsz(nlines), 256>>>(p, rhs, cprime, solid, g, dir_xmax, axis, color, nlines);
 	}
 	void ch_subtract_gradient_gpu(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax)
 	{ int n = g.u_count() + g.v_count() + g.w_count(); k_subgrad<<<gsz(n), 256>>>(u, v, w, p, solid, g, dt / rho, dir_xmax); }
@@ -524,8 +627,8 @@ namespace windcfd::core
 		for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
 		{
 			if (ch_is_solid(solid.data(), g, i, j, k)) { Ap[g.pidx(i, j, k)] = 0.0; continue; }
-			int count; double nbsum; nb_stencil(p.data(), solid.data(), g, dir_xmax, i, j, k, count, nbsum);
-			Ap[g.pidx(i, j, k)] = (count * p[g.pidx(i, j, k)] - nbsum) / (g.h * g.h);
+			double diag, wnb; fv_stencil_ch(p.data(), solid.data(), g, dir_xmax, i, j, k, diag, wnb);
+			Ap[g.pidx(i, j, k)] = diag * p[g.pidx(i, j, k)] - wnb;
 		}
 	}
 	void ch_jacobi_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, double omega, int sweeps)
@@ -537,13 +640,25 @@ namespace windcfd::core
 			{
 				int c = g.pidx(i, j, k);
 				if (ch_is_solid(solid.data(), g, i, j, k)) { pout[c] = 0.0; continue; }
-				int count; double nbsum; nb_stencil(p.data(), solid.data(), g, dir_xmax, i, j, k, count, nbsum);
-				if (count == 0) { pout[c] = p[c]; continue; }
-				double diag = count / (g.h * g.h);
-				double Ap = (count * p[c] - nbsum) / (g.h * g.h);
+				double diag, wnb; fv_stencil_ch(p.data(), solid.data(), g, dir_xmax, i, j, k, diag, wnb);
+				if (diag == 0.0) { pout[c] = p[c]; continue; }
+				/* diag already set by fv_stencil_ch */
+				double Ap = diag * p[c] - wnb;
 				pout[c] = p[c] + omega * (rhs[c] - Ap) / diag;
 			}
 			p = pout;
+		}
+	}
+	void ch_line_smooth_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, int axis, int color)
+	{
+		std::vector<double> cprime(p.size(), 0.0);
+		int nlines = axis == 0 ? g.ny * g.nz : axis == 1 ? g.nx * g.nz : g.nx * g.ny;
+		for (int t = 0; t < nlines; ++t)
+		{
+			int t1 = (axis == 0) ? t % g.ny : t % g.nx;
+			int t2 = (axis == 0) ? t / g.ny : t / g.nx;
+			if (((t1 + t2) & 1) != color) continue;
+			line_solve_ch(p.data(), rhs.data(), cprime.data(), solid.data(), g, dir_xmax, axis, t);
 		}
 	}
 	void ch_subtract_gradient_cpu(std::vector<double>& u, std::vector<double>& v, std::vector<double>& w, const std::vector<double>& p, const std::vector<unsigned char>& solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax)
@@ -552,16 +667,16 @@ namespace windcfd::core
 		for (int k = 0; k < g.nz; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i <= g.nx; ++i)
 		{
 			if (i >= 1 && i <= g.nx - 1)
-			{ if (!ch_is_solid(solid.data(), g, i - 1, j, k) && !ch_is_solid(solid.data(), g, i, j, k)) u[g.uidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.h; }
+			{ if (!ch_is_solid(solid.data(), g, i - 1, j, k) && !ch_is_solid(solid.data(), g, i, j, k)) u[g.uidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i - 1, j, k)]) / g.dxc(i); }
 			else if (i == g.nx && dir_xmax > 0 && !ch_is_solid(solid.data(), g, g.nx - 1, j, k))
-				u[g.uidx(i, j, k)] -= coef * (0.0 - p[g.pidx(g.nx - 1, j, k)]) / g.h;
+				u[g.uidx(i, j, k)] -= coef * (0.0 - p[g.pidx(g.nx - 1, j, k)]) / g.dx(g.nx - 1);
 			else if (i == 0 && dir_xmax < 0 && !ch_is_solid(solid.data(), g, 0, j, k))
-				u[g.uidx(i, j, k)] -= coef * (p[g.pidx(0, j, k)] - 0.0) / g.h;
+				u[g.uidx(i, j, k)] -= coef * (p[g.pidx(0, j, k)] - 0.0) / g.dx(0);
 		}
 		for (int k = 0; k < g.nz; ++k) for (int j = 1; j <= g.ny - 1; ++j) for (int i = 0; i < g.nx; ++i)
-			if (!ch_is_solid(solid.data(), g, i, j - 1, k) && !ch_is_solid(solid.data(), g, i, j, k)) v[g.vidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.h;
+			if (!ch_is_solid(solid.data(), g, i, j - 1, k) && !ch_is_solid(solid.data(), g, i, j, k)) v[g.vidx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j - 1, k)]) / g.dyc(j);
 		for (int k = 1; k <= g.nz - 1; ++k) for (int j = 0; j < g.ny; ++j) for (int i = 0; i < g.nx; ++i)
-			if (!ch_is_solid(solid.data(), g, i, j, k - 1) && !ch_is_solid(solid.data(), g, i, j, k)) w[g.widx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.h;
+			if (!ch_is_solid(solid.data(), g, i, j, k - 1) && !ch_is_solid(solid.data(), g, i, j, k)) w[g.widx(i, j, k)] -= coef * (p[g.pidx(i, j, k)] - p[g.pidx(i, j, k - 1)]) / g.dzc(k);
 	}
 	double ch_max_div_cpu(const std::vector<double>& u, const std::vector<double>& v, const std::vector<double>& w, const std::vector<unsigned char>& solid, MacGrid g)
 	{

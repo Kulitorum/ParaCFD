@@ -52,7 +52,7 @@ namespace windcfd::gui
 
 		// Live view controls (main thread).
 		void setField(Field f) { field_ = f; updateRange(); range_valid_ = false; update(); }
-		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); geometry_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
+		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
 		void setPlaneFraction(float frac); // 0..1 along the current axis
 
 		// Auto colour-range: when ON (default) the slice colormap, legend and arrow speed scale follow
@@ -67,6 +67,14 @@ namespace windcfd::gui
 		// The voxel-mask overlay is the exposed-face staircase of the rigid solid mask (obstacle).
 		void setShowSolidVoxels(bool on) { show_solid_vox_ = on; update(); }
 		void setShowAxes(bool on) { show_axes_ = on; update(); }
+		// Grid overlay: draw the cell-boundary LINES where the grid intersects the current slice plane, so
+		// the graded mesh is visible (lines cluster in the fine h_fine core, spread out in the coarse far
+		// field). Uses the per-axis face coordinates from setGridLines (uniform i·h if none set). Main thread.
+		void setShowGrid(bool on) { show_grid_ = on; update(); }
+		bool showGrid() const { return show_grid_; }
+		// Per-axis cumulative cell-face coordinates (metres) for the grid overlay — the graded metric arrays
+		// (GridMetrics::xf/yf/zf) or i·h for a uniform grid. Empty ⇒ fall back to info_'s uniform spacing.
+		void setGridLines(const std::vector<double>& xf, const std::vector<double>& yf, const std::vector<double>& zf);
 		bool showSlice() const { return show_slice_; }
 		bool showModel() const { return show_model_; }
 		bool showSolidVoxels() const { return show_solid_vox_; }
@@ -243,6 +251,8 @@ namespace windcfd::gui
 		QVector3D gizmoAxisDir(int a) const;              // world direction of local axis a (rot·e_a)
 		float gizmoSize() const;                          // handle length [m], scaled to camera distance
 
+		void buildGridGeometry(); // cell-boundary lines where the grid meets the current slice plane (main thread)
+		void drawGrid(const QMatrix4x4& mvp); // draw the grid-overlay lines (flat colour) when show_grid_
 		void buildAxesGeometry(); // world-origin XYZ triad + metre ticks (main thread; needs the domain)
 		void buildCornerGizmo();  // static camera-aligned orientation triad (unit axes)
 		void drawAxes(const QMatrix4x4& mvp);  // world triad (depth-tested) + corner gizmo (on top)
@@ -361,6 +371,14 @@ namespace windcfd::gui
 		// ticks + labels, plus a camera-aligned orientation gizmo in the bottom-left. Default ON.
 		bool show_axes_ = true;
 		bool axes_dirty_ = true;                       // rebuild world-triad geometry on a domain change
+
+		// Grid overlay (cell-boundary lines on the current slice plane; shows the graded mesh). Default OFF.
+		// grid_*f_ are the per-axis cumulative face coordinates (metres); empty ⇒ uniform i·h from info_.
+		bool show_grid_ = false;
+		bool grid_dirty_ = true;                       // rebuild on a plane/axis/domain/metric change
+		std::vector<float> grid_xf_, grid_yf_, grid_zf_;
+		unsigned int grid_vao_ = 0, grid_vbo_ = 0;
+		int grid_vertex_count_ = 0;
 		unsigned int axis_vao_ = 0, axis_vbo_ = 0;     // world triad + tick marks (per-axis ranges below)
 		int axis_vert_off_[3] = { 0, 0, 0 }, axis_vert_cnt_[3] = { 0, 0, 0 };
 		float axis_tick_step_ = 1.0f;                  // metre spacing between ticks (shared by geom + labels)

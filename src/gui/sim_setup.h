@@ -10,6 +10,7 @@
 #pragma once
 
 #include "core/fluid/channel_core.h"
+#include "core/fluid/grid_metrics.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/tri_mesh.h"
 
@@ -22,7 +23,8 @@ namespace windcfd::gui
 	struct SimInfo
 	{
 		int nx = 0, ny = 0, nz = 0;
-		double h = 0.05;               // voxel edge [m]
+		double h = 0.05;               // FINEST cell edge [m] (= h_fine on a graded grid, else the voxel size)
+		double coarse_h = 0.05;        // nominal coarse voxel size [m] (the "Voxel/cell size" control; = h if uniform)
 		double Lx = 0, Ly = 0, Lz = 0; // domain extents [m]
 		double U = 1.0;                // reference inlet speed [m/s]
 		double rho = 1.0;              // density [kg/m^3]
@@ -34,7 +36,14 @@ namespace windcfd::gui
 	// worker's rebuild factory so a re-inject is a pure worker-thread operation.
 	struct SimRecipe
 	{
-		windcfd::core::MacGrid grid;
+		windcfd::core::MacGrid grid;               // GRADED: the DEVICE-view MacGrid (kernels); UNIFORM: null-metric grid.
+		// Graded fine-core grid (null ⇒ uniform). GridMetrics is move-only, so it is held by shared_ptr:
+		// the recipe is copied (into recipe_, the worker rebuild factory, scene_io) and every copy shares
+		// this one instance, keeping the host+device metric arrays alive as long as any device-view MacGrid
+		// (the core's g_, snapshots) references them. Host consumers use metrics->host_view().
+		std::shared_ptr<windcfd::core::GridMetrics> metrics; // null ⇒ uniform grid
+		windcfd::core::FineCoreSpec fine_core;               // the parsed fine-core spec (for Apply re-grid)
+		bool graded = false;                                 // true ⇒ metrics is set (graded grid active)
 		windcfd::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
 		windcfd::core::ChannelParams pr;
 		std::vector<unsigned char> base_solid;   // config obstacle (procedural cylinder); all-zero if none
@@ -61,6 +70,14 @@ namespace windcfd::gui
 		double Lx = 0.0, Ly = 0.0, Lz = 0.0; // domain extents [m]
 		double h = 0.05;                     // voxel / cell size [m]
 		double U = 0.0;                      // inlet (current) speed [m/s]; > 0 overrides the config U
+
+		// Fine-core (graded grid) override from the GUI dock. When `set_fine_core` is true the GUI is
+		// authoritative for the fine core (the config's `fine_core` is ignored): `graded` is the enable
+		// checkbox and `fine_core` carries h_fine/growth + the auto-tracked box (absolute domain metres;
+		// Lx/Ly/Lz are re-set from the resolved domain). set_fine_core=false ⇒ use the config's fine_core.
+		bool set_fine_core = false;
+		bool graded = false;
+		windcfd::core::FineCoreSpec fine_core;
 	};
 
 	// Derive the integer grid dimensions from a domain + voxel size, EXACTLY as the sim builder does

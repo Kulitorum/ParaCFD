@@ -294,6 +294,7 @@ void main()
 		if (color_vbo_) glDeleteBuffers(1, &color_vbo_);
 		if (idx_ebo_) glDeleteBuffers(1, &idx_ebo_);
 		if (box_vbo_) glDeleteBuffers(1, &box_vbo_);
+		if (grid_vbo_) glDeleteBuffers(1, &grid_vbo_);
 		if (mesh_pos_vbo_) glDeleteBuffers(1, &mesh_pos_vbo_);
 		if (mesh_norm_vbo_) glDeleteBuffers(1, &mesh_norm_vbo_);
 		if (mesh_idx_ebo_) glDeleteBuffers(1, &mesh_idx_ebo_);
@@ -309,6 +310,7 @@ void main()
 		if (gizmo_vbo_) glDeleteBuffers(1, &gizmo_vbo_);
 		if (slice_vao_) glDeleteVertexArrays(1, &slice_vao_);
 		if (box_vao_) glDeleteVertexArrays(1, &box_vao_);
+		if (grid_vao_) glDeleteVertexArrays(1, &grid_vao_);
 		if (mesh_vao_) glDeleteVertexArrays(1, &mesh_vao_);
 		if (vox_vao_) glDeleteVertexArrays(1, &vox_vao_);
 		if (arrow_vao_) glDeleteVertexArrays(1, &arrow_vao_);
@@ -331,6 +333,7 @@ void main()
 		auto_speed_max_ = 1.8f * (float)info.U;
 		geometry_dirty_ = true;
 		axes_dirty_ = true; // rebuild the world triad + ticks for the new domain extents
+		grid_dirty_ = true; // rebuild the grid overlay for the new domain (a graded grid re-pushes faces via setGridLines)
 		// Base arrow length ~2% of the domain diagonal (a few cells) — visible over both the wake
 		// slice and the model without cluttering. Re-seed the tracers for the new domain.
 		float diag = std::sqrt((float)(info.Lx * info.Lx + info.Ly * info.Ly + info.Lz * info.Lz));
@@ -356,6 +359,16 @@ void main()
 	{
 		plane_frac_ = std::min(1.0f, std::max(0.0f, frac));
 		geometry_dirty_ = true;
+		grid_dirty_ = true; // the grid overlay lives on the plane → moves with it
+		update();
+	}
+
+	void SliceViewer::setGridLines(const std::vector<double>& xf, const std::vector<double>& yf, const std::vector<double>& zf)
+	{
+		grid_xf_.assign(xf.begin(), xf.end()); // double → float cell-face coordinates (metres)
+		grid_yf_.assign(yf.begin(), yf.end());
+		grid_zf_.assign(zf.begin(), zf.end());
+		grid_dirty_ = true;
 		update();
 	}
 
@@ -895,6 +908,10 @@ void main()
 	{
 		SliceParams sp;
 		sp.grid.nx = info_.nx; sp.grid.ny = info_.ny; sp.grid.nz = info_.nz; sp.grid.h = info_.h;
+		// TRUE domain extent (graded: xf[nx] via info_.Lx; uniform: nx·h). Positions the slice quad correctly
+		// on a graded grid without dereferencing metric pointers here (the host geometry path has none). The
+		// device sampler additionally gets the metric ARRAYS via worker_->displayGrid() (see paintGL).
+		sp.Lx = (float)info_.Lx; sp.Ly = (float)info_.Ly; sp.Lz = (float)info_.Lz;
 		sp.axis = axis_;
 		float L = (axis_ == Axis::X) ? (float)info_.Lx : (axis_ == Axis::Y) ? (float)info_.Ly : (float)info_.Lz;
 		sp.plane_pos = plane_frac_ * L;
@@ -945,6 +962,7 @@ void main()
 
 		glGenVertexArrays(1, &slice_vao_);
 		glGenVertexArrays(1, &box_vao_);
+		glGenVertexArrays(1, &grid_vao_);
 		glGenVertexArrays(1, &mesh_vao_);
 		glGenVertexArrays(1, &vox_vao_);
 		glGenVertexArrays(1, &arrow_vao_);
@@ -956,6 +974,7 @@ void main()
 		glGenBuffers(1, &color_vbo_);
 		glGenBuffers(1, &idx_ebo_);
 		glGenBuffers(1, &box_vbo_);
+		glGenBuffers(1, &grid_vbo_);
 		glGenBuffers(1, &mesh_pos_vbo_);
 		glGenBuffers(1, &mesh_norm_vbo_);
 		glGenBuffers(1, &mesh_idx_ebo_);
@@ -1472,6 +1491,84 @@ void main()
 		glBindVertexArray(0);
 	}
 
+	// Cell-boundary lines where the grid meets the CURRENT slice plane. The lines are drawn at the per-axis
+	// cell-face coordinates (the graded metric arrays from setGridLines, or uniform i·h if none) so a graded
+	// mesh reads directly: lines bunch up in the fine h_fine core and spread out in the coarse far field.
+	void SliceViewer::buildGridGeometry()
+	{
+		WINDCFD_ASSERT_GL_THREAD();
+		if (!gl_ready_) return;
+		grid_dirty_ = false;
+		float Lx = (float)info_.Lx, Ly = (float)info_.Ly, Lz = (float)info_.Lz;
+		if (Lx <= 0) { Lx = 10; Ly = 10; Lz = 5; }
+		// Per-axis face coordinates: the provided metric arrays, or a uniform i·h fallback (nx cells over Lx).
+		auto faces = [this](const std::vector<float>& arr, int n, float L)
+		{
+			if (!arr.empty()) return arr;
+			std::vector<float> f;
+			f.reserve((std::size_t)n + 1);
+			const float h = n > 0 ? L / (float)n : L;
+			for (int i = 0; i <= n; ++i) f.push_back((float)i * h);
+			return f;
+		};
+		const std::vector<float> xf = faces(grid_xf_, info_.nx, Lx);
+		const std::vector<float> yf = faces(grid_yf_, info_.ny, Ly);
+		const std::vector<float> zf = faces(grid_zf_, info_.nz, Lz);
+
+		std::vector<float> v;
+		auto seg = [&](float ax, float ay, float az, float bx, float by, float bz)
+		{ v.push_back(ax); v.push_back(ay); v.push_back(az); v.push_back(bx); v.push_back(by); v.push_back(bz); };
+
+		if (axis_ == Axis::Z) // z-normal plane: draw the x-y cell grid at z = z0
+		{
+			const float z0 = plane_frac_ * Lz;
+			for (float x : xf) seg(x, 0.0f, z0, x, Ly, z0);
+			for (float y : yf) seg(0.0f, y, z0, Lx, y, z0);
+		}
+		else if (axis_ == Axis::X) // x-normal plane: y-z grid at x = x0
+		{
+			const float x0 = plane_frac_ * Lx;
+			for (float y : yf) seg(x0, y, 0.0f, x0, y, Lz);
+			for (float z : zf) seg(x0, 0.0f, z, x0, Ly, z);
+		}
+		else // y-normal plane: x-z grid at y = y0
+		{
+			const float y0 = plane_frac_ * Ly;
+			for (float x : xf) seg(x, y0, 0.0f, x, y0, Lz);
+			for (float z : zf) seg(0.0f, y0, z, Lx, y0, z);
+		}
+
+		grid_vertex_count_ = (int)(v.size() / 3);
+		glBindVertexArray(grid_vao_);
+		glBindBuffer(GL_ARRAY_BUFFER, grid_vbo_);
+		glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_DYNAMIC_DRAW);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+		glEnableVertexAttribArray(0);
+		glBindVertexArray(0);
+	}
+
+	void SliceViewer::drawGrid(const QMatrix4x4& mvp)
+	{
+		WINDCFD_ASSERT_GL_THREAD();
+		if (!show_grid_ || !gl_ready_) return;
+		if (grid_dirty_) buildGridGeometry();
+		if (grid_vertex_count_ <= 0) return;
+		prog_.bind();
+		prog_.setUniformValue("uMVP", mvp);
+		prog_.setUniformValue("uClipPlane", computeClipPlane());
+		glDisable(GL_CLIP_DISTANCE0); // grid lines are a reference overlay — never clipped
+		prog_.setUniformValue("uFlat", 1);
+		prog_.setUniformValue("uColor", QVector4D(0.35f, 0.85f, 0.55f, 0.7f)); // translucent green
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDepthFunc(GL_LEQUAL); // the lines are coplanar with the slice mesh — let equal-depth fragments win
+		glBindVertexArray(grid_vao_);
+		glDrawArrays(GL_LINES, 0, grid_vertex_count_);
+		glBindVertexArray(0);
+		glDepthFunc(GL_LESS);
+		prog_.release();
+	}
+
 	namespace
 	{
 		// "Nice" tick spacing so each axis carries ~5 marks (10 m ⇒ 2 m, 5 m ⇒ 2 m, etc.).
@@ -1692,7 +1789,6 @@ void main()
 		const float cp_span = (vox_cp_hi_ > vox_cp_lo_) ? (vox_cp_hi_ - vox_cp_lo_) : 1.0f;
 
 		std::vector<float> pos, nrm, col;
-		const float h = (float)g.h;
 		float cr = 0.5f, cg = 0.5f, cb = 0.5f; // current cell's Cp colour (set per solid cell below)
 		auto quad = [&](float ox, float oy, float oz, float ux, float uy, float uz, float vx, float vy, float vz, float nx, float ny, float nz)
 		{
@@ -1720,13 +1816,17 @@ void main()
 							scour_colormap((cp - vox_cp_lo_) / cp_span, cr, cg, cb);
 						else { cr = cg = cb = 0.6f; }
 					}
-					const float x0 = i * h, y0 = j * h, z0 = k * h;
-					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, h, 0, 0, 0, h, -1, 0, 0); // -x
-					if (!solid_at(i + 1, j, k)) quad(x0 + h, y0, z0, 0, 0, h, 0, h, 0, 1, 0, 0); // +x
-					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, h, h, 0, 0, 0, -1, 0); // -y
-					if (!solid_at(i, j + 1, k)) quad(x0, y0 + h, z0, h, 0, 0, 0, 0, h, 0, 1, 0); // +y
-					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, h, 0, 0, 0, h, 0, 0, 0, -1); // -z
-					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + h, 0, h, 0, h, 0, 0, 0, 0, 1); // +z
+					// Cell's minimum-corner face coords + per-axis widths from the grid metrics — on a GRADED
+					// grid these are the true (non-uniform) cell bounds xf[i]/dx[i]; the accessors fall back to
+					// exact i·h / h on a uniform grid, so the staircase lands on the same voxels the flow uses.
+					const float x0 = (float)g.xf(i), y0 = (float)g.yf(j), z0 = (float)g.zf(k);
+					const float hx = (float)g.dx(i), hy = (float)g.dy(j), hz = (float)g.dz(k);
+					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, hy, 0, 0, 0, hz, -1, 0, 0); // -x
+					if (!solid_at(i + 1, j, k)) quad(x0 + hx, y0, z0, 0, 0, hz, 0, hy, 0, 1, 0, 0); // +x
+					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, hz, hx, 0, 0, 0, -1, 0); // -y
+					if (!solid_at(i, j + 1, k)) quad(x0, y0 + hy, z0, hx, 0, 0, 0, 0, hz, 0, 1, 0); // +y
+					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, hx, 0, 0, 0, hy, 0, 0, 0, -1); // -z
+					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + hz, 0, hy, 0, hx, 0, 0, 0, 0, 1); // +z
 				}
 
 		vox_vertex_count_ = (int)(pos.size() / 3);
@@ -1827,18 +1927,20 @@ void main()
 		if (worker_ && worker_->display_ready() && cuda_res_ && have_info_)
 		{
 			std::lock_guard<std::mutex> lk(worker_->display_mutex());
+			// Sampler grid = the core's DEVICE-view metrics (grid_fx maps each vertex to the correct GRADED
+			// cell on the device). currentParams() alone carries only nx/ny/nz/h + the true extent (sp.Lx…);
+			// displayGrid() adds the device metric ARRAYS with identical dims. Uniform ⇒ null metrics (x/h).
+			SliceParams sp = currentParams();
+			sp.grid = worker_->displayGrid();
 			if (auto_range_ && (range_ctr_++ % kRangeEvery == 0))
 			{
 				FieldRange fr;
 				if (slice_gl_reduce(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(),
-					worker_->disp_p(), worker_->disp_solid(), currentParams().grid, field_, &fr))
+					worker_->disp_p(), worker_->disp_solid(), sp.grid, field_, &fr))
 					applyAutoRange(fr);
 			}
 			if (show_slice_) // slice fill skipped when hidden (no fill, no draw)
-			{
-				SliceParams sp = currentParams();
 				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), sp);
-			}
 		}
 
 		updateArrows(); // advect the arrow tracers + upload instance data (reads the worker's host flow)
@@ -1867,8 +1969,10 @@ void main()
 		prog_.setUniformValue("uClipPlane", clipPlane);
 		glDisable(GL_CLIP_DISTANCE0);
 
-		// Slice mesh (per-vertex CUDA colours). Hidden by the "Show slice" toggle. Never clipped.
-		if (show_slice_)
+		// Slice mesh (per-vertex CUDA colours). Hidden by the "Show slice" toggle. Also suppressed while the
+		// grid overlay is on, so "Show grid on slice" shows the bare cell wireframe (not the filled colours).
+		// Never clipped.
+		if (show_slice_ && !show_grid_)
 		{
 			prog_.setUniformValue("uFlat", 0);
 			glBindVertexArray(slice_vao_);
@@ -1928,6 +2032,9 @@ void main()
 
 		// World-origin XYZ triad + camera-aligned corner gizmo (depth-tested world axes; gizmo on top).
 		drawAxes(mvp);
+
+		// Grid overlay: cell-boundary lines where the grid meets the slice plane (shows the graded mesh).
+		drawGrid(mvp);
 
 		// Clip-plane visualisation (translucent quad + outline showing where the cut is). Drawn with the
 		// clip test OFF so the plane itself is not clipped; only shown while the feature is enabled.

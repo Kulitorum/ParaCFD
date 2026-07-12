@@ -33,9 +33,9 @@ namespace windcfd::gui
 	{
 		const MacGrid& g = f.grid;
 		if (!f.solid) return false;
-		int i = clampi((int)std::floor(x / (float)g.h), 0, g.nx - 1);
-		int j = clampi((int)std::floor(y / (float)g.h), 0, g.ny - 1);
-		int k = clampi((int)std::floor(z / (float)g.h), 0, g.nz - 1);
+		int i = clampi((int)std::floor(windcfd::core::grid_fx(g, x)), 0, g.nx - 1);
+		int j = clampi((int)std::floor(windcfd::core::grid_fy(g, y)), 0, g.ny - 1);
+		int k = clampi((int)std::floor(windcfd::core::grid_fz(g, z)), 0, g.nz - 1);
 		return f.solid[(size_t)g.pidx(i, j, k)] != 0;
 	}
 
@@ -45,9 +45,8 @@ namespace windcfd::gui
 	void FlowParticles::sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const
 	{
 		const MacGrid& g = f.grid;
-		const float h = (float)g.h;
-		// Continuous cell-centre index space: centre of cell (i,j,k) is at ((i+0.5)h,...).
-		float gx = x / h - 0.5f, gy = y / h - 0.5f, gz = z / h - 0.5f;
+		// Continuous cell-centre index space (graded-aware world→centre-index map; x/h-0.5 uniform).
+		float gx = (float)windcfd::core::grid_cx(g, x), gy = (float)windcfd::core::grid_cy(g, y), gz = (float)windcfd::core::grid_cz(g, z);
 		int i0 = clampi((int)std::floor(gx), 0, g.nx - 1);
 		int j0 = clampi((int)std::floor(gy), 0, g.ny - 1);
 		int k0 = clampi((int)std::floor(gz), 0, g.nz - 1);
@@ -89,7 +88,7 @@ namespace windcfd::gui
 	void FlowParticles::spawn(int k, const ArrowView& view, const FlowField& f, bool initial)
 	{
 		const MacGrid& g = f.grid;
-		float Lx = (float)(g.nx * g.h), Ly = (float)(g.ny * g.h), Lz = (float)(g.nz * g.h);
+		float Lx = (float)g.Lx(), Ly = (float)g.Ly(), Lz = (float)g.Lz();
 		float x = 0, y = 0, z = 0;
 		for (int t = 0; t < 8; ++t) // reject solid spawn points (up to 8 tries)
 		{
@@ -122,7 +121,7 @@ namespace windcfd::gui
 	{
 		if (count_ == 0 || !f.u || f.grid.nx <= 0) return;
 		const MacGrid& g = f.grid;
-		float Lx = (float)(g.nx * g.h), Ly = (float)(g.ny * g.h), Lz = (float)(g.nz * g.h);
+		float Lx = (float)g.Lx(), Ly = (float)g.Ly(), Lz = (float)g.Lz();
 		const float eps = 1e-6f;
 
 		if (needs_reset_)

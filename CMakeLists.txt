@@ -54,6 +54,8 @@ add_library(libwindcfd STATIC
 	src/core/fluid/channel_core.cu
 	src/core/fluid/channel_porous.cu
 	src/core/fluid/channel_empty.cpp
+	# Graded structured grid — fine-core → per-axis metric arrays (host) + device upload owner.
+	src/core/fluid/grid_metrics.cpp
 	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor
 	src/core/fluid/bedshear.cu
 	src/core/fluid/channel_periodic.cu
@@ -158,6 +160,22 @@ endforeach()
 add_executable(building_probe tools/building_probe.cpp)
 target_link_libraries(building_probe PRIVATE libwindcfd windcfd_geometry)
 windcfd_deploy_occ_dlls(building_probe)
+
+# --- parity_probe (Phase-0 migration oracle for the graded-structured-grid change) ---
+# Restores the CLAUDE.md "1e-5 GPU-vs-CPU parity per kernel" invariant (no test target had
+# existed — the CPU twins were defined but never run) AND adds the behaviour-preservation
+# "grading collapses to uniform" golden gate. For every MAC-solver kernel in the Phase-A
+# rewrite scope it checks (1) GPU kernel == CPU twin at rel. max-norm 1e-5 and (2) GPU output
+# == a blessed snapshot. Bless once against the current uniform solver; every later run must
+# still match, making "zero behaviour change" falsifiable. Pure CUDA + libwindcfd (no Qt/OCC/GL).
+enable_testing()
+add_executable(parity_probe tools/parity_probe.cu)
+set_target_properties(parity_probe PROPERTIES
+	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+	CUDA_SEPARABLE_COMPILATION OFF)
+target_link_libraries(parity_probe PRIVATE libwindcfd)
+add_test(NAME parity COMMAND parity_probe)
+set_tests_properties(parity PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # --- windcfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
 # Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can

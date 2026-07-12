@@ -37,6 +37,16 @@ namespace windcfd::core
 		double omega = 2.0 / 3.0;
 		int gs_band = 2;
 		int coarse_sweeps = 60;
+		// Graded-grid smoother (used ONLY when the level carries metric arrays; a uniform grid
+		// keeps the point smoothers above, byte-identical). Graded cells are anisotropic — a
+		// far-field cell can be ~20x wider along one axis — and point (Jacobi/GS) smoothing
+		// cannot damp error along a strongly-coupled axis, which stalls the preconditioned CG
+		// (the graded+obstacle blow-up). Alternating zebra LINE relaxation (exact tridiagonal
+		// solves along x, then y, then z lines) damps it whichever axis is strong. Pre-smooth
+		// applies the axis/colour passes forward, post-smooth in exact reverse (the adjoint
+		// order), so the V-cycle stays SPD for the CG it preconditions.
+		int line_sweeps = 1;       // alternating-line pre/post sweeps per level
+		int coarse_line_iters = 8; // symmetric (fwd+rev) alternating-line iterations at the coarsest level
 
 		const std::vector<MacGrid>& levels() const { return grids_; }
 
@@ -44,10 +54,16 @@ namespace windcfd::core
 		void vcycle(int level);
 		void precondition(const double* r, double* z);
 		void apply_finest(const double* p, double* Ap);
+		// Graded grids (finest carries metric arrays): give each COARSE level its own metrics by
+		// decimating the finer level's cumulative face coords (xf_coarse[i]=xf_fine[2i] ⇒
+		// dx_coarse[i]=dx_fine[2i]+dx_fine[2i+1]) — NOT by averaging dx (design D3 care-item B). A
+		// uniform finest (null metrics) skips this: each level's scalar h=2^l·h is already correct.
+		void build_level_metrics(const MacGrid& finest);
 
 		std::vector<MacGrid> grids_;
 		std::vector<double*> Lp_, Lrhs_, Ltmp_;
 		std::vector<unsigned char*> Lsolid_;
+		std::vector<double*> metric_allocs_; // owned per-level metric device arrays (graded only)
 		int n0_ = 0, dir_xmax_ = 1;
 		double *r_ = nullptr, *z_ = nullptr, *s_ = nullptr, *As_ = nullptr;
 	};

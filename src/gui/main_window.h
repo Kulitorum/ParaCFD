@@ -156,7 +156,12 @@ namespace windcfd::gui
 		// thickened walls + overhanging roof (core/geometry/building) and hands the mask to the worker
 		// exactly as loadStepFile does. Driven by the "Build" button and once on centerline load. No-op
 		// (with a status message) if no centerline is loaded.
-		void buildBuilding();
+		// reconstruct_grid (only meaningful on a GRADED grid): the fine core is anchored to the building, so an
+		// interactive (re)build must regenerate the metric grid around the building's CURRENT placement so a
+		// moved building doesn't voxelize into a STALE core — true delegates to applyGrid (which then calls
+		// back with false). Passed true only by the interactive "Build" button. false = voxelize into the
+		// current/just-built grid (the CLI+File-menu load and applyGrid's own re-voxelize; no reset, no recursion).
+		void buildBuilding(bool reconstruct_grid = true);
 
 		// Refresh the Building-group live wind-load coefficient readout from the worker's latest WindLoads
 		// (Cd/Cl/Cs + Cp range). Called on the repaint tick; no-op until a building's loads are published.
@@ -247,6 +252,17 @@ namespace windcfd::gui
 		QDoubleSpinBox* tidal_ramp_spin_ = nullptr;
 		void syncTidal();
 
+		// Fine-core (graded grid) dock controls. On Apply, when enabled, the fine core is regenerated
+		// with these params + a box auto-tracked around the placed building (+ margin). fillFineCoreOverride
+		// fills the GridOverride from the dock; syncFineCoreControls seeds the dock from the loaded recipe.
+		QCheckBox* fine_core_chk_ = nullptr;
+		QDoubleSpinBox* fc_hfine_spin_ = nullptr;
+		QDoubleSpinBox* fc_growth_spin_ = nullptr;
+		QDoubleSpinBox* fc_margin_spin_ = nullptr;
+		void fillFineCoreOverride(GridOverride& ov) const; // dock → override (auto-tracks the placed building bbox)
+		void syncFineCoreControls();                       // recipe_ → dock (reflect the loaded config/scene)
+		void pushGridToViewer();                           // push the per-axis cell-face coords (graded metrics / i·h) to the viewer's grid overlay
+
 		QLabel* grid_readout_ = nullptr;
 		QPushButton* apply_btn_ = nullptr;
 		QPushButton* play_btn_ = nullptr; // so a rebuild can honour the current play/pause state
@@ -312,7 +328,9 @@ namespace windcfd::gui
 		QDoubleSpinBox* corner_radius_spin_ = nullptr;
 		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
 		QDoubleSpinBox* roof_thick_spin_ = nullptr;
+		QCheckBox* roof_chk_ = nullptr; // cap the walls with a roof slab (default on); off => wall/surface band only (wing profile)
 		QPushButton* build_btn_ = nullptr;
+		QCheckBox* fill_interior_chk_ = nullptr; // solidify the building's sealed interior on Build/Apply (default on)
 		QLabel* load_readout_ = nullptr; // live INSTANTANEOUS wind-load coefficient readout (Cd/Cl/Cs + Cp range)
 
 		// --- Converged, time-averaged loads (the trustworthy statistics) -------------------------

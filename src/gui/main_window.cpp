@@ -81,6 +81,7 @@ namespace windcfd::gui
 
 		viewer_ = new SliceViewer(this);
 		viewer_->setInfo(info);
+		pushGridToViewer(); // seed the grid-overlay cell-face coordinates (graded metrics / i·h)
 		setCentralWidget(viewer_);
 
 		// --- File menu: load / clear a STEP model --------------------------------
@@ -345,6 +346,34 @@ namespace windcfd::gui
 		gridCol->addWidget(apply_btn_);
 		col->addWidget(gridGroup);
 
+		// --- Fine core (graded grid) — a UNIFORM h_fine core around the building inside a geometrically
+		// graded coarse far field, so a rounded corner is resolvable without a fine grid everywhere. Enable
+		// it, set h_fine / growth / margin, then Apply: the fine-core box AUTO-TRACKS the placed building
+		// bbox + margin and the grid is regenerated at t=0. Off ⇒ the uniform grid above (opt-in).
+		QGroupBox* fcGroup = new QGroupBox("Fine core (graded grid)");
+		QVBoxLayout* fcCol = new QVBoxLayout(fcGroup);
+		fine_core_chk_ = new QCheckBox("Enable graded fine core");
+		fine_core_chk_->setToolTip("Refine a uniform h_fine core around the building and grade coarser to the domain edges. Apply regenerates the grid. Off ⇒ the uniform grid above.");
+		fcCol->addWidget(fine_core_chk_);
+		QFormLayout* fcForm = new QFormLayout;
+		fcForm->setLabelAlignment(Qt::AlignLeft);
+		fc_hfine_spin_ = new QDoubleSpinBox;
+		fc_hfine_spin_->setRange(0.005, 1.0); fc_hfine_spin_->setDecimals(3); fc_hfine_spin_->setSingleStep(0.005); fc_hfine_spin_->setSuffix(" m"); fc_hfine_spin_->setValue(0.03);
+		fc_hfine_spin_->setToolTip("Fine-core cell size h_fine. Rule: ≈ r/10 for a corner radius r (≥10 cells across it). h_fine ≥ r/4 is below the resolution floor (rounded ≈ sharp).");
+		fc_growth_spin_ = new QDoubleSpinBox;
+		fc_growth_spin_->setRange(1.01, 1.30); fc_growth_spin_->setDecimals(2); fc_growth_spin_->setSingleStep(0.01); fc_growth_spin_->setValue(1.15);
+		fc_growth_spin_->setToolTip("Max adjacent-cell growth ratio in the graded far field (≤ 1.15 keeps near-2nd-order accuracy).");
+		fc_margin_spin_ = new QDoubleSpinBox;
+		fc_margin_spin_->setRange(0.0, 20.0); fc_margin_spin_->setDecimals(2); fc_margin_spin_->setSingleStep(0.25); fc_margin_spin_->setSuffix(" m"); fc_margin_spin_->setValue(1.0);
+		fc_margin_spin_->setToolTip("Margin the fine core extends beyond the placed building bbox (captures the near-wake before grading coarsens). MUST enclose the building — windloads asserts it.");
+		fcForm->addRow("Fine cell h_fine", fc_hfine_spin_);
+		fcForm->addRow("Growth ratio", fc_growth_spin_);
+		fcForm->addRow("Core margin", fc_margin_spin_);
+		fcCol->addLayout(fcForm);
+		connect(fine_core_chk_, &QCheckBox::toggled, this, [this](bool) { updateGridReadout(); });
+		connect(fc_hfine_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { updateGridReadout(); });
+		col->addWidget(fcGroup);
+
 		// --- Building group (centerline STEP → thickened walls + overhanging flat roof solid) ---------
 		// Load a 3D-printing CENTERLINE STEP (File ▸ Open centerline STEP…), dial in the wall/roof params
 		// here, then Build: the domain is sized around the sectioned footprint (with wind clearance) and
@@ -401,12 +430,37 @@ namespace windcfd::gui
 		roof_thick_spin_->setToolTip("Flat roof slab thickness (0 = no roof).");
 		buildingForm->addRow("Roof thickness", roof_thick_spin_);
 
+		// Roof toggle: cap the walls with a flat slab (default), or voxelize ONLY the wall/surface band —
+		// an OPEN extruded surface with no top (e.g. a wing/airfoil profile). Off greys out the roof params.
+		roof_chk_ = new QCheckBox("Roof (cap the walls)");
+		roof_chk_->setChecked(bdefs.roof);
+		roof_chk_->setToolTip("Cap the building with a flat roof slab (overhang + thickness above the walls). "
+			"Uncheck to voxelize ONLY the wall/surface band — an open extruded surface, e.g. a wing/airfoil "
+			"profile. Takes effect on the next Build/Apply.");
+		connect(roof_chk_, &QCheckBox::toggled, this, [this](bool on) {
+			if (roof_overhang_spin_) roof_overhang_spin_->setEnabled(on);
+			if (roof_thick_spin_) roof_thick_spin_->setEnabled(on);
+		});
+		buildingForm->addRow("", roof_chk_);
+
 		buildingCol->addLayout(buildingForm);
 
 		build_btn_ = new QPushButton("Build");
-		build_btn_->setToolTip("Voxelize the placed centerline model (thickened walls + overhanging flat roof, rounded or sharp corners) into the CURRENT domain and inject it as the flow obstacle. Set the domain size + voxel size via the Domain controls first; load a centerline via File ▸ Open centerline STEP…");
+		build_btn_->setToolTip("Voxelize the placed centerline model (thickened walls + overhanging flat roof, rounded or sharp corners) into the CURRENT domain and inject it as the flow obstacle. On a graded grid this REBUILDS the grid so the fine core re-centres on the building's current placement (resets to t=0). Set the domain size + voxel size via the Domain controls first; load a centerline via File ▸ Open centerline STEP…");
 		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
 		buildingCol->addWidget(build_btn_);
+
+		// Solidify the building's sealed interior (the hollow room inside the walls, below the roof): a
+		// flood-fill from the open boundary marks any fluid the wind can't reach as solid. ON by default —
+		// the trapped interior is otherwise simulated at full per-cell cost (an ill-conditioned enclosed
+		// pressure cavity) and adds spurious inner-wall load faces. Only genuinely sealed voids are filled
+		// (an open/leaky structure stays fluid). Takes effect on the next Build/Apply.
+		fill_interior_chk_ = new QCheckBox("Fill sealed interior");
+		fill_interior_chk_->setChecked(true);
+		fill_interior_chk_->setToolTip("Solidify the enclosed interior of the built solid (flood-fill any fluid the wind can't reach). "
+			"Removes the trapped-fluid interior — cheaper pressure solve + cleaner surface loads. Only fills GENUINELY sealed "
+			"cavities; an open or leaky structure stays fluid. Applies on the next Build/Apply.");
+		buildingCol->addWidget(fill_interior_chk_);
 
 		// Live wind-load readout: force coefficients integrated from the pressure field over the building
 		// surface (worker-side, ~every 30 steps). Dimensionless; updated on the repaint tick. Blank until a
@@ -539,6 +593,12 @@ namespace windcfd::gui
 		axesChk->setToolTip("Show/hide the world-origin XYZ triad (X=red, Y=green, Z=blue) with metre ticks + corner gizmo.");
 		connect(axesChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowAxes(on); });
 		viz->addRow(axesChk);
+		QCheckBox* gridChk = new QCheckBox("Show grid on slice");
+		gridChk->setChecked(false);
+		gridChk->setToolTip("Draw the cell-boundary lines where the grid meets the slice plane. On a graded grid the lines "
+			"bunch up in the fine h_fine core and spread out in the coarse far field — the mesh made visible.");
+		connect(gridChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowGrid(on); });
+		viz->addRow(gridChk);
 
 		// Flow arrows.
 		auto* line2 = new QFrame; line2->setFrameShape(QFrame::HLine); line2->setEnabled(false);
@@ -761,6 +821,7 @@ namespace windcfd::gui
 		worker_->setAutosaveInterval(autosave_interval_); // keep auto-saving across a rebuild/restore
 		worker_->setDisplayInterval(display_throttle_s_); // keep the "Fast sim" graphics throttle across a rebuild/restore
 		worker_->setWindLoadRho(recipe_.pr.rho);          // dynamic-pressure density = the solver's rho (Cp/Cd consistency)
+		worker_->setMetrics(recipe_.metrics);             // graded fine-core metrics (null ⇒ uniform); host consumers use host_view()
 		// Rebuild factory: a re-inject rebuilds the core from an immutable recipe snapshot, entirely on
 		// the worker thread (make_core is Qt-free and thread-safe).
 		worker_->setRebuildFactory([recipe = recipe_](const std::vector<unsigned char>& solid, int mode)
@@ -901,14 +962,95 @@ namespace windcfd::gui
 		lx_spin_->setValue(info.Lx);
 		ly_spin_->setValue(info.Ly);
 		lz_spin_->setValue(info.Lz);
-		h_spin_->setValue(info.h);
+		h_spin_->setValue(info.coarse_h); // the coarse voxel size (NOT h_fine on a graded grid)
 		u_spin_->setValue(info.U);
+		syncFineCoreControls(); // reflect the loaded graded fine-core state in the dock
+		pushGridToViewer();     // keep the grid overlay's cell-face coords in sync (covers scene restore)
 		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
 			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == windcfd::core::INLET_LOGLAW ? 1 : 0);
 		}
 		updateGridReadout();
+	}
+
+	// Dock → GridOverride: on Apply the GUI is authoritative for the fine core. The box AUTO-TRACKS the
+	// placed building/model bbox + the margin (design lean: auto-track, overridable); with no model yet a
+	// centred default is used. Off ⇒ graded=false ⇒ the uniform grid. The box MUST enclose the building —
+	// windloads asserts bbox ⊆ the uniform fine core.
+	void MainWindow::fillFineCoreOverride(GridOverride& ov) const
+	{
+		ov.set_fine_core = true;
+		ov.graded = fine_core_chk_ && fine_core_chk_->isChecked();
+		if (!ov.graded) return;
+		windcfd::core::FineCoreSpec& fc = ov.fine_core;
+		fc.Lx = ov.Lx; fc.Ly = ov.Ly; fc.Lz = ov.Lz; // complete the spec so GridMetrics::generate can use it directly
+		fc.h_fine = fc_hfine_spin_ ? fc_hfine_spin_->value() : 0.03;
+		fc.growth = fc_growth_spin_ ? fc_growth_spin_->value() : 1.15;
+		const double margin = fc_margin_spin_ ? fc_margin_spin_->value() : 1.0;
+		const windcfd::core::TriMesh& src = !centerline_mesh_.empty() ? centerline_mesh_ : model_mesh_;
+		if (!src.empty())
+		{
+			const windcfd::core::ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
+				? viewer_->modelPlacement()
+				: windcfd::core::place_model_on_bed(src, ov.Lx, ov.Ly);
+			const windcfd::core::TriMesh placed = windcfd::core::placed_mesh(src, place);
+			// Wrap the placed bbox + margin, CLAMPED to the domain so the core never requests beyond it (a
+			// core ≈ the domain size can't tile in exact h_fine cells → windloads would reject the surface).
+			fc.x0 = std::max(0.0, (double)placed.bbox_min[0] - margin); fc.x1 = std::min(ov.Lx, (double)placed.bbox_max[0] + margin);
+			fc.y0 = std::max(0.0, (double)placed.bbox_min[1] - margin); fc.y1 = std::min(ov.Ly, (double)placed.bbox_max[1] + margin);
+			fc.z0 = 0.0; fc.z1 = std::min(ov.Lz, (double)placed.bbox_max[2] + margin); // ground → building top + margin (covers the roof)
+		}
+		else if (recipe_.graded && recipe_.fine_core.h_fine > 0.0)
+		{
+			// No model to auto-track, but a config/scene already defines the box — preserve it across Apply.
+			fc.x0 = recipe_.fine_core.x0; fc.x1 = recipe_.fine_core.x1;
+			fc.y0 = recipe_.fine_core.y0; fc.y1 = recipe_.fine_core.y1;
+			fc.z0 = recipe_.fine_core.z0; fc.z1 = recipe_.fine_core.z1;
+		}
+		else
+		{
+			fc.x0 = 0.30 * ov.Lx; fc.x1 = 0.70 * ov.Lx; // centred default until a building is placed
+			fc.y0 = 0.30 * ov.Ly; fc.y1 = 0.70 * ov.Ly;
+			fc.z0 = 0.0; fc.z1 = 0.50 * ov.Lz;
+		}
+	}
+
+	// Push the per-axis cumulative cell-face coordinates to the viewer's grid overlay: the graded metric
+	// arrays (GridMetrics::xf/yf/zf) on a graded grid, else uniform i·h. The overlay draws the cell
+	// boundaries where the grid meets the slice plane (bunched in the fine core, spread in the far field).
+	void MainWindow::pushGridToViewer()
+	{
+		if (!viewer_) return;
+		std::vector<double> xf, yf, zf;
+		const SimInfo& info = recipe_.info;
+		if (recipe_.graded && recipe_.metrics)
+		{
+			xf = recipe_.metrics->xf();
+			yf = recipe_.metrics->yf();
+			zf = recipe_.metrics->zf();
+		}
+		else
+		{
+			for (int i = 0; i <= info.nx; ++i) xf.push_back((double)i * info.h);
+			for (int j = 0; j <= info.ny; ++j) yf.push_back((double)j * info.h);
+			for (int k = 0; k <= info.nz; ++k) zf.push_back((double)k * info.h);
+		}
+		viewer_->setGridLines(xf, yf, zf);
+	}
+
+	// recipe_ → dock: reflect the loaded config/scene fine-core state so a subsequent Apply preserves it
+	// (else pressing Apply with the checkbox off would silently drop a config/scene graded grid to uniform).
+	void MainWindow::syncFineCoreControls()
+	{
+		if (!fine_core_chk_) return;
+		const QSignalBlocker b0(fine_core_chk_), b1(fc_hfine_spin_), b2(fc_growth_spin_);
+		fine_core_chk_->setChecked(recipe_.graded);
+		if (recipe_.graded && recipe_.fine_core.h_fine > 0.0)
+		{
+			fc_hfine_spin_->setValue(recipe_.fine_core.h_fine);
+			fc_growth_spin_->setValue(recipe_.fine_core.growth);
+		}
 	}
 
 	// Apply grid cap sized to the actual device: ~80% of TOTAL VRAM at the ~240 B/cell gauge below. Using
@@ -936,14 +1078,30 @@ namespace windcfd::gui
 		if (!grid_readout_ || !lx_spin_) return;
 		int nx = 0, ny = 0, nz = 0;
 		grid_dims_for(lx_spin_->value(), ly_spin_->value(), lz_spin_->value(), h_spin_->value(), nx, ny, nz);
+		// Graded fine core: the actual cell count is set by the generator (fine core + graded far field), not
+		// the coarse-uniform floor(L/h) — compute the real dims so the readout + the VRAM guard are truthful.
+		bool graded = false;
+		if (fine_core_chk_ && fine_core_chk_->isChecked())
+		{
+			GridOverride ov; ov.active = true;
+			ov.Lx = lx_spin_->value(); ov.Ly = ly_spin_->value(); ov.Lz = lz_spin_->value(); ov.h = h_spin_->value();
+			fillFineCoreOverride(ov);
+			if (ov.graded && ov.fine_core.h_fine > 0.0 && ov.fine_core.h_fine < ov.h)
+			{
+				const windcfd::core::GridMetrics gm = windcfd::core::GridMetrics::generate(ov.fine_core);
+				nx = gm.nx(); ny = gm.ny(); nz = gm.nz(); graded = true;
+			}
+		}
 		const long long cells = (long long)nx * ny * nz;
 		const long long cap = maxCells();
 		// Rough device-memory gauge (fluid + snapshot double fields) — an order-of-magnitude hint, not an
 		// allocation contract. Shown against the card's total VRAM so it's clear how much room is left.
 		const double gb = cells * 240.0 / (1024.0 * 1024.0 * 1024.0);
 		const bool ok = cells > 0 && cells <= cap;
-		QString txt = QString("→ %1 × %2 × %3 = %4 cells\n  (~%5 GB")
-			.arg(nx).arg(ny).arg(nz).arg(cells).arg(gb, 0, 'f', 1);
+		QString txt = QString("→ %1 × %2 × %3 = %4 cells%5\n  (~%6 GB")
+			.arg(nx).arg(ny).arg(nz).arg(cells)
+			.arg(graded ? QString("  (graded, h_fine=%1 m)").arg(fc_hfine_spin_->value(), 0, 'f', 3) : QString())
+			.arg(gb, 0, 'f', 1);
 		if (vram_total_gb_ > 0.0) txt += QString(" of %1 GB").arg(vram_total_gb_, 0, 'f', 0);
 		txt += " VRAM)";
 		if (!ok) txt += QString("\n⚠ too large (> %1 M cells ≈ 80%% of VRAM) — increase h").arg(cap / 1000000);
@@ -1125,6 +1283,7 @@ namespace windcfd::gui
 			statusBar()->showMessage("invalid domain/voxel size", 4000);
 			return;
 		}
+		fillFineCoreOverride(ov); // GUI drives the fine core on Apply: enable + h_fine/growth + auto-tracked box
 
 		// Rebuild the fluid viewer at the new grid: re-run build_sim with only the domain + h overridden —
 		// every other physics parameter is preserved. A loaded STEP model is kept (re-displayed and
@@ -1157,6 +1316,7 @@ namespace windcfd::gui
 			viewer_->clearVoxelOverlay();      // drop stale-size staircase geometry
 			viewer_->clearMesh();
 			viewer_->setInfo(info);            // re-frame + re-size all grid-derived viewer geometry
+			pushGridToViewer();                // refresh the grid overlay for the new (possibly graded) grid
 		}
 		model_mesh_ = keep_mesh;               // keep the loaded model (fluid re-inject)
 		spawnWorker(std::move(core));
@@ -1179,7 +1339,7 @@ namespace windcfd::gui
 			viewer_->setMesh(windcfd::core::TriMesh(centerline_mesh_)); // re-show (setMesh reset the gizmo)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);           // re-apply the user's placement
 			updateGizmoUi();
-			buildBuilding();                                            // re-voxelize the placed house into the new grid
+			buildBuilding(false);                                       // voxelize into the ALREADY-regenerated grid (no re-reconstruct → no recursion)
 		}
 
 		syncGridControls(); // reflect the built grid (floor/clamp may differ from the typed value)
@@ -1397,6 +1557,7 @@ namespace windcfd::gui
 			viewer_->clearVoxelOverlay();
 			viewer_->clearMesh();
 			viewer_->setInfo(info); // re-frame + re-size all grid-derived viewer geometry
+			pushGridToViewer();     // refresh the grid overlay for the (possibly graded) grid
 		}
 
 		spawnWorker(std::move(core), st.steps, st.sim_time);
@@ -1504,11 +1665,12 @@ namespace windcfd::gui
 		addRecentFile(path);
 		updateGizmoUi(); // enable the placement gizmo for the centerline
 
-		buildBuilding(); // build + inject the solid once (into the current domain), right after loading
+		buildBuilding(false); // build + inject the solid once into the CONFIGURED grid (no reconstruct on load;
+		                      // the first interactive Build/Apply re-tracks a graded fine core to the placement)
 		return true;
 	}
 
-	void MainWindow::buildBuilding()
+	void MainWindow::buildBuilding(bool reconstruct_grid)
 	{
 		using namespace windcfd::core;
 		// Build voxelizes the loaded model as a building. Prefer the centerline; fall back to a plain loaded
@@ -1521,6 +1683,20 @@ namespace windcfd::gui
 			return;
 		}
 		if (!worker_) { statusBar()->showMessage("no active simulation to build into", 4000); return; }
+
+		// GRADED grid: the fine core is anchored to the building, so an INTERACTIVE (re)build must RECONSTRUCT
+		// the grid around the building's CURRENT placement — voxelizing into the existing core would leave the
+		// fine zone at the OLD position after the model was moved (the old grid must not influence the new
+		// build). Delegate to the full rebuild (applyGrid regenerates the metric grid with the fine core
+		// re-tracked to the placement, resets to t=0, then calls buildBuilding(false) to voxelize into the
+		// fresh grid). A uniform grid is position-independent, so it voxelizes into the current grid directly.
+		// reconstruct_grid is true only for the interactive "Build" button (always post-startup, GL live); the
+		// CLI/File-menu load and applyGrid's own re-voxelize pass false, so they voxelize into the built grid.
+		if (reconstruct_grid && fine_core_chk_ && fine_core_chk_->isChecked())
+		{
+			applyGrid();
+			return;
+		}
 
 		// 1) Place the model WHERE THE GIZMO PUT IT: the user can translate/rotate/scale the house, so
 		//    voxelize the TRANSFORMED model. Read the live placement from the viewer (default centre-on-bed);
@@ -1548,12 +1724,16 @@ namespace windcfd::gui
 		if (corner_radius_spin_) prm.corner_radius  = corner_radius_spin_->value();
 		if (roof_overhang_spin_) prm.roof_overhang  = roof_overhang_spin_->value();
 		if (roof_thick_spin_)    prm.roof_thickness = roof_thick_spin_->value();
+		if (roof_chk_)           prm.roof           = roof_chk_->isChecked(); // off => walls/surface only (wing profile)
 		prm.base_z = 0.0;
 
 		// 3) Voxelize the building into the CURRENT domain + resolution (the sim's live grid) — NO auto-resize.
 		//    The user controls the simulation volume via the Domain size + voxel-size controls and Apply. Inject
 		//    the mask as the obstacle through the SAME worker hand-off loadStepFile uses (rebuild off-thread).
-		const MacGrid g = recipe_.grid;
+		// HOST-view grid: on a graded grid recipe_.grid is the DEVICE view (device metric pointers); the
+		// voxelizer runs on this (main) thread and must read host cell coordinates. (Graded-aware wall
+		// voxelization itself is task 4.1; this only keeps the deref host-safe.)
+		const MacGrid g = recipe_.metrics ? recipe_.metrics->host_view() : recipe_.grid;
 		int solid = 0;
 		std::vector<unsigned char> mask = voxelize_building(fp, prm, g, &solid);
 		if (solid <= 0 || (int)mask.size() != g.p_count())
@@ -1563,6 +1743,21 @@ namespace windcfd::gui
 				solid, mask.size(), g.p_count());
 			statusBar()->showMessage("build produced no solid cells (check domain size)", 6000);
 			return;
+		}
+
+		// Solidify the sealed interior (default on): the hollow room inside the walls, below the roof, is
+		// trapped fluid — fill it so it isn't simulated as an ill-conditioned enclosed pressure cavity and
+		// so the wind-load walk sees only the OUTER wall faces. Flood-fill only touches GENUINELY enclosed
+		// voids; an open/leaky structure stays fluid (filled == 0). Must run BEFORE the mask is moved out.
+		if (fill_interior_chk_ && fill_interior_chk_->isChecked())
+		{
+			const int filled = seal_enclosed_voids(mask, g);
+			if (filled > 0)
+			{
+				solid += filled;
+				std::fprintf(stderr, "[G1] building: sealed-interior fill solidified %d enclosed cells (%.2f%% of domain)\n",
+					filled, 100.0 * filled / std::max(1, g.p_count()));
+			}
 		}
 
 		const int mode = centerline_noslip_ ? SOLID_NOSLIP : SOLID_FREESLIP;
@@ -1727,7 +1922,8 @@ namespace windcfd::gui
 			double mesh_vol = 0.0, voxel_vol = 0.0;
 			int thin = 0;
 			std::vector<float> frac;
-			std::vector<unsigned char> model_solid = voxelize_mesh(model_mesh_, recipe_.grid, place,
+			const MacGrid vg = recipe_.metrics ? recipe_.metrics->host_view() : recipe_.grid; // host view (device-view on graded)
+			std::vector<unsigned char> model_solid = voxelize_mesh(model_mesh_, vg, place,
 				&mesh_vol, &voxel_vol, &frac, &thin);
 
 			// The loaded model REPLACES the config obstacle (the default cylinder): the injected mask is
@@ -1738,6 +1934,19 @@ namespace windcfd::gui
 			for (std::size_t n = 0; n < obstacle.size(); ++n)
 			{
 				if (model_solid[n]) { obstacle[n] = 1; ++nsolid; }
+			}
+
+			// Solidify any sealed interior (same "Fill sealed interior" toggle as Build): a watertight solid
+			// is already filled by voxelize_mesh's ray parity, so this is a no-op there; it seals a
+			// non-watertight / open loaded shell that would otherwise trap fluid inside.
+			if (fill_interior_chk_ && fill_interior_chk_->isChecked())
+			{
+				const int filled = seal_enclosed_voids(obstacle, vg);
+				if (filled > 0)
+				{
+					nsolid += filled;
+					std::fprintf(stderr, "[G1] model: sealed-interior fill solidified %d enclosed cells\n", filled);
+				}
 			}
 
 			const int mode = noslip ? SOLID_NOSLIP : SOLID_FREESLIP;

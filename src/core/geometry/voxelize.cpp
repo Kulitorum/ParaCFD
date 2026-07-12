@@ -85,7 +85,28 @@ namespace windcfd::core
 
 		// Cell index range overlapping the placed bbox (only these cells can be solid).
 		auto clampi = [](int v, int a, int b) { return v < a ? a : (v > b ? b : v); };
-		const int i0 = clampi((int)std::floor(lo[0] / h) - 1, 0, g.nx - 1);
+		// Graded grid: the model must live in the UNIFORM fine core (h_fine cubes; windloads asserts
+			// bbox ⊆ core). There xf(i)=i·h+Δ for a per-axis CONSTANT Δ, so this uniform voxelizer is exact
+			// once the placed geometry is shifted by −Δ: then floor(x/h) equals the correct graded CORE cell
+			// index. Δ is read from the cell containing the model bbox centre (a core cell). Uniform grid ⇒
+			// xfa null ⇒ Δ=0 (no shift, byte-identical). A model straddling the graded transition would
+			// mis-voxelize, but the load integration rejects that case (task 4.3).
+			if (g.xfa)
+			{
+				const int ic = clampi((int)std::floor(grid_fx(g, 0.5 * (lo[0] + hi[0]))), 0, g.nx - 1);
+				const int jc = clampi((int)std::floor(grid_fy(g, 0.5 * (lo[1] + hi[1]))), 0, g.ny - 1);
+				const int kc = clampi((int)std::floor(grid_fz(g, 0.5 * (lo[2] + hi[2]))), 0, g.nz - 1);
+				const double Dx = g.xf(ic) - ic * h, Dy = g.yf(jc) - jc * h, Dz = g.zf(kc) - kc * h;
+				for (Tri& tr : tris)
+				{
+					tr.ax -= Dx; tr.bx -= Dx; tr.cx -= Dx;
+					tr.ay -= Dy; tr.by -= Dy; tr.cy -= Dy;
+					tr.az -= Dz; tr.bz -= Dz; tr.cz -= Dz;
+				}
+				lo[0] -= Dx; hi[0] -= Dx; lo[1] -= Dy; hi[1] -= Dy; lo[2] -= Dz; hi[2] -= Dz;
+			}
+
+			const int i0 = clampi((int)std::floor(lo[0] / h) - 1, 0, g.nx - 1);
 		const int i1 = clampi((int)std::floor(hi[0] / h) + 1, 0, g.nx - 1);
 		const int j0 = clampi((int)std::floor(lo[1] / h) - 1, 0, g.ny - 1);
 		const int j1 = clampi((int)std::floor(hi[1] / h) + 1, 0, g.ny - 1);
@@ -267,5 +288,63 @@ namespace windcfd::core
 			*out_solid_count = c;
 		}
 		return mask;
+	}
+
+	int seal_enclosed_voids(std::vector<unsigned char>& solid, const MacGrid& g)
+	{
+		const int nx = g.nx, ny = g.ny, nz = g.nz;
+		const std::size_t n = (std::size_t)g.p_count();
+		if (solid.size() != n || n == 0) return 0;
+
+		std::vector<unsigned char> reached(n, 0);
+		std::vector<int> stack;
+		stack.reserve(n / 8 + 64);
+
+		auto seed = [&](int i, int j, int k)
+		{
+			const int idx = g.pidx(i, j, k);
+			if (!solid[(std::size_t)idx] && !reached[(std::size_t)idx])
+			{
+				reached[(std::size_t)idx] = 1;
+				stack.push_back(idx);
+			}
+		};
+
+		// Seed the OPEN boundary faces = everything EXCEPT the ground (k==0): inlet/outlet (i=0,nx-1),
+		// sides (j=0,ny-1), and the top (k=nz-1). The k==0 plane is seeded only where it meets those
+		// faces (its perimeter), never its interior — so a building's floor cells (mid-plane at k==0)
+		// are not seeded and stay reachable only through the walls, which seal them off.
+		for (int k = 0; k < nz; ++k)
+			for (int j = 0; j < ny; ++j) { seed(0, j, k); seed(nx - 1, j, k); }
+		for (int k = 0; k < nz; ++k)
+			for (int i = 0; i < nx; ++i) { seed(i, 0, k); seed(i, ny - 1, k); }
+		if (nz > 1)
+			for (int j = 0; j < ny; ++j)
+				for (int i = 0; i < nx; ++i) seed(i, j, nz - 1); // top face only
+
+		// 6-connected flood through fluid cells (DFS on an explicit stack).
+		while (!stack.empty())
+		{
+			const int idx = stack.back();
+			stack.pop_back();
+			const int i = idx % nx, j = (idx / nx) % ny, k = idx / (nx * ny);
+			auto visit = [&](int ii, int jj, int kk)
+			{
+				if (ii < 0 || ii >= nx || jj < 0 || jj >= ny || kk < 0 || kk >= nz) return;
+				const int nidx = g.pidx(ii, jj, kk);
+				if (solid[(std::size_t)nidx] || reached[(std::size_t)nidx]) return;
+				reached[(std::size_t)nidx] = 1;
+				stack.push_back(nidx);
+			};
+			visit(i - 1, j, k); visit(i + 1, j, k);
+			visit(i, j - 1, k); visit(i, j + 1, k);
+			visit(i, j, k - 1); visit(i, j, k + 1);
+		}
+
+		// Every fluid cell the flood never reached is a sealed pocket → fill it.
+		int filled = 0;
+		for (std::size_t t = 0; t < n; ++t)
+			if (!solid[t] && !reached[t]) { solid[t] = 1; ++filled; }
+		return filled;
 	}
 }

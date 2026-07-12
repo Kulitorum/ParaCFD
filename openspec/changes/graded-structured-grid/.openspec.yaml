@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-11
+goal: Resolve 300 mm corner radii (rounded vs sharp) at ~10 cells/radius within
+  a 4090 VRAM budget, without an octree rewrite.

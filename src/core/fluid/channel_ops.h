@@ -46,11 +46,14 @@ namespace windcfd::core
 	// Inlet: set u-face plane i=0 to the Dirichlet profile; v,w at i=0 plane left as is
 	// (cross-flow handled by fetch). Also zeroes v,w on the inlet cell column for cleanliness.
 	void ch_apply_inlet_gpu(double* u, MacGrid g, ChannelBC bc);
-	// Orlanski convective outlet on the i=nx u-plane: u_b += -(Uc*dt/h)*(u[nx]-u[nx-1]).
+	// Orlanski convective outlet on the i=nx u-plane: u_b += -(Uc*dt/dx_out)*(u[nx]-u[nx-1]), where
+	// dx_out is the LOCAL outlet cell width g.dx(nx-1) (graded-correct; == h on a uniform grid). The
+	// coefficient is formed inside the kernel so the device metric arrays are dereferenced on-device.
 	void ch_orlanski_gpu(double* u, MacGrid g, ChannelBC bc, double dt);
 	// Zero the interior solid faces (u·n=0 on obstacle surfaces & inside).
 	void ch_apply_solid_bc_gpu(double* u, double* v, double* w, const unsigned char* solid, MacGrid g);
-	// Sum u over an x-face plane i_plane, times h^2 (volumetric flux [m^3/s]).
+	// Volumetric flux [m^3/s] through the x-face plane i_plane: Σ u·dy(j)·dz(k) (true face areas, so it is
+	// correct on a graded grid; == Σu·h² on a uniform grid).
 	double ch_uplane_flux_gpu(const double* u, double* planeScratch, MacGrid g, int i_plane);
 	// Rescale the outlet u-plane (i=nx) by factor s.
 	void ch_scale_uplane_gpu(double* u, MacGrid g, int i_plane, double s);
@@ -71,6 +74,18 @@ namespace windcfd::core
 	void ch_jacobi_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, double omega, int sweeps);
 	// red-black Gauss-Seidel over the boundary band (solids skipped).
 	void ch_gs_band_gpu(double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax, int band, int sweeps, bool forward);
+	// Zebra (red-black LINE) smoother along one axis — the graded-grid anisotropy smoother.
+	// For every line of cells along `axis` whose transverse parity (sum of the two fixed
+	// indices) equals `color`, solve the FV Poisson operator restricted to that line EXACTLY
+	// (Thomas tridiagonal; transverse couplings move to the RHS at their current values).
+	// Zebra colouring makes all same-colour lines independent (their transverse neighbours
+	// are the opposite colour), so the GPU (one thread per line) and the serial CPU twin are
+	// exactly equivalent. Point smoothers cannot damp error along the strongly-coupled axis
+	// of an anisotropic (graded) cell; an x/y/z alternation of this smoother can, whichever
+	// axis is strong. cprime is a p_count() scratch (the swept superdiagonal). Solid cells
+	// and isolated (diag==0) cells are identity rows.
+	void ch_line_smooth_gpu(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color);
+	void ch_line_smooth_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, int axis, int color);
 	// u -= (dt/rho) grad p on interior fluid faces; inlet face skipped, outlet uses p_ghost=0.
 	void ch_subtract_gradient_gpu(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax);
 	void ch_subtract_gradient_cpu(std::vector<double>& u, std::vector<double>& v, std::vector<double>& w, const std::vector<double>& p, const std::vector<unsigned char>& solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax);

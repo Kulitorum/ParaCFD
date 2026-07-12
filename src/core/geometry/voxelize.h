@@ -55,4 +55,16 @@ namespace windcfd::core
 	// block contact the two masks may over-thicken by a cell (acceptable for a rigid structure).
 	std::vector<unsigned char> voxelize_mesh_instances(const TriMesh& mesh, MacGrid g,
 		const std::vector<ModelPlacement>& placements, int* out_solid_count = nullptr, int supersample = 3);
+
+	// Solidify ENCLOSED voids: mark every fluid cell (solid==0) that is NOT reachable from the open
+	// domain boundary as solid. Turns the hollow interior of a voxelized building (walls + roof, with
+	// trapped fluid inside) into a filled block — removing the full-cost enclosed-cavity pressure solve
+	// and the spurious inner-wall load faces. A 6-connected flood from the boundary defines "outside";
+	// any fluid the flood cannot reach is a sealed pocket. The GROUND face (k==0) is NOT a flood seed:
+	// a building sits ON the ground, so its interior floor touches k==0 and seeding there would leak the
+	// flood into the interior. Exterior ground cells are still reached via the fluid volume above them,
+	// so excluding k==0 is safe (it only ever fills genuinely sealed cavities; an OPEN structure — a gap,
+	// a tunnel, no roof — stays connected to the boundary and is left fluid). In-place on `solid`;
+	// returns the number of cells newly filled. Host-only, OCC-free; `g` supplies dims + g.pidx only.
+	int seal_enclosed_voids(std::vector<unsigned char>& solid, const MacGrid& g);
 }

@@ -29,6 +29,13 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
 `windcfd_gui_cuda` (the only CUDA-GL-header target); `windcfd-gui` ties them to Qt.
 
 ### `libwindcfd` — the solver core (no Qt, no OCC, no GL)
+- **Graded structured grid** (`src/core/fluid/grid_metrics.{h,cpp}`): `MacGrid` (`mac_grid.h`) carries
+  nullable per-axis metric arrays (cell widths + centres + cumulative face coords) with accessors that
+  fall back to the exact uniform `h` when null (uniform = byte-identical). `FineCoreSpec` +
+  `GridMetrics::generate` build a UNIFORM `h_fine` core inside a geometrically graded coarse far field;
+  `GridMetrics` owns host+device copies and hands out `host_view()` (CPU/geometry) vs `device_view()`
+  (GPU kernels). Shared world↔index map (`locate_frac`/`grid_fx/cx/…`). See the graded-grid note in
+  **Known gaps**.
 - **Fluid solver — Stam stable-fluids on a MAC grid** (`src/core/fluid/`):
   `mac_grid.h`/`mac_ops.h` (face-staggered grid), `advect.cu` (MacCormack advection),
   `turbulence.cu` (Smagorinsky LES eddy viscosity), `project.cu` + `mgpcg.cu`
@@ -85,6 +92,14 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
     miter-limited to bevel spikes); curved walls stay rounded via an angle threshold.
   - `BuildingParams`: `wall_thickness` (default **0.08 m** — a COBOD-printed wall), `wall_height`,
     `corner_radius`, `roof_overhang`, `roof_thickness`, `base_z` (all metres).
+  - **Sealed-interior fill** (`seal_enclosed_voids` in `voxelize.{h,cpp}`) — the wall-band + roof mask
+    leaves the room INSIDE the walls as trapped fluid. On a dense grid that interior is simulated at
+    full per-cell cost (an ill-conditioned enclosed pressure cavity) and adds spurious inner-wall
+    load faces. A 6-connected flood from the OPEN domain boundary (all faces **except the ground
+    `k==0`**, since the building sits on it) marks any fluid the wind can't reach as solid. The GUI
+    runs it on Build/Apply, gated by the **"Fill sealed interior"** dock checkbox (default **on**);
+    only GENUINELY sealed voids fill (an open/leaky/tunnel structure stays fluid). A watertight loaded
+    STEP is already interior-filled by `voxelize_mesh`'s ray parity, so the fill is a no-op there.
   - **`tools/building_probe`** (dev CLI, `windcfd_geometry`-linked) — load a centerline STEP →
     section → voxelize headlessly and print stats, to verify the pipeline before the GUI.
 - **Wind loads** (`src/core/windloads.{h,cpp}`) — integrate the **pressure** load on the
@@ -192,7 +207,8 @@ cmake --build build --target windcfd-gui
 ```
 
 - **Targets**: `libwindcfd` (core), `windcfd_geometry` (OCC STEP import), `windcfd_gui_cuda`
-  (CUDA-GL interop), `windcfd-gui` (the app), `building_probe` (dev CLI: centerline → mask).
+  (CUDA-GL interop), `windcfd-gui` (the app), `building_probe` (dev CLI: centerline → mask),
+  `parity_probe` (the GPU-vs-CPU + golden parity oracle; `ctest -R parity` / `./build/parity_probe.exe`).
 - **Dependencies**: CUDA 13.1, Qt 6.11.1 (`C:/Qt/6.11.1/msvc2022_64`, auto-detected via glob),
   OpenCascade 8.0 (`C:/OpenCASCADE-8.0/build2`).
 - `CMAKE_CUDA_ARCHITECTURES=89` builds only for this Ada RTX 4090 (fast). The CMake default
@@ -233,13 +249,15 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
 ## Key conventions & invariants (preserve these)
 
 - **Every CUDA kernel keeps a matching CPU reference twin** (`*_cpu`, e.g. `ch_poisson_apply_cpu`)
-  as the design contract, intended for GPU-vs-CPU checks at rel. max-norm **1e-5**. ⚠ **The gtest
-  parity harness itself is NOT in the tree right now** — there is no test target / `add_test` /
-  gtest, the `_cpu` twins are uncalled, and the CMake "geometry test" references are **stale**. So
-  the 1e-5 suite is a contract to *restore*, not an oracle you can currently run. Any large solver
-  refactor (e.g. the graded grid — see `openspec/changes/graded-structured-grid/`) must **first**
-  rebuild this harness or a golden-master field-snapshot oracle before touching the kernels;
-  preserve the `_cpu` twins meanwhile.
+  as the design contract, exercised by the **live parity oracle** `tools/parity_probe.cu` — a
+  `ctest` target (`add_test(NAME parity)`, no gtest dependency) that for every MAC kernel checks
+  (1) GPU-vs-CPU-twin parity ≤ **1e-5** AND (2) GPU-vs-blessed-golden ≤1e-5 (the golden gate is the
+  permanent "grading collapses to uniform" regression). Blessed baseline in `tests/golden/*.f64`;
+  re-bless with `parity_probe --bless`. It also covers the graded path directly (GPU-vs-CPU on a
+  generated graded grid, MMS Laplacian order, graded MGPCG convergence, the windloads bbox guard,
+  voxelizer world→index, and scene round-trip). Run: `ctest --test-dir build -R parity` or
+  `./build/parity_probe.exe`. Build it via the VS dev env (see Build). Preserve the `_cpu` twins and
+  keep this green across any solver change.
 - **Layering**: `libwindcfd` stays Qt-free, OCC-free and GL-free. OpenCascade lives only in
   `windcfd_geometry`; GL headers only in `windcfd_gui_cuda`'s `slice_gl.cu`. Keep new OCC/GL
   code inside those islands. (`building.*` and `windloads.*` are host-only + OCC-free.)
@@ -296,14 +314,54 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   and SEM inlet exist as infrastructure but aren't wired into the building configs.
 - **Building viscosity is a moderate `nu = 1e-3` default** (`configs/building.json`), not the
   true air Re — a numerically-forgiving value, not a physically-resolved one.
-- **NEXT — resolution decouple (graded grid).** The uniform grid welds feature resolution to
-  domain size, so at `h=0.25 m` a ~0.30 m corner is only ~1.2 cells — **rounded voxelizes ≈ sharp
-  and the effect the tool exists to measure is invisible**. The chosen fix is an axis-separable
-  **graded structured grid** (fine core around the building, coarse far field); full proposal +
-  design + tasks in `openspec/changes/graded-structured-grid/`. This replaces `MacGrid`'s scalar
-  `h` with per-axis metric arrays — a core refactor gated on first restoring the parity oracle
-  (above). NOTE for that work: `windloads.cpp` and `flow_particles/flow_tracers` also carry a
-  scalar `h` and must be metric-aware.
+- **DONE (mostly) — resolution decouple via the graded structured grid.** The uniform grid welded
+  feature resolution to domain size (`h=0.25 m` ⇒ a 0.30 m corner was ~1.2 cells, so rounded ≈ sharp
+  and the effect the tool exists to measure was invisible). Fixed with an axis-separable **graded
+  structured grid**: a UNIFORM `h_fine` core around the building inside a geometrically graded coarse
+  far field (`src/core/fluid/grid_metrics.{h,cpp}` — `FineCoreSpec` + `GridMetrics::generate`).
+  `MacGrid` now carries nullable per-axis metric arrays (`dx/dy/dz`, `xc/yc/zc`, `xf/yf/zf`) with
+  accessors that fall back to the exact uniform closed form when null, so a uniform grid is
+  byte-identical. Every operator, the voxelizers, windloads, the slice sampler, and the flow tracers
+  are metric-aware; `adaptive_dt` keys off `h_min()`. ⚠ The **Orlanski convective outlet**
+  (`ch_orlanski_gpu`) must divide by the LOCAL outlet cell width `g.dx(nx-1)` (or `dx(0)` reversed) —
+  NOT the scalar `h`: on a graded grid the exit sits in the coarse far field (`dx ≫ h_fine`), so `/h`
+  over-convects the outlet by `dx/h` and pumps a boundary instability that runs away from the exit-ground
+  corner (the `Cylinder_Exploded.scn` failure — u/p piled up at `i=nx, k=0`). `coef` is formed in-kernel
+  so the device metric deref is on-device. ⚠ **Graded pressure-solve invariants** (the
+  graded+obstacle blow-up fix): graded cells are ANISOTROPIC (a far-field slab can be ~20× wider on
+  one axis), so the MGPCG V-cycle smoother on graded levels is the **alternating zebra LINE
+  smoother** (`ch_line_smooth_*`: exact tridiagonal Thomas solve per line, transverse couplings to
+  the RHS; forward-order pre-smooth / exact-reverse post-smooth keeps the preconditioner
+  self-adjoint) — point Jacobi/GS mathematically cannot damp anisotropic error and CG stalls. The
+  graded FV operator has volume-scaled rows ⇒ it is self-adjoint only in the **VOLUME-weighted
+  inner product**: the CG dots use `dot_vol_gpu` and restriction is the volume-weighted adjoint of
+  prolongation (`V_fine/V_coarse` per contribution; = the literal 1/8 uniform) — Euclidean dots on
+  a graded grid run CG on a nonsymmetric operator and DIVERGE under a strong preconditioner. All of
+  this is gated on `g.xfa != null`; the uniform path is byte-identical (golden gate). NOTE a graded
+  axis with an ODD cell count never coarsens (factor-2 hierarchy stops), so the coarsest-level
+  branch — symmetric alternating-line iterations — can BE the whole preconditioner; keep it
+  anisotropy-robust. Guarded by `graded_mgpcg_hicontrast` (18× contrast + obstacle, bounded iters)
+  and the `ch_line_smooth_*` parity checks in `parity_probe`. Opt-in via a config `"fine_core": {enabled,
+  x0..z1, h_fine, growth}` object (parsed in `sim_setup.cpp`; `configs/g1_viewer_graded.json`);
+  `.scn` persists the spec + regenerates. All gated by the `parity_probe` oracle (above).
+  **windloads asserts the building bbox ⊆ the uniform fine core** (its `h_fine²`-face math is exact
+  only there) — enlarge the `fine_core` box if it throws. GUI dock controls for the fine core (task
+  3.4) and the graded-aware viewer are DONE: the voxel-staircase overlay (`uploadVoxelOverlay`) draws
+  each cell at its metric coords `g.xf(i)`/`g.dx(i)`, and the velocity/pressure **slice** carries the
+  true extent (`SliceParams.Lx…` from `info_.Lx`) + the core's **device-view** metrics
+  (`SimWorker::displayGrid()`) so its quad + `grid_fx` sampling land on the correct graded cells (the
+  uniform-`i·h` versions drew the obstacle + slice shifted toward the origin). **Remaining**: the
+  physical **rounded-vs-sharp validation runs** (below) are user-driven GPU jobs. Full
+  proposal/design/tasks in `openspec/changes/graded-structured-grid/`.
+- **Corner-resolution protocol (design D7, `grid_metrics.h` helpers).** The rounded-vs-sharp signal
+  rides on the discretization error, so `h_fine` is not free: **size it ≈ r/10** (≥10 cells across
+  the corner radius, e.g. 30 mm for a 300 mm radius — `recommended_h_fine()`); a run at **`h_fine ≥
+  r/4` is below the resolution floor** (rounded voxelizes ≈ sharp — `below_resolution_floor()`
+  warns) and is NOT comparison-grade. Before trusting a delta, run the **grid-convergence gate**:
+  rerun the rounded case at a finer `h_fine` (e.g. 30 mm → 20 mm) and confirm Cd + peak-suction Cp
+  are stable within the time-averaging RMS band. A/B pairs (rounded vs sharp) MUST share the domain,
+  `fine_core` spec, and inflow — differ only in the corner geometry. Judge convergence off the
+  **time-averaged** loads (`LoadAverager`), not an instantaneous snapshot.
 - **DEAD-END (tried + reverted): open far-field BC.** An opt-in Dirichlet-p=0 "open" mode on the
   top/side faces (to relieve blockage in a small domain) gave textbook Cp at ≤~5% blockage but
   **backflow-diverges at higher blockage** — the regime where it's needed. Not committed; the

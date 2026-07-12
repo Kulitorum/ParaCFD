@@ -42,7 +42,10 @@ namespace windcfd::gui
 	// nearest MAC cell, reduced to the chosen scalar, and colour-mapped over [vmin,vmax].
 	struct SliceParams
 	{
-		windcfd::core::MacGrid grid; // MAC geometry (nx,ny,nz,h)
+		windcfd::core::MacGrid grid; // MAC geometry (nx,ny,nz,h) + metric arrays (device view for the sampler)
+		float Lx = 0.0f, Ly = 0.0f, Lz = 0.0f; // TRUE domain extent [m] (xf[nx] etc.); 0 ⇒ fall back to nx·h.
+		                                       // Set explicitly so slice_vertex_world (host geometry AND the
+		                                       // device sampler) agrees without dereferencing metric pointers.
 		Axis axis = Axis::Y;       // plane normal
 		float plane_pos = 0.0f;    // world coordinate [m] of the plane along `axis`
 		int nu = 128;              // mesh resolution along in-plane axis 1
@@ -58,7 +61,12 @@ namespace windcfd::gui
 	WINDCFD_HD inline void slice_vertex_world(const SliceParams& sp, int a, int b, float& x, float& y, float& z)
 	{
 		const windcfd::core::MacGrid& g = sp.grid;
-		float Lx = (float)(g.nx * g.h), Ly = (float)(g.ny * g.h), Lz = (float)(g.nz * g.h);
+		// TRUE domain extent from sp.Lx/Ly/Lz (xf[nx] etc.) — on a graded grid nx·h (= n·h_fine) undershoots
+		// the far field, which shrinks + offsets the slice quad toward the origin. Passed in explicitly (not
+		// g.Lx()) so the HOST geometry path never dereferences the device metric pointers. 0 ⇒ nx·h fallback.
+		float Lx = sp.Lx > 0.0f ? sp.Lx : (float)(g.nx * g.h);
+		float Ly = sp.Ly > 0.0f ? sp.Ly : (float)(g.ny * g.h);
+		float Lz = sp.Lz > 0.0f ? sp.Lz : (float)(g.nz * g.h);
 		float s = (sp.nu > 1) ? (float)a / (float)(sp.nu - 1) : 0.0f;
 		float t = (sp.nv > 1) ? (float)b / (float)(sp.nv - 1) : 0.0f;
 		if (sp.axis == Axis::X) { x = sp.plane_pos; y = s * Ly; z = t * Lz; }       // in-plane (y,z)
