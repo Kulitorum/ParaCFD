@@ -56,6 +56,11 @@ namespace windcfd::gui
 		const double* disp_w() const { return dw_; }
 		const double* disp_p() const { return dp_; }
 		const unsigned char* disp_solid() const { return ds_; } // solid mask snapshot (auto-range excludes it)
+		// DEVICE-view MacGrid (device metric arrays) for the main-thread slice sampler: grid_fx maps each
+		// slice vertex's world position to the correct GRADED cell on the device. This is the very grid the
+		// core steps on (device_view for a graded core; null-metric = uniform ⇒ grid_fx falls back to x/h).
+		// The metric arrays are immutable for the core's lifetime, so no display_mutex is needed for the grid.
+		windcfd::core::MacGrid displayGrid() const { return core_ ? core_->grid() : windcfd::core::MacGrid{}; }
 
 		bool playing() const { return playing_.load(); }
 		// Master run gate ("hold until Start Simulation"): the worker steps NOTHING until started, so the

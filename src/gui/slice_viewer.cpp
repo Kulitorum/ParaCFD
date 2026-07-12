@@ -908,6 +908,10 @@ void main()
 	{
 		SliceParams sp;
 		sp.grid.nx = info_.nx; sp.grid.ny = info_.ny; sp.grid.nz = info_.nz; sp.grid.h = info_.h;
+		// TRUE domain extent (graded: xf[nx] via info_.Lx; uniform: nx·h). Positions the slice quad correctly
+		// on a graded grid without dereferencing metric pointers here (the host geometry path has none). The
+		// device sampler additionally gets the metric ARRAYS via worker_->displayGrid() (see paintGL).
+		sp.Lx = (float)info_.Lx; sp.Ly = (float)info_.Ly; sp.Lz = (float)info_.Lz;
 		sp.axis = axis_;
 		float L = (axis_ == Axis::X) ? (float)info_.Lx : (axis_ == Axis::Y) ? (float)info_.Ly : (float)info_.Lz;
 		sp.plane_pos = plane_frac_ * L;
@@ -1785,7 +1789,6 @@ void main()
 		const float cp_span = (vox_cp_hi_ > vox_cp_lo_) ? (vox_cp_hi_ - vox_cp_lo_) : 1.0f;
 
 		std::vector<float> pos, nrm, col;
-		const float h = (float)g.h;
 		float cr = 0.5f, cg = 0.5f, cb = 0.5f; // current cell's Cp colour (set per solid cell below)
 		auto quad = [&](float ox, float oy, float oz, float ux, float uy, float uz, float vx, float vy, float vz, float nx, float ny, float nz)
 		{
@@ -1813,13 +1816,17 @@ void main()
 							scour_colormap((cp - vox_cp_lo_) / cp_span, cr, cg, cb);
 						else { cr = cg = cb = 0.6f; }
 					}
-					const float x0 = i * h, y0 = j * h, z0 = k * h;
-					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, h, 0, 0, 0, h, -1, 0, 0); // -x
-					if (!solid_at(i + 1, j, k)) quad(x0 + h, y0, z0, 0, 0, h, 0, h, 0, 1, 0, 0); // +x
-					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, h, h, 0, 0, 0, -1, 0); // -y
-					if (!solid_at(i, j + 1, k)) quad(x0, y0 + h, z0, h, 0, 0, 0, 0, h, 0, 1, 0); // +y
-					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, h, 0, 0, 0, h, 0, 0, 0, -1); // -z
-					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + h, 0, h, 0, h, 0, 0, 0, 0, 1); // +z
+					// Cell's minimum-corner face coords + per-axis widths from the grid metrics — on a GRADED
+					// grid these are the true (non-uniform) cell bounds xf[i]/dx[i]; the accessors fall back to
+					// exact i·h / h on a uniform grid, so the staircase lands on the same voxels the flow uses.
+					const float x0 = (float)g.xf(i), y0 = (float)g.yf(j), z0 = (float)g.zf(k);
+					const float hx = (float)g.dx(i), hy = (float)g.dy(j), hz = (float)g.dz(k);
+					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, hy, 0, 0, 0, hz, -1, 0, 0); // -x
+					if (!solid_at(i + 1, j, k)) quad(x0 + hx, y0, z0, 0, 0, hz, 0, hy, 0, 1, 0, 0); // +x
+					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, hz, hx, 0, 0, 0, -1, 0); // -y
+					if (!solid_at(i, j + 1, k)) quad(x0, y0 + hy, z0, hx, 0, 0, 0, 0, hz, 0, 1, 0); // +y
+					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, hx, 0, 0, 0, hy, 0, 0, 0, -1); // -z
+					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + hz, 0, hy, 0, hx, 0, 0, 0, 0, 1); // +z
 				}
 
 		vox_vertex_count_ = (int)(pos.size() / 3);
@@ -1920,18 +1927,20 @@ void main()
 		if (worker_ && worker_->display_ready() && cuda_res_ && have_info_)
 		{
 			std::lock_guard<std::mutex> lk(worker_->display_mutex());
+			// Sampler grid = the core's DEVICE-view metrics (grid_fx maps each vertex to the correct GRADED
+			// cell on the device). currentParams() alone carries only nx/ny/nz/h + the true extent (sp.Lx…);
+			// displayGrid() adds the device metric ARRAYS with identical dims. Uniform ⇒ null metrics (x/h).
+			SliceParams sp = currentParams();
+			sp.grid = worker_->displayGrid();
 			if (auto_range_ && (range_ctr_++ % kRangeEvery == 0))
 			{
 				FieldRange fr;
 				if (slice_gl_reduce(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(),
-					worker_->disp_p(), worker_->disp_solid(), currentParams().grid, field_, &fr))
+					worker_->disp_p(), worker_->disp_solid(), sp.grid, field_, &fr))
 					applyAutoRange(fr);
 			}
 			if (show_slice_) // slice fill skipped when hidden (no fill, no draw)
-			{
-				SliceParams sp = currentParams();
 				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), sp);
-			}
 		}
 
 		updateArrows(); // advect the arrow tracers + upload instance data (reads the worker's host flow)
