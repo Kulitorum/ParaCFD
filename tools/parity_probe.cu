@@ -677,6 +677,83 @@ int main(int argc, char** argv)
 		rep.check("graded_mgpcg_solve", res.converged, d);
 	}
 
+	std::printf("-- zebra line smoother: GPU-vs-CPU parity (uniform + graded) --\n");
+	{
+		// Uniform grid (null metrics), full alternating pass over all axes/colours. No golden:
+		// the kernel is new (the uniform SOLVER path never calls it), parity is the contract.
+		double* dp = dev(p), *dr = dev(rhs), *ds = dev_zero(NP);
+		std::vector<double> cp = p;
+		for (int axis = 0; axis < 3; ++axis)
+			for (int color = 0; color < 2; ++color)
+			{
+				ch_line_smooth_gpu(dp, dr, ds, dsolid, g, dir_xmax, axis, color);
+				ch_line_smooth_cpu(cp, rhs, solid, g, dir_xmax, axis, color);
+			}
+		rep.report_parity("ch_line_smooth_unif", back(dp, NP), cp);
+	}
+	{
+		// Genuinely graded grid + solid box (same fixture recipe as task 5.3).
+		FineCoreSpec spec;
+		spec.Lx = spec.Ly = spec.Lz = 1.0;
+		spec.x0 = spec.y0 = spec.z0 = 0.4; spec.x1 = spec.y1 = spec.z1 = 0.6;
+		spec.h_fine = 0.03; spec.growth = 1.15;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gd = gm.device_view(), gh = gm.host_view();
+		int gNP = gh.p_count();
+		std::vector<unsigned char> gsolid(gNP, 0);
+		for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+		{
+			double cx = gh.xc(i), cy = gh.yc(j), cz = gh.zc(k);
+			if (cx > 0.45 && cx < 0.55 && cy > 0.45 && cy < 0.55 && cz > 0.45 && cz < 0.55) gsolid[gh.pidx(i, j, k)] = 1;
+		}
+		unsigned char* gds = dev_u8(gsolid);
+		std::vector<double> gp = filled(gNP, 601, -1, 1), grhs = filled(gNP, 602, -1, 1);
+		double* dp = dev(gp), *dr = dev(grhs), *ds = dev_zero(gNP);
+		std::vector<double> cp = gp;
+		for (int axis = 0; axis < 3; ++axis)
+			for (int color = 0; color < 2; ++color)
+			{
+				ch_line_smooth_gpu(dp, dr, ds, gds, gd, dir_xmax, axis, color);
+				ch_line_smooth_cpu(cp, grhs, gsolid, gh, dir_xmax, axis, color);
+			}
+		rep.report_parity("ch_line_smooth_graded", back(dp, gNP), cp);
+	}
+
+	std::printf("-- graded MGPCG at HIGH cell-size contrast + obstacle (anisotropy gate) --\n");
+	{
+		// ~17x far-field/fine cell contrast with a solid box in the core — the Cube3 blow-up
+		// regime. The far-field cells are extremely anisotropic slabs (e.g. 0.6 x 0.04 x 0.04),
+		// which point (Jacobi/GS) smoothing mathematically cannot damp: before the zebra line
+		// smoother this solve stalls (relres ~1e-2..5e-1 at max_iter, more iters don't help).
+		// The gate demands convergence in a small bounded iteration count.
+		FineCoreSpec spec;
+		spec.Lx = spec.Ly = spec.Lz = 11.0;
+		spec.x0 = spec.y0 = spec.z0 = 5.1; spec.x1 = spec.y1 = spec.z1 = 5.9;
+		spec.h_fine = 0.04; spec.growth = 1.15;
+		GridMetrics gm = GridMetrics::generate(spec);
+		MacGrid gd = gm.device_view(), gh = gm.host_view();
+		int NPg = gh.p_count();
+		double dmax = 0.0;
+		for (int i = 0; i < gh.nx; ++i) dmax = std::max(dmax, gh.dx(i));
+		std::vector<unsigned char> gsolid(NPg, 0);
+		for (int k = 0; k < gh.nz; ++k) for (int j = 0; j < gh.ny; ++j) for (int i = 0; i < gh.nx; ++i)
+		{
+			double cx = gh.xc(i), cy = gh.yc(j), cz = gh.zc(k);
+			if (cx > 5.3 && cx < 5.7 && cy > 5.3 && cy < 5.7 && cz > 5.3 && cz < 5.7) gsolid[gh.pidx(i, j, k)] = 1;
+		}
+		unsigned char* gds = dev_u8(gsolid);
+		ChannelMgpcg solver(gd);
+		solver.build_masks(gds);
+		std::vector<double> b = filled(NPg, 701, -1.0, 1.0);
+		for (int c = 0; c < NPg; ++c) if (gsolid[c]) b[c] = 0.0; // solid rows carry no RHS (as ch_poisson_rhs)
+		double* db = dev(b); double* dxs = dev_zero(NPg);
+		SolveResult res = solver.solve(dxs, db, 1e-5, 150, false);
+		bool ok = res.converged && res.iters <= 100;
+		char d[112]; std::snprintf(d, sizeof d, "%dx%dx%d contrast %.0fx %d lvls %d it relres %.1e",
+			gh.nx, gh.ny, gh.nz, dmax / spec.h_fine, (int)solver.levels().size(), res.iters, res.relres);
+		rep.check("graded_mgpcg_hicontrast", ok, d);
+	}
+
 	std::printf("-- windloads bbox-in-uniform-core guard (task 4.3) --\n");
 	{
 		FineCoreSpec spec;

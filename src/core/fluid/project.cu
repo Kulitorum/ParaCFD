@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
 #include <thrust/inner_product.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
 #include <thrust/functional.h>
@@ -107,8 +108,9 @@ namespace windcfd::core
 		// GRADED (metric arrays given): LINEAR interpolation in PHYSICAL space between the two bracketing
 		// coarse cell CENTRES — index-space weights are geometrically wrong on stretched cells and cripple the
 		// coarse-grid correction, so the MG preconditioner can't reduce the anisotropic fine↔coarse modes and
-		// CG stalls (relres stuck ≫ tol → residual divergence → the graded-obstacle blow-up). Restrict uses the
-		// SAME weights as prolong (R = ⅛Pᵀ), so the V-cycle stays symmetric / SPD either way.
+		// CG stalls (relres stuck ≫ tol → residual divergence → the graded-obstacle blow-up). Restrict is the
+		// ADJOINT of prolong in the inner product where the level operator is self-adjoint: uniform ⇒ Euclidean
+		// ⇒ R = ⅛Pᵀ; graded ⇒ volume-weighted (see k_restrict) — either way the V-cycle stays symmetric / SPD.
 		WINDCFD_HD inline void axis_stencil(int fi, int nc, const double* fc, const double* cc, int& C0, int& C1, double& w0, double& w1)
 		{
 			double t;
@@ -141,11 +143,18 @@ namespace windcfd::core
 			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
 			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
 			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
-			double f = fine[t] * 0.125; // R = (1/8) P^T
+			// Uniform: R = (1/8)Pᵀ. Graded: the FV rows are volume-scaled (self-adjoint in the
+			// VOLUME inner product), so P's adjoint weights each contribution by V_fine/V_coarse —
+			// the FV-consistent volume average, which equals exactly 1/8 on uniform spacing (kept
+			// as the literal there: byte-identical golden path).
+			double Vf = gf.xca ? gf.dx(fi) * gf.dy(fj) * gf.dz(fk) : 0.0;
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
 			for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b) for (int c = 0; c < 2; ++c)
-				atomicAdd(&coarse[gc.pidx(cx[a], cy[b], cz[c])], f * wx[a] * wy[b] * wz[c]);
+			{
+				double fac = gf.xca ? Vf / (gc.dx(cx[a]) * gc.dy(cy[b]) * gc.dz(cz[c])) : 0.125;
+				atomicAdd(&coarse[gc.pidx(cx[a], cy[b], cz[c])], fine[t] * fac * wx[a] * wy[b] * wz[c]);
+			}
 		}
 		__global__ void k_prolong_add(const double* coarse, double* fine, MacGrid gc, MacGrid gf, int nf)
 		{
@@ -200,6 +209,15 @@ namespace windcfd::core
 		inline int gsz(int n, int b = 256) { return (n + b - 1) / b; }
 
 		struct AbsOp { __host__ __device__ double operator()(double v) const { return fabs(v); } };
+		struct VolDotOp
+		{
+			const double *a, *b; MacGrid g;
+			__host__ __device__ double operator()(int t) const
+			{
+				int i = t % g.nx, j = (t / g.nx) % g.ny, k = t / (g.nx * g.ny);
+				return a[t] * b[t] * (g.dx(i) * g.dy(j) * g.dz(k));
+			}
+		};
 	}
 
 	// ---- public launchers -------------------------------------------------------
@@ -249,6 +267,11 @@ namespace windcfd::core
 	}
 	double dot_gpu(const double* a, const double* b, int n)
 	{ return thrust::inner_product(thrust::device, thrust::device_pointer_cast(a), thrust::device_pointer_cast(a) + n, thrust::device_pointer_cast(b), 0.0); }
+	double dot_vol_gpu(const double* a, const double* b, MacGrid g)
+	{
+		thrust::counting_iterator<int> c0(0);
+		return thrust::transform_reduce(thrust::device, c0, c0 + g.p_count(), VolDotOp{a, b, g}, 0.0, thrust::plus<double>());
+	}
 	void axpy_gpu(double alpha, const double* x, double* y, int n) { k_axpy<<<gsz(n), 256>>>(alpha, x, y, n); }
 	void scale_add_gpu(double* y, double alpha, const double* x, double beta, int n) { k_scale_add<<<gsz(n), 256>>>(y, alpha, x, beta, n); }
 	void add_const_gpu(double* x, double c, int n) { k_add_const<<<gsz(n), 256>>>(x, c, n); }
@@ -313,11 +336,15 @@ namespace windcfd::core
 			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
 			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
 			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
-			double f = fine[gf.pidx(fi, fj, fk)] * 0.125;
+			// graded ⇒ volume-weighted adjoint restriction (see k_restrict); uniform ⇒ literal 1/8
+			double Vf = gf.xca ? gf.dx(fi) * gf.dy(fj) * gf.dz(fk) : 0.0;
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
 			for (int a = 0; a < 2; ++a) for (int b = 0; b < 2; ++b) for (int c = 0; c < 2; ++c)
-				coarse[gc.pidx(cx[a], cy[b], cz[c])] += f * wx[a] * wy[b] * wz[c];
+			{
+				double fac = gf.xca ? Vf / (gc.dx(cx[a]) * gc.dy(cy[b]) * gc.dz(cz[c])) : 0.125;
+				coarse[gc.pidx(cx[a], cy[b], cz[c])] += fine[gf.pidx(fi, fj, fk)] * fac * wx[a] * wy[b] * wz[c];
+			}
 		}
 	}
 	void prolong_add_cpu(const std::vector<double>& coarse, std::vector<double>& fine, MacGrid gc, MacGrid gf)

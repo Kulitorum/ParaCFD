@@ -87,6 +87,11 @@ namespace windcfd::core
 	double reduce_sum_gpu(const double* x, int n);
 	double reduce_max_abs_gpu(const double* x, int n);
 	double dot_gpu(const double* a, const double* b, int n);
+	// Volume-weighted dot over a CELL field: Σ a·b·(dx·dy·dz). The graded FV Poisson operator
+	// has volume-scaled rows, so it is self-adjoint only in THIS inner product — CG on a graded
+	// grid must use it (Euclidean dots make CG run on a nonsymmetric operator and diverge under
+	// a strong preconditioner). Uniform grid ⇒ h³·dot_gpu (callers keep dot_gpu there).
+	double dot_vol_gpu(const double* a, const double* b, MacGrid g);
 	void axpy_gpu(double alpha, const double* x, double* y, int n); // y += alpha*x
 	void scale_add_gpu(double* y, double alpha, const double* x, double beta, int n); // y = alpha*x + beta*y
 	void add_const_gpu(double* x, double c, int n);

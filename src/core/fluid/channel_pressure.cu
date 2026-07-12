@@ -113,27 +113,71 @@ namespace windcfd::core
 
 	void ChannelMgpcg::apply_finest(const double* p, double* Ap) { ch_poisson_apply_gpu(p, Ap, Lsolid_[0], grids_[0], dir_xmax_); }
 
+	namespace
+	{
+		// One alternating-line pass over all three axes (see channel_pressure.h). forward =
+		// x(colour 0,1), y(0,1), z(0,1); reverse = z(1,0), y(1,0), x(1,0) — each zebra colour
+		// solve is an exact (A-self-adjoint) block solve, so the reverse pass is the adjoint
+		// of the forward pass and a forward-pre / reverse-post pair keeps the V-cycle SPD.
+		void line_pass(double* p, const double* rhs, double* scr, const unsigned char* solid, MacGrid g, int dir_xmax, bool forward)
+		{
+			if (forward)
+				for (int axis = 0; axis <= 2; ++axis)
+				{
+					ch_line_smooth_gpu(p, rhs, scr, solid, g, dir_xmax, axis, 0);
+					ch_line_smooth_gpu(p, rhs, scr, solid, g, dir_xmax, axis, 1);
+				}
+			else
+				for (int axis = 2; axis >= 0; --axis)
+				{
+					ch_line_smooth_gpu(p, rhs, scr, solid, g, dir_xmax, axis, 1);
+					ch_line_smooth_gpu(p, rhs, scr, solid, g, dir_xmax, axis, 0);
+				}
+		}
+	}
+
 	void ChannelMgpcg::vcycle(int level)
 	{
 		MacGrid g = grids_[level]; int n = g.p_count();
 		double* p = Lp_[level]; double* rhs = Lrhs_[level]; double* tmp = Ltmp_[level];
 		const unsigned char* solid = Lsolid_[level];
+		const bool graded = g.xfa != nullptr; // graded levels use line smoothing; uniform keeps the point smoothers (byte-identical)
 		if (level == (int)grids_.size() - 1)
 		{
-			ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, coarse_sweeps);
+			// Coarsest solve. NOTE a graded grid with an odd axis count (e.g. 142x142x87) never
+			// coarsens at all — this branch IS the whole preconditioner then, so it must be
+			// anisotropy-robust too: symmetric (forward+reverse) alternating-line iterations.
+			if (graded)
+				for (int s = 0; s < coarse_line_iters; ++s)
+				{
+					line_pass(p, rhs, tmp, solid, g, dir_xmax_, true);
+					line_pass(p, rhs, tmp, solid, g, dir_xmax_, false);
+				}
+			else
+				ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, coarse_sweeps);
 			return;
 		}
 		int gsweeps = 1 << (level + 1); if (gsweeps > 8) gsweeps = 8; // cap doubling on deep (thin-domain) hierarchies
-		ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, pre_post_jacobi);
-		ch_gs_band_gpu(p, rhs, solid, g, dir_xmax_, gs_band, gsweeps, true);
+		if (graded)
+			for (int s = 0; s < line_sweeps; ++s) line_pass(p, rhs, tmp, solid, g, dir_xmax_, true);
+		else
+		{
+			ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, pre_post_jacobi);
+			ch_gs_band_gpu(p, rhs, solid, g, dir_xmax_, gs_band, gsweeps, true);
+		}
 		ch_poisson_residual_gpu(p, rhs, tmp, solid, g, dir_xmax_); // tmp = residual
 		MacGrid gc = grids_[level + 1];
 		restrict_gpu(tmp, Lrhs_[level + 1], g, gc);
 		cudaMemset(Lp_[level + 1], 0, sizeof(double) * gc.p_count());
 		vcycle(level + 1);
 		prolong_add_gpu(Lp_[level + 1], p, gc, g);
-		ch_gs_band_gpu(p, rhs, solid, g, dir_xmax_, gs_band, gsweeps, false);
-		ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, pre_post_jacobi);
+		if (graded)
+			for (int s = 0; s < line_sweeps; ++s) line_pass(p, rhs, tmp, solid, g, dir_xmax_, false);
+		else
+		{
+			ch_gs_band_gpu(p, rhs, solid, g, dir_xmax_, gs_band, gsweeps, false);
+			ch_jacobi_gpu(p, rhs, tmp, solid, g, dir_xmax_, omega, pre_post_jacobi);
+		}
 	}
 	void ChannelMgpcg::precondition(const double* r, double* z)
 	{
@@ -147,7 +191,15 @@ namespace windcfd::core
 	SolveResult ChannelMgpcg::solve(double* x, const double* b, double tol, int max_iter, bool warm_start)
 	{
 		int n = n0_; SolveResult out;
-		double bnorm = std::sqrt(dot_gpu(b, b, n));
+		// Graded grids run CG in the VOLUME-weighted inner product <u,v> = Σ V·u·v. The FV
+		// operator's rows are scaled by 1/cell-volume, so A is self-adjoint only in that inner
+		// product (V·A is the symmetric flux matrix); the V-cycle (adjoint-paired line passes +
+		// volume-weighted restriction) is V-self-adjoint likewise. Euclidean dots would run CG
+		// on an operator that is NONSYMMETRIC by the far-field/fine volume ratio (~10³ at high
+		// contrast) — it stalls or diverges. Uniform ⇒ V = h³·I ⇒ plain dots, byte-identical.
+		const bool graded = grids_[0].xfa != nullptr;
+		auto vdot = [&](const double* a, const double* c) { return graded ? dot_vol_gpu(a, c, grids_[0]) : dot_gpu(a, c, n); };
+		double bnorm = std::sqrt(vdot(b, b));
 		if (!(bnorm > 0.0)) { cudaMemset(x, 0, sizeof(double) * n); out.converged = true; return out; }
 		if (!warm_start) cudaMemset(x, 0, sizeof(double) * n);
 
@@ -155,26 +207,26 @@ namespace windcfd::core
 		if (warm_start) { apply_finest(x, As_); cudaMemcpy(r_, b, sizeof(double) * n, cudaMemcpyDeviceToDevice); axpy_gpu(-1.0, As_, r_, n); }
 		else cudaMemcpy(r_, b, sizeof(double) * n, cudaMemcpyDeviceToDevice);
 
-		double relres = std::sqrt(dot_gpu(r_, r_, n)) / bnorm;
+		double relres = std::sqrt(vdot(r_, r_)) / bnorm;
 		if (relres <= tol) { out.iters = 0; out.relres = relres; out.converged = true; return out; }
 
 		precondition(r_, z_);
 		cudaMemcpy(s_, z_, sizeof(double) * n, cudaMemcpyDeviceToDevice);
-		double rz = dot_gpu(r_, z_, n);
+		double rz = vdot(r_, z_);
 		int it = 0;
 		for (; it < max_iter; )
 		{
 			++it;
 			apply_finest(s_, As_);
-			double sAs = dot_gpu(s_, As_, n);
+			double sAs = vdot(s_, As_);
 			if (!(sAs > 0.0)) break;
 			double alpha = rz / sAs;
 			axpy_gpu(alpha, s_, x, n);
 			axpy_gpu(-alpha, As_, r_, n);
-			relres = std::sqrt(dot_gpu(r_, r_, n)) / bnorm;
+			relres = std::sqrt(vdot(r_, r_)) / bnorm;
 			if (relres <= tol) break;
 			precondition(r_, z_);
-			double rznew = dot_gpu(r_, z_, n);
+			double rznew = vdot(r_, z_);
 			double beta = rznew / rz;
 			scale_add_gpu(s_, 1.0, z_, beta, n);
 			rz = rznew;

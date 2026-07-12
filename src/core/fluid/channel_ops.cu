@@ -405,6 +405,76 @@ namespace windcfd::core
 			if (diag == 0.0) return;
 			p[t] = (rhs[t] + wnb) / diag;
 		}
+		// ---- zebra line smoother (graded anisotropy) --------------------------
+		// Tridiagonal row of the FV operator at (i,j,k) restricted to a line along `axis`:
+		// a/c = −(coupling to the prev/next line cell), b = the FULL FV diagonal, d = rhs +
+		// Σ transverse w·p_nb. The face weights REPRODUCE fv_stencil_ch exactly (same
+		// expressions, fv_stencil_ch itself untouched to keep the uniform golden bitwise).
+		// Solid cells and isolated fluid cells (diag==0) become identity rows, matching
+		// k_jacobi/k_zero_solids.
+		WINDCFD_HD inline void fv_line_row(const double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax,
+			int i, int j, int k, int axis, double& a, double& b, double& c, double& d)
+		{
+			int idx = g.pidx(i, j, k);
+			if (ch_is_solid(solid, g, i, j, k)) { a = 0.0; b = 1.0; c = 0.0; d = 0.0; return; }
+			double diag = 0.0, tr = 0.0, wlo = 0.0, wup = 0.0;
+			if (i > 0 && !ch_is_solid(solid, g, i - 1, j, k)) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; if (axis == 0) wlo = w; else tr += w * p[g.pidx(i - 1, j, k)]; }
+			else if (i == 0 && dir_xmax < 0) diag += 1.0 / (g.dx(0) * g.dx(0)); // reversed outlet Dirichlet p=0 at xmin
+			if (i < g.nx - 1) { if (!ch_is_solid(solid, g, i + 1, j, k)) { double w = 1.0 / (g.dxc(i + 1) * g.dx(i)); diag += w; if (axis == 0) wup = w; else tr += w * p[g.pidx(i + 1, j, k)]; } }
+			else if (dir_xmax > 0) diag += 1.0 / (g.dx(g.nx - 1) * g.dx(g.nx - 1)); // outlet Dirichlet p=0 at xmax
+			if (j > 0 && !ch_is_solid(solid, g, i, j - 1, k)) { double w = 1.0 / (g.dyc(j) * g.dy(j)); diag += w; if (axis == 1) wlo = w; else tr += w * p[g.pidx(i, j - 1, k)]; }
+			if (j < g.ny - 1 && !ch_is_solid(solid, g, i, j + 1, k)) { double w = 1.0 / (g.dyc(j + 1) * g.dy(j)); diag += w; if (axis == 1) wup = w; else tr += w * p[g.pidx(i, j + 1, k)]; }
+			if (k > 0 && !ch_is_solid(solid, g, i, j, k - 1)) { double w = 1.0 / (g.dzc(k) * g.dz(k)); diag += w; if (axis == 2) wlo = w; else tr += w * p[g.pidx(i, j, k - 1)]; }
+			if (k < g.nz - 1 && !ch_is_solid(solid, g, i, j, k + 1)) { double w = 1.0 / (g.dzc(k + 1) * g.dz(k)); diag += w; if (axis == 2) wup = w; else tr += w * p[g.pidx(i, j, k + 1)]; }
+			if (diag == 0.0) { a = 0.0; b = 1.0; c = 0.0; d = p[idx]; return; }
+			a = -wlo; b = diag; c = -wup; d = rhs[idx] + tr;
+		}
+		// Solve one whole line exactly (Thomas), in place in p. In-place is race-free under
+		// zebra colouring: a line's transverse reads all land on OPPOSITE-colour lines, and a
+		// row's own old p is consumed before its slot is reused for the swept RHS d'. Solid
+		// faces zero the along-line coupling (a=0), so the chain segments itself across
+		// obstacles. A pure-Neumann segment (no transverse fluid coupling anywhere, no
+		// Dirichlet end) is singular — its last pivot vanishes; that row degrades to identity.
+		// The trigger depends only on matrix coefficients (never on rhs/p), so the smoother
+		// stays one fixed linear operator.
+		WINDCFD_HD inline void line_solve_ch(double* p, const double* rhs, double* cprime, const unsigned char* solid,
+			MacGrid g, int dir_xmax, int axis, int line)
+		{
+			int n, stride, i = 0, j = 0, k = 0;
+			if (axis == 0) { n = g.nx; stride = 1; j = line % g.ny; k = line / g.ny; }
+			else if (axis == 1) { n = g.ny; stride = g.nx; i = line % g.nx; k = line / g.nx; }
+			else { n = g.nz; stride = g.nx * g.ny; i = line % g.nx; j = line / g.nx; }
+			int base = g.pidx(i, j, k); // axis coordinate is 0 here
+			double cp = 0.0, dp = 0.0;
+			for (int m = 0; m < n; ++m)
+			{
+				int ii = i, jj = j, kk = k;
+				if (axis == 0) ii = m; else if (axis == 1) jj = m; else kk = m;
+				int idx = base + m * stride;
+				double a, b, c, d;
+				fv_line_row(p, rhs, solid, g, dir_xmax, ii, jj, kk, axis, a, b, c, d);
+				double denom = b - a * cp;
+				if (fabs(denom) > 1e-12 * (fabs(b) + fabs(a * cp))) { cp = c / denom; dp = (d - a * dp) / denom; }
+				else { cp = 0.0; dp = p[idx]; } // singular pivot: keep this cell (identity row)
+				cprime[idx] = cp;
+				p[idx] = dp;
+			}
+			double x = p[base + (n - 1) * stride];
+			for (int m = n - 2; m >= 0; --m)
+			{
+				int idx = base + m * stride;
+				x = p[idx] - cprime[idx] * x;
+				p[idx] = x;
+			}
+		}
+		__global__ void k_line_smooth(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color, int nlines)
+		{
+			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= nlines) return;
+			int t1 = (axis == 0) ? t % g.ny : t % g.nx;
+			int t2 = (axis == 0) ? t / g.ny : t / g.nx;
+			if (((t1 + t2) & 1) != color) return;
+			line_solve_ch(p, rhs, cprime, solid, g, dir_xmax, axis, t);
+		}
 		__global__ void k_subgrad(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, double coef, int dir_xmax)
 		{
 			int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -498,6 +568,11 @@ namespace windcfd::core
 			k_gs<<<gsz(n), 256>>>(p, rhs, solid, g, dir_xmax, band, c1, n);
 		}
 	}
+	void ch_line_smooth_gpu(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color)
+	{
+		int nlines = axis == 0 ? g.ny * g.nz : axis == 1 ? g.nx * g.nz : g.nx * g.ny;
+		k_line_smooth<<<gsz(nlines), 256>>>(p, rhs, cprime, solid, g, dir_xmax, axis, color, nlines);
+	}
 	void ch_subtract_gradient_gpu(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax)
 	{ int n = g.u_count() + g.v_count() + g.w_count(); k_subgrad<<<gsz(n), 256>>>(u, v, w, p, solid, g, dt / rho, dir_xmax); }
 	double ch_max_div_gpu(const double* u, const double* v, const double* w, double* divscratch, const unsigned char* solid, MacGrid g)
@@ -572,6 +647,18 @@ namespace windcfd::core
 				pout[c] = p[c] + omega * (rhs[c] - Ap) / diag;
 			}
 			p = pout;
+		}
+	}
+	void ch_line_smooth_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, int axis, int color)
+	{
+		std::vector<double> cprime(p.size(), 0.0);
+		int nlines = axis == 0 ? g.ny * g.nz : axis == 1 ? g.nx * g.nz : g.nx * g.ny;
+		for (int t = 0; t < nlines; ++t)
+		{
+			int t1 = (axis == 0) ? t % g.ny : t % g.nx;
+			int t2 = (axis == 0) ? t / g.ny : t / g.nx;
+			if (((t1 + t2) & 1) != color) continue;
+			line_solve_ch(p.data(), rhs.data(), cprime.data(), solid.data(), g, dir_xmax, axis, t);
 		}
 	}
 	void ch_subtract_gradient_cpu(std::vector<double>& u, std::vector<double>& v, std::vector<double>& w, const std::vector<double>& p, const std::vector<unsigned char>& solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax)

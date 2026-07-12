@@ -327,7 +327,21 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   NOT the scalar `h`: on a graded grid the exit sits in the coarse far field (`dx ≫ h_fine`), so `/h`
   over-convects the outlet by `dx/h` and pumps a boundary instability that runs away from the exit-ground
   corner (the `Cylinder_Exploded.scn` failure — u/p piled up at `i=nx, k=0`). `coef` is formed in-kernel
-  so the device metric deref is on-device. Opt-in via a config `"fine_core": {enabled,
+  so the device metric deref is on-device. ⚠ **Graded pressure-solve invariants** (the
+  graded+obstacle blow-up fix): graded cells are ANISOTROPIC (a far-field slab can be ~20× wider on
+  one axis), so the MGPCG V-cycle smoother on graded levels is the **alternating zebra LINE
+  smoother** (`ch_line_smooth_*`: exact tridiagonal Thomas solve per line, transverse couplings to
+  the RHS; forward-order pre-smooth / exact-reverse post-smooth keeps the preconditioner
+  self-adjoint) — point Jacobi/GS mathematically cannot damp anisotropic error and CG stalls. The
+  graded FV operator has volume-scaled rows ⇒ it is self-adjoint only in the **VOLUME-weighted
+  inner product**: the CG dots use `dot_vol_gpu` and restriction is the volume-weighted adjoint of
+  prolongation (`V_fine/V_coarse` per contribution; = the literal 1/8 uniform) — Euclidean dots on
+  a graded grid run CG on a nonsymmetric operator and DIVERGE under a strong preconditioner. All of
+  this is gated on `g.xfa != null`; the uniform path is byte-identical (golden gate). NOTE a graded
+  axis with an ODD cell count never coarsens (factor-2 hierarchy stops), so the coarsest-level
+  branch — symmetric alternating-line iterations — can BE the whole preconditioner; keep it
+  anisotropy-robust. Guarded by `graded_mgpcg_hicontrast` (18× contrast + obstacle, bounded iters)
+  and the `ch_line_smooth_*` parity checks in `parity_probe`. Opt-in via a config `"fine_core": {enabled,
   x0..z1, h_fine, growth}` object (parsed in `sim_setup.cpp`; `configs/g1_viewer_graded.json`);
   `.scn` persists the spec + regenerates. All gated by the `parity_probe` oracle (above).
   **windloads asserts the building bbox ⊆ the uniform fine core** (its `h_fine²`-face math is exact

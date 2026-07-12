@@ -74,6 +74,18 @@ namespace windcfd::core
 	void ch_jacobi_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, double omega, int sweeps);
 	// red-black Gauss-Seidel over the boundary band (solids skipped).
 	void ch_gs_band_gpu(double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax, int band, int sweeps, bool forward);
+	// Zebra (red-black LINE) smoother along one axis — the graded-grid anisotropy smoother.
+	// For every line of cells along `axis` whose transverse parity (sum of the two fixed
+	// indices) equals `color`, solve the FV Poisson operator restricted to that line EXACTLY
+	// (Thomas tridiagonal; transverse couplings move to the RHS at their current values).
+	// Zebra colouring makes all same-colour lines independent (their transverse neighbours
+	// are the opposite colour), so the GPU (one thread per line) and the serial CPU twin are
+	// exactly equivalent. Point smoothers cannot damp error along the strongly-coupled axis
+	// of an anisotropic (graded) cell; an x/y/z alternation of this smoother can, whichever
+	// axis is strong. cprime is a p_count() scratch (the swept superdiagonal). Solid cells
+	// and isolated (diag==0) cells are identity rows.
+	void ch_line_smooth_gpu(double* p, const double* rhs, double* cprime, const unsigned char* solid, MacGrid g, int dir_xmax, int axis, int color);
+	void ch_line_smooth_cpu(std::vector<double>& p, const std::vector<double>& rhs, const std::vector<unsigned char>& solid, MacGrid g, int dir_xmax, int axis, int color);
 	// u -= (dt/rho) grad p on interior fluid faces; inlet face skipped, outlet uses p_ghost=0.
 	void ch_subtract_gradient_gpu(double* u, double* v, double* w, const double* p, const unsigned char* solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax);
 	void ch_subtract_gradient_cpu(std::vector<double>& u, std::vector<double>& v, std::vector<double>& w, const std::vector<double>& p, const std::vector<unsigned char>& solid, MacGrid g, ChannelBC bc, double rho, double dt, int dir_xmax);
