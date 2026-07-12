@@ -47,6 +47,8 @@ namespace windcfd::core
 		double roof_overhang = 0.50;  // roof extends this far beyond the OUTER wall face (0 => flush)
 		double roof_thickness = 0.20; // flat roof slab thickness (0 => no roof)
 		double base_z = 0.00;         // ground level: domain z of the wall base
+		bool   roof = true;           // false => NO roof slab: voxelize only the wall/surface band (e.g. a
+		                              // wing/airfoil profile — an open extruded surface, not a capped building)
 	};
 
 	// Intersect `mesh` with the horizontal plane z = z0 (mesh coords, metres) and chain the

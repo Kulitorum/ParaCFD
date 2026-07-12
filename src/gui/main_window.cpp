@@ -430,6 +430,19 @@ namespace windcfd::gui
 		roof_thick_spin_->setToolTip("Flat roof slab thickness (0 = no roof).");
 		buildingForm->addRow("Roof thickness", roof_thick_spin_);
 
+		// Roof toggle: cap the walls with a flat slab (default), or voxelize ONLY the wall/surface band —
+		// an OPEN extruded surface with no top (e.g. a wing/airfoil profile). Off greys out the roof params.
+		roof_chk_ = new QCheckBox("Roof (cap the walls)");
+		roof_chk_->setChecked(bdefs.roof);
+		roof_chk_->setToolTip("Cap the building with a flat roof slab (overhang + thickness above the walls). "
+			"Uncheck to voxelize ONLY the wall/surface band — an open extruded surface, e.g. a wing/airfoil "
+			"profile. Takes effect on the next Build/Apply.");
+		connect(roof_chk_, &QCheckBox::toggled, this, [this](bool on) {
+			if (roof_overhang_spin_) roof_overhang_spin_->setEnabled(on);
+			if (roof_thick_spin_) roof_thick_spin_->setEnabled(on);
+		});
+		buildingForm->addRow("", roof_chk_);
+
 		buildingCol->addLayout(buildingForm);
 
 		build_btn_ = new QPushButton("Build");
@@ -1711,6 +1724,7 @@ namespace windcfd::gui
 		if (corner_radius_spin_) prm.corner_radius  = corner_radius_spin_->value();
 		if (roof_overhang_spin_) prm.roof_overhang  = roof_overhang_spin_->value();
 		if (roof_thick_spin_)    prm.roof_thickness = roof_thick_spin_->value();
+		if (roof_chk_)           prm.roof           = roof_chk_->isChecked(); // off => walls/surface only (wing profile)
 		prm.base_z = 0.0;
 
 		// 3) Voxelize the building into the CURRENT domain + resolution (the sim's live grid) — NO auto-resize.

@@ -394,7 +394,7 @@ namespace windcfd::core
 		{
 			const double cz = g.zc(k); // cell-centre world z (graded-aware; (k+0.5)h uniform)
 			const bool inWall = (cz >= prm.base_z && cz <= top);
-			const bool inRoof = (prm.roof_thickness > 0.0 && cz > top && cz <= roof_top);
+			const bool inRoof = (prm.roof && prm.roof_thickness > 0.0 && cz > top && cz <= roof_top);
 			if (!inWall && !inRoof) continue;
 			for (int j = j0; j <= j1; ++j)
 			{

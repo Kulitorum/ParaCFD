@@ -328,6 +328,7 @@ namespace windcfd::gui
 		QDoubleSpinBox* corner_radius_spin_ = nullptr;
 		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
 		QDoubleSpinBox* roof_thick_spin_ = nullptr;
+		QCheckBox* roof_chk_ = nullptr; // cap the walls with a roof slab (default on); off => wall/surface band only (wing profile)
 		QPushButton* build_btn_ = nullptr;
 		QCheckBox* fill_interior_chk_ = nullptr; // solidify the building's sealed interior on Build/Apply (default on)
 		QLabel* load_readout_ = nullptr; // live INSTANTANEOUS wind-load coefficient readout (Cd/Cl/Cs + Cp range)
