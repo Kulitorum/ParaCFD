@@ -318,11 +318,14 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   x0..z1, h_fine, growth}` object (parsed in `sim_setup.cpp`; `configs/g1_viewer_graded.json`);
   `.scn` persists the spec + regenerates. All gated by the `parity_probe` oracle (above).
   **windloads asserts the building bbox ⊆ the uniform fine core** (its `h_fine²`-face math is exact
-  only there) — enlarge the `fine_core` box if it throws. **Remaining**: GUI dock controls for the
-  fine core (task 3.4 — config path works today); the voxel-staircase overlay in `slice_viewer.cpp`
-  still draws at uniform spacing (display polish); and the physical **rounded-vs-sharp validation
-  runs** (below) are user-driven GPU jobs. Full proposal/design/tasks in
-  `openspec/changes/graded-structured-grid/`.
+  only there) — enlarge the `fine_core` box if it throws. GUI dock controls for the fine core (task
+  3.4) and the graded-aware viewer are DONE: the voxel-staircase overlay (`uploadVoxelOverlay`) draws
+  each cell at its metric coords `g.xf(i)`/`g.dx(i)`, and the velocity/pressure **slice** carries the
+  true extent (`SliceParams.Lx…` from `info_.Lx`) + the core's **device-view** metrics
+  (`SimWorker::displayGrid()`) so its quad + `grid_fx` sampling land on the correct graded cells (the
+  uniform-`i·h` versions drew the obstacle + slice shifted toward the origin). **Remaining**: the
+  physical **rounded-vs-sharp validation runs** (below) are user-driven GPU jobs. Full
+  proposal/design/tasks in `openspec/changes/graded-structured-grid/`.
 - **Corner-resolution protocol (design D7, `grid_metrics.h` helpers).** The rounded-vs-sharp signal
   rides on the discretization error, so `h_fine` is not free: **size it ≈ r/10** (≥10 cells across
   the corner radius, e.g. 30 mm for a 300 mm radius — `recommended_h_fine()`); a run at **`h_fine ≥
