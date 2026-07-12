@@ -534,6 +534,22 @@ int main(int argc, char** argv)
 		rep.check("gen_core_uniform", coreok, "core cells == h_fine");
 		rep.check("gen_growth_bound", maxratio <= gr * 1.0001, d3);
 	}
+	std::printf("-- graded generator: no sub-h_fine sliver at a domain edge (CFL dt-collapse guard) --\n");
+	{
+		// A core box that doesn't divide the axis evenly (4.0 m core in a 5 m axis at h=0.03) used to leave a
+		// ~0.005 m sliver cell at the edge after centring — collapsing h_min() and the CFL timestep (dt ∝
+		// h_min), so the flow crawled though it stayed stable. The fix slides the core flush to that edge.
+		// Assert the smallest cell is ≥ h_fine (no sliver) and the edge cell is exactly h_fine.
+		const double L = 5.0, a = 0.0, b = 4.0, hf = 0.03, gr = 1.15;
+		std::vector<double> xf = graded_axis_faces(L, a, b, hf, gr);
+		int n = (int)xf.size() - 1;
+		double dmin = 1e9;
+		for (int i = 0; i < n; ++i) dmin = std::min(dmin, xf[i + 1] - xf[i]);
+		bool no_sliver = dmin >= 0.9 * hf;                        // no sliver (the ~2% fill_gap junction cell is fine; a real sliver is 6x smaller)
+		bool edge_fine = std::fabs((xf[1] - xf[0]) - hf) < 1e-9;  // the ground/edge cell is exactly h_fine
+		char d[80]; std::snprintf(d, sizeof d, "min dx=%.4f (h_fine=%.3f), edge=%.4f", dmin, hf, xf[1] - xf[0]);
+		rep.check("gen_no_edge_sliver", no_sliver && edge_fine, d);
+	}
 
 	std::printf("-- GPU-vs-CPU parity on a GENUINELY GRADED grid (task 5.3) --\n");
 	{

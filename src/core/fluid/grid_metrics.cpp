@@ -62,6 +62,14 @@ namespace windcfd::core
 		double na = centre - half, nb = centre + half;
 		if (na < 0.0) { na = 0.0; nb = std::min(L, n_fine * h_fine); }
 		if (nb > L) { nb = L; na = std::max(0.0, L - n_fine * h_fine); }
+		// Absorb a sub-h_fine SLIVER between the snapped core and a domain edge: centring can leave a gap a
+		// fraction of one fine cell wide (e.g. a 4.0 m core in a 5 m axis at h=0.03 → a 0.005 m gap). fill_gap
+		// would emit that as a lone tiny cell, which crushes h_min() and therefore the CFL timestep (dt ∝
+		// h_min) — the flow then crawls though it stays stable. Slide the core flush to that edge instead
+		// (still n_fine exact-h_fine cells; the shift is < h_fine, so the building stays enclosed). Guard each
+		// slide so a near-domain-filling core doesn't trade one sliver for another.
+		if (na > 0.0 && na < h_fine && (L - nb) >= h_fine) { nb -= na; na = 0.0; }
+		if (L - nb > 0.0 && L - nb < h_fine && na >= h_fine) { na += (L - nb); nb = L; }
 		std::vector<double> left = fill_gap(na, h_fine, growth);       // core(na) → 0, ordered from core out
 		std::vector<double> right = fill_gap(L - nb, h_fine, growth);  // core(nb) → L, ordered from core out
 
