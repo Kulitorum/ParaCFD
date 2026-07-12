@@ -81,6 +81,7 @@ namespace windcfd::gui
 
 		viewer_ = new SliceViewer(this);
 		viewer_->setInfo(info);
+		pushGridToViewer(); // seed the grid-overlay cell-face coordinates (graded metrics / i·h)
 		setCentralWidget(viewer_);
 
 		// --- File menu: load / clear a STEP model --------------------------------
@@ -567,6 +568,12 @@ namespace windcfd::gui
 		axesChk->setToolTip("Show/hide the world-origin XYZ triad (X=red, Y=green, Z=blue) with metre ticks + corner gizmo.");
 		connect(axesChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowAxes(on); });
 		viz->addRow(axesChk);
+		QCheckBox* gridChk = new QCheckBox("Show grid on slice");
+		gridChk->setChecked(false);
+		gridChk->setToolTip("Draw the cell-boundary lines where the grid meets the slice plane. On a graded grid the lines "
+			"bunch up in the fine h_fine core and spread out in the coarse far field — the mesh made visible.");
+		connect(gridChk, &QCheckBox::toggled, this, [this](bool on) { if (viewer_) viewer_->setShowGrid(on); });
+		viz->addRow(gridChk);
 
 		// Flow arrows.
 		auto* line2 = new QFrame; line2->setFrameShape(QFrame::HLine); line2->setEnabled(false);
@@ -933,6 +940,7 @@ namespace windcfd::gui
 		h_spin_->setValue(info.coarse_h); // the coarse voxel size (NOT h_fine on a graded grid)
 		u_spin_->setValue(info.U);
 		syncFineCoreControls(); // reflect the loaded graded fine-core state in the dock
+		pushGridToViewer();     // keep the grid overlay's cell-face coords in sync (covers scene restore)
 		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
@@ -979,6 +987,29 @@ namespace windcfd::gui
 			fc.y0 = 0.30 * ov.Ly; fc.y1 = 0.70 * ov.Ly;
 			fc.z0 = 0.0; fc.z1 = 0.50 * ov.Lz;
 		}
+	}
+
+	// Push the per-axis cumulative cell-face coordinates to the viewer's grid overlay: the graded metric
+	// arrays (GridMetrics::xf/yf/zf) on a graded grid, else uniform i·h. The overlay draws the cell
+	// boundaries where the grid meets the slice plane (bunched in the fine core, spread in the far field).
+	void MainWindow::pushGridToViewer()
+	{
+		if (!viewer_) return;
+		std::vector<double> xf, yf, zf;
+		const SimInfo& info = recipe_.info;
+		if (recipe_.graded && recipe_.metrics)
+		{
+			xf = recipe_.metrics->xf();
+			yf = recipe_.metrics->yf();
+			zf = recipe_.metrics->zf();
+		}
+		else
+		{
+			for (int i = 0; i <= info.nx; ++i) xf.push_back((double)i * info.h);
+			for (int j = 0; j <= info.ny; ++j) yf.push_back((double)j * info.h);
+			for (int k = 0; k <= info.nz; ++k) zf.push_back((double)k * info.h);
+		}
+		viewer_->setGridLines(xf, yf, zf);
 	}
 
 	// recipe_ → dock: reflect the loaded config/scene fine-core state so a subsequent Apply preserves it
@@ -1258,6 +1289,7 @@ namespace windcfd::gui
 			viewer_->clearVoxelOverlay();      // drop stale-size staircase geometry
 			viewer_->clearMesh();
 			viewer_->setInfo(info);            // re-frame + re-size all grid-derived viewer geometry
+			pushGridToViewer();                // refresh the grid overlay for the new (possibly graded) grid
 		}
 		model_mesh_ = keep_mesh;               // keep the loaded model (fluid re-inject)
 		spawnWorker(std::move(core));
@@ -1498,6 +1530,7 @@ namespace windcfd::gui
 			viewer_->clearVoxelOverlay();
 			viewer_->clearMesh();
 			viewer_->setInfo(info); // re-frame + re-size all grid-derived viewer geometry
+			pushGridToViewer();     // refresh the grid overlay for the (possibly graded) grid
 		}
 
 		spawnWorker(std::move(core), st.steps, st.sim_time);

@@ -256,6 +256,7 @@ namespace windcfd::gui
 		QDoubleSpinBox* fc_margin_spin_ = nullptr;
 		void fillFineCoreOverride(GridOverride& ov) const; // dock → override (auto-tracks the placed building bbox)
 		void syncFineCoreControls();                       // recipe_ → dock (reflect the loaded config/scene)
+		void pushGridToViewer();                           // push the per-axis cell-face coords (graded metrics / i·h) to the viewer's grid overlay
 
 		QLabel* grid_readout_ = nullptr;
 		QPushButton* apply_btn_ = nullptr;
