@@ -289,4 +289,62 @@ namespace windcfd::core
 		}
 		return mask;
 	}
+
+	int seal_enclosed_voids(std::vector<unsigned char>& solid, const MacGrid& g)
+	{
+		const int nx = g.nx, ny = g.ny, nz = g.nz;
+		const std::size_t n = (std::size_t)g.p_count();
+		if (solid.size() != n || n == 0) return 0;
+
+		std::vector<unsigned char> reached(n, 0);
+		std::vector<int> stack;
+		stack.reserve(n / 8 + 64);
+
+		auto seed = [&](int i, int j, int k)
+		{
+			const int idx = g.pidx(i, j, k);
+			if (!solid[(std::size_t)idx] && !reached[(std::size_t)idx])
+			{
+				reached[(std::size_t)idx] = 1;
+				stack.push_back(idx);
+			}
+		};
+
+		// Seed the OPEN boundary faces = everything EXCEPT the ground (k==0): inlet/outlet (i=0,nx-1),
+		// sides (j=0,ny-1), and the top (k=nz-1). The k==0 plane is seeded only where it meets those
+		// faces (its perimeter), never its interior — so a building's floor cells (mid-plane at k==0)
+		// are not seeded and stay reachable only through the walls, which seal them off.
+		for (int k = 0; k < nz; ++k)
+			for (int j = 0; j < ny; ++j) { seed(0, j, k); seed(nx - 1, j, k); }
+		for (int k = 0; k < nz; ++k)
+			for (int i = 0; i < nx; ++i) { seed(i, 0, k); seed(i, ny - 1, k); }
+		if (nz > 1)
+			for (int j = 0; j < ny; ++j)
+				for (int i = 0; i < nx; ++i) seed(i, j, nz - 1); // top face only
+
+		// 6-connected flood through fluid cells (DFS on an explicit stack).
+		while (!stack.empty())
+		{
+			const int idx = stack.back();
+			stack.pop_back();
+			const int i = idx % nx, j = (idx / nx) % ny, k = idx / (nx * ny);
+			auto visit = [&](int ii, int jj, int kk)
+			{
+				if (ii < 0 || ii >= nx || jj < 0 || jj >= ny || kk < 0 || kk >= nz) return;
+				const int nidx = g.pidx(ii, jj, kk);
+				if (solid[(std::size_t)nidx] || reached[(std::size_t)nidx]) return;
+				reached[(std::size_t)nidx] = 1;
+				stack.push_back(nidx);
+			};
+			visit(i - 1, j, k); visit(i + 1, j, k);
+			visit(i, j - 1, k); visit(i, j + 1, k);
+			visit(i, j, k - 1); visit(i, j, k + 1);
+		}
+
+		// Every fluid cell the flood never reached is a sealed pocket → fill it.
+		int filled = 0;
+		for (std::size_t t = 0; t < n; ++t)
+			if (!solid[t] && !reached[t]) { solid[t] = 1; ++filled; }
+		return filled;
+	}
 }

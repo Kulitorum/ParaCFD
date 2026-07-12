@@ -30,6 +30,7 @@
 #include "core/fluid/mac_grid.h"
 #include "core/fluid/mac_ops.h"
 #include "core/geometry/building.h"
+#include "core/geometry/voxelize.h" // seal_enclosed_voids (enclosed-void flood-fill)
 #include "core/windloads.h"
 
 #include <cuda_runtime.h>
@@ -723,6 +724,34 @@ int main(int argc, char** argv)
 			&& (xmx - xmn) > 0.15 && (xmx - xmn) < 0.25 && (ymx - ymn) > 0.15 && (ymx - ymn) < 0.25;
 		char d[96]; std::snprintf(d, sizeof d, "%d cells x[%.2f,%.2f] y[%.2f,%.2f]", sc, xmn, xmx, ymn, ymx);
 		rep.check("voxelize_building_located", located && allcore, d);
+	}
+
+	std::printf("-- seal_enclosed_voids: fill a sealed interior, leave an open structure fluid --\n");
+	{
+		// A 4x4 footprint [2..5] with a perimeter wall ring over k=[0..4] (sits on the ground k=0), optionally
+		// capped by a full roof slab at k=5. Interior = (3..4)x(3..4)x(0..4) = 20 cells. Sealed (walls+roof+
+		// ground) ⇒ the 20 interior cells are enclosed ⇒ filled. Open-top (no roof) ⇒ interior reaches the
+		// sky ⇒ nothing filled. This also exercises the ground-exclusion (interior floor touches k==0).
+		MacGrid g; g.nx = 8; g.ny = 8; g.nz = 8; g.h = 1.0;
+		const int N = g.p_count();
+		auto ring_walls = [&](std::vector<unsigned char>& m, bool roof)
+		{
+			for (int k = 0; k <= 4; ++k)
+				for (int j = 2; j <= 5; ++j)
+					for (int i = 2; i <= 5; ++i)
+						if (i == 2 || i == 5 || j == 2 || j == 5) m[g.pidx(i, j, k)] = 1;
+			if (roof)
+				for (int j = 2; j <= 5; ++j)
+					for (int i = 2; i <= 5; ++i)
+						m[g.pidx(i, j, 5)] = 1;
+		};
+		std::vector<unsigned char> sealed((std::size_t)N, 0); ring_walls(sealed, true);
+		const int filled_sealed = seal_enclosed_voids(sealed, g);
+		std::vector<unsigned char> open((std::size_t)N, 0); ring_walls(open, false);
+		const int filled_open = seal_enclosed_voids(open, g);
+		const bool ok = (filled_sealed == 20) && (filled_open == 0);
+		char d[96]; std::snprintf(d, sizeof d, "sealed +%d (want 20), open +%d (want 0)", filled_sealed, filled_open);
+		rep.check("seal_enclosed_voids", ok, d);
 	}
 
 	std::printf("-- graded scene round-trip: regenerate from the persisted recipe (tasks 4.5/5.4) --\n");

@@ -329,6 +329,7 @@ namespace windcfd::gui
 		QDoubleSpinBox* roof_overhang_spin_ = nullptr;
 		QDoubleSpinBox* roof_thick_spin_ = nullptr;
 		QPushButton* build_btn_ = nullptr;
+		QCheckBox* fill_interior_chk_ = nullptr; // solidify the building's sealed interior on Build/Apply (default on)
 		QLabel* load_readout_ = nullptr; // live INSTANTANEOUS wind-load coefficient readout (Cd/Cl/Cs + Cp range)
 
 		// --- Converged, time-averaged loads (the trustworthy statistics) -------------------------

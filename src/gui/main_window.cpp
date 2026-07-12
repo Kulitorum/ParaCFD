@@ -437,6 +437,18 @@ namespace windcfd::gui
 		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
 		buildingCol->addWidget(build_btn_);
 
+		// Solidify the building's sealed interior (the hollow room inside the walls, below the roof): a
+		// flood-fill from the open boundary marks any fluid the wind can't reach as solid. ON by default —
+		// the trapped interior is otherwise simulated at full per-cell cost (an ill-conditioned enclosed
+		// pressure cavity) and adds spurious inner-wall load faces. Only genuinely sealed voids are filled
+		// (an open/leaky structure stays fluid). Takes effect on the next Build/Apply.
+		fill_interior_chk_ = new QCheckBox("Fill sealed interior");
+		fill_interior_chk_->setChecked(true);
+		fill_interior_chk_->setToolTip("Solidify the enclosed interior of the built solid (flood-fill any fluid the wind can't reach). "
+			"Removes the trapped-fluid interior — cheaper pressure solve + cleaner surface loads. Only fills GENUINELY sealed "
+			"cavities; an open or leaky structure stays fluid. Applies on the next Build/Apply.");
+		buildingCol->addWidget(fill_interior_chk_);
+
 		// Live wind-load readout: force coefficients integrated from the pressure field over the building
 		// surface (worker-side, ~every 30 steps). Dimensionless; updated on the repaint tick. Blank until a
 		// building exists. Monospaced so the columns line up.
@@ -1719,6 +1731,21 @@ namespace windcfd::gui
 			return;
 		}
 
+		// Solidify the sealed interior (default on): the hollow room inside the walls, below the roof, is
+		// trapped fluid — fill it so it isn't simulated as an ill-conditioned enclosed pressure cavity and
+		// so the wind-load walk sees only the OUTER wall faces. Flood-fill only touches GENUINELY enclosed
+		// voids; an open/leaky structure stays fluid (filled == 0). Must run BEFORE the mask is moved out.
+		if (fill_interior_chk_ && fill_interior_chk_->isChecked())
+		{
+			const int filled = seal_enclosed_voids(mask, g);
+			if (filled > 0)
+			{
+				solid += filled;
+				std::fprintf(stderr, "[G1] building: sealed-interior fill solidified %d enclosed cells (%.2f%% of domain)\n",
+					filled, 100.0 * filled / std::max(1, g.p_count()));
+			}
+		}
+
 		const int mode = centerline_noslip_ ? SOLID_NOSLIP : SOLID_FREESLIP;
 		worker_->requestRebuild(std::move(mask), mode); // core rebuild off-thread; overlay follows the published mask
 		model_injected_ = true; // finalize() samples flow-diversion; the voxel overlay refreshes on the new mask
@@ -1893,6 +1920,19 @@ namespace windcfd::gui
 			for (std::size_t n = 0; n < obstacle.size(); ++n)
 			{
 				if (model_solid[n]) { obstacle[n] = 1; ++nsolid; }
+			}
+
+			// Solidify any sealed interior (same "Fill sealed interior" toggle as Build): a watertight solid
+			// is already filled by voxelize_mesh's ray parity, so this is a no-op there; it seals a
+			// non-watertight / open loaded shell that would otherwise trap fluid inside.
+			if (fill_interior_chk_ && fill_interior_chk_->isChecked())
+			{
+				const int filled = seal_enclosed_voids(obstacle, vg);
+				if (filled > 0)
+				{
+					nsolid += filled;
+					std::fprintf(stderr, "[G1] model: sealed-interior fill solidified %d enclosed cells\n", filled);
+				}
 			}
 
 			const int mode = noslip ? SOLID_NOSLIP : SOLID_FREESLIP;

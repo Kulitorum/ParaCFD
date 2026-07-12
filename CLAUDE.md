@@ -92,6 +92,14 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
     miter-limited to bevel spikes); curved walls stay rounded via an angle threshold.
   - `BuildingParams`: `wall_thickness` (default **0.08 m** — a COBOD-printed wall), `wall_height`,
     `corner_radius`, `roof_overhang`, `roof_thickness`, `base_z` (all metres).
+  - **Sealed-interior fill** (`seal_enclosed_voids` in `voxelize.{h,cpp}`) — the wall-band + roof mask
+    leaves the room INSIDE the walls as trapped fluid. On a dense grid that interior is simulated at
+    full per-cell cost (an ill-conditioned enclosed pressure cavity) and adds spurious inner-wall
+    load faces. A 6-connected flood from the OPEN domain boundary (all faces **except the ground
+    `k==0`**, since the building sits on it) marks any fluid the wind can't reach as solid. The GUI
+    runs it on Build/Apply, gated by the **"Fill sealed interior"** dock checkbox (default **on**);
+    only GENUINELY sealed voids fill (an open/leaky/tunnel structure stays fluid). A watertight loaded
+    STEP is already interior-filled by `voxelize_mesh`'s ray parity, so the fill is a no-op there.
   - **`tools/building_probe`** (dev CLI, `windcfd_geometry`-linked) — load a centerline STEP →
     section → voxelize headlessly and print stats, to verify the pipeline before the GUI.
 - **Wind loads** (`src/core/windloads.{h,cpp}`) — integrate the **pressure** load on the
