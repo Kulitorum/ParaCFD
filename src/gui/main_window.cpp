@@ -433,7 +433,7 @@ namespace windcfd::gui
 		buildingCol->addLayout(buildingForm);
 
 		build_btn_ = new QPushButton("Build");
-		build_btn_->setToolTip("Voxelize the placed centerline model (thickened walls + overhanging flat roof, rounded or sharp corners) into the CURRENT domain and inject it as the flow obstacle. Set the domain size + voxel size via the Domain controls first; load a centerline via File ▸ Open centerline STEP…");
+		build_btn_->setToolTip("Voxelize the placed centerline model (thickened walls + overhanging flat roof, rounded or sharp corners) into the CURRENT domain and inject it as the flow obstacle. On a graded grid this REBUILDS the grid so the fine core re-centres on the building's current placement (resets to t=0). Set the domain size + voxel size via the Domain controls first; load a centerline via File ▸ Open centerline STEP…");
 		connect(build_btn_, &QPushButton::clicked, this, [this] { buildBuilding(); });
 		buildingCol->addWidget(build_btn_);
 
@@ -1314,7 +1314,7 @@ namespace windcfd::gui
 			viewer_->setMesh(windcfd::core::TriMesh(centerline_mesh_)); // re-show (setMesh reset the gizmo)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);           // re-apply the user's placement
 			updateGizmoUi();
-			buildBuilding();                                            // re-voxelize the placed house into the new grid
+			buildBuilding(false);                                       // voxelize into the ALREADY-regenerated grid (no re-reconstruct → no recursion)
 		}
 
 		syncGridControls(); // reflect the built grid (floor/clamp may differ from the typed value)
@@ -1640,11 +1640,12 @@ namespace windcfd::gui
 		addRecentFile(path);
 		updateGizmoUi(); // enable the placement gizmo for the centerline
 
-		buildBuilding(); // build + inject the solid once (into the current domain), right after loading
+		buildBuilding(false); // build + inject the solid once into the CONFIGURED grid (no reconstruct on load;
+		                      // the first interactive Build/Apply re-tracks a graded fine core to the placement)
 		return true;
 	}
 
-	void MainWindow::buildBuilding()
+	void MainWindow::buildBuilding(bool reconstruct_grid)
 	{
 		using namespace windcfd::core;
 		// Build voxelizes the loaded model as a building. Prefer the centerline; fall back to a plain loaded
@@ -1657,6 +1658,20 @@ namespace windcfd::gui
 			return;
 		}
 		if (!worker_) { statusBar()->showMessage("no active simulation to build into", 4000); return; }
+
+		// GRADED grid: the fine core is anchored to the building, so an INTERACTIVE (re)build must RECONSTRUCT
+		// the grid around the building's CURRENT placement — voxelizing into the existing core would leave the
+		// fine zone at the OLD position after the model was moved (the old grid must not influence the new
+		// build). Delegate to the full rebuild (applyGrid regenerates the metric grid with the fine core
+		// re-tracked to the placement, resets to t=0, then calls buildBuilding(false) to voxelize into the
+		// fresh grid). A uniform grid is position-independent, so it voxelizes into the current grid directly.
+		// reconstruct_grid is true only for the interactive "Build" button (always post-startup, GL live); the
+		// CLI/File-menu load and applyGrid's own re-voxelize pass false, so they voxelize into the built grid.
+		if (reconstruct_grid && fine_core_chk_ && fine_core_chk_->isChecked())
+		{
+			applyGrid();
+			return;
+		}
 
 		// 1) Place the model WHERE THE GIZMO PUT IT: the user can translate/rotate/scale the house, so
 		//    voxelize the TRANSFORMED model. Read the live placement from the viewer (default centre-on-bed);

@@ -156,7 +156,12 @@ namespace windcfd::gui
 		// thickened walls + overhanging roof (core/geometry/building) and hands the mask to the worker
 		// exactly as loadStepFile does. Driven by the "Build" button and once on centerline load. No-op
 		// (with a status message) if no centerline is loaded.
-		void buildBuilding();
+		// reconstruct_grid (only meaningful on a GRADED grid): the fine core is anchored to the building, so an
+		// interactive (re)build must regenerate the metric grid around the building's CURRENT placement so a
+		// moved building doesn't voxelize into a STALE core — true delegates to applyGrid (which then calls
+		// back with false). Passed true only by the interactive "Build" button. false = voxelize into the
+		// current/just-built grid (the CLI+File-menu load and applyGrid's own re-voxelize; no reset, no recursion).
+		void buildBuilding(bool reconstruct_grid = true);
 
 		// Refresh the Building-group live wind-load coefficient readout from the worker's latest WindLoads
 		// (Cd/Cl/Cs + Cp range). Called on the repaint tick; no-op until a building's loads are published.
