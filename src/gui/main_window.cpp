@@ -970,9 +970,11 @@ namespace windcfd::gui
 				? viewer_->modelPlacement()
 				: windcfd::core::place_model_on_bed(src, ov.Lx, ov.Ly);
 			const windcfd::core::TriMesh placed = windcfd::core::placed_mesh(src, place);
-			fc.x0 = (double)placed.bbox_min[0] - margin; fc.x1 = (double)placed.bbox_max[0] + margin;
-			fc.y0 = (double)placed.bbox_min[1] - margin; fc.y1 = (double)placed.bbox_max[1] + margin;
-			fc.z0 = 0.0; fc.z1 = (double)placed.bbox_max[2] + margin; // ground → building top + margin (covers the roof)
+			// Wrap the placed bbox + margin, CLAMPED to the domain so the core never requests beyond it (a
+			// core ≈ the domain size can't tile in exact h_fine cells → windloads would reject the surface).
+			fc.x0 = std::max(0.0, (double)placed.bbox_min[0] - margin); fc.x1 = std::min(ov.Lx, (double)placed.bbox_max[0] + margin);
+			fc.y0 = std::max(0.0, (double)placed.bbox_min[1] - margin); fc.y1 = std::min(ov.Ly, (double)placed.bbox_max[1] + margin);
+			fc.z0 = 0.0; fc.z1 = std::min(ov.Lz, (double)placed.bbox_max[2] + margin); // ground → building top + margin (covers the roof)
 		}
 		else if (recipe_.graded && recipe_.fine_core.h_fine > 0.0)
 		{

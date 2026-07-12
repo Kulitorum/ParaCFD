@@ -170,8 +170,24 @@ namespace windcfd::gui
 		prm.rho = load_rho_.load();
 		prm.u_ref = core_->inlet_speed();               // live reference (inlet) speed [m/s]
 		if (std::fabs(prm.u_ref) < 1e-6) prm.u_ref = 1.0; // guard q→0 (e.g. tidal slack): keep Cp finite
-		const windcfd::core::WindLoads L =
-			windcfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
+		windcfd::core::WindLoads L;
+		try
+		{
+			L = windcfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
+		}
+		catch (const std::exception& e)
+		{
+			// The building surface left the UNIFORM fine core (the 4.3 guard): its h_fine²-face load
+			// integration is invalid there. This runs every load-cadence step on the worker thread, so a raw
+			// throw would std::terminate the whole app. Instead: warn once, skip loads (leave them invalid so
+			// the GUI shows no Cd/Cp), and keep the sim running. Fix by enlarging the fine-core box/margin so
+			// it encloses the building, then re-Apply.
+			static std::atomic<bool> warned{ false };
+			if (!warned.exchange(true))
+				std::fprintf(stderr, "[G1] wind-loads disabled: %s — enlarge the fine-core box/margin to enclose the building.\n", e.what());
+			loads_valid_.store(false);
+			return;
+		}
 
 		// Fold this instantaneous sample into the converged time-average while a window is collecting. Done
 		// BEFORE the swap below (the averager still needs lcp_host_) and off the display lock. result() also
