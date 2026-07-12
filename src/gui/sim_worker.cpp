@@ -392,6 +392,11 @@ namespace windcfd::gui
 	{
 		MacGrid g = core_->grid();
 		std::lock_guard<std::mutex> lk(disp_mtx_);
+		// Publish the grid (dims + DEVICE metric arrays) that matches these snapshots, under the SAME lock —
+		// the main-thread slice sampler reads it via displayGrid() instead of touching the live core_, which
+		// the worker frees + rebuilds off-thread (apply_pending_rebuild core_.reset()); reading core_->grid()
+		// from paintGL raced that swap and fed the sampler a dangling device grid → CUDA illegal-memory-access.
+		disp_grid_ = g;
 		cudaMemcpy(du_, core_->u_dev(), sizeof(double) * (size_t)g.u_count(), cudaMemcpyDeviceToDevice);
 		cudaMemcpy(dv_, core_->v_dev(), sizeof(double) * (size_t)g.v_count(), cudaMemcpyDeviceToDevice);
 		cudaMemcpy(dw_, core_->w_dev(), sizeof(double) * (size_t)g.w_count(), cudaMemcpyDeviceToDevice);

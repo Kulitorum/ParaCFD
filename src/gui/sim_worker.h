@@ -56,11 +56,13 @@ namespace windcfd::gui
 		const double* disp_w() const { return dw_; }
 		const double* disp_p() const { return dp_; }
 		const unsigned char* disp_solid() const { return ds_; } // solid mask snapshot (auto-range excludes it)
-		// DEVICE-view MacGrid (device metric arrays) for the main-thread slice sampler: grid_fx maps each
-		// slice vertex's world position to the correct GRADED cell on the device. This is the very grid the
-		// core steps on (device_view for a graded core; null-metric = uniform ⇒ grid_fx falls back to x/h).
-		// The metric arrays are immutable for the core's lifetime, so no display_mutex is needed for the grid.
-		windcfd::core::MacGrid displayGrid() const { return core_ ? core_->grid() : windcfd::core::MacGrid{}; }
+		// DEVICE-view MacGrid (device metric arrays) matching the disp_* snapshots, for the main-thread slice
+		// sampler: grid_fx maps each slice vertex to the correct GRADED cell on the device (null-metric =
+		// uniform ⇒ grid_fx falls back to x/h). This is a SNAPSHOT published by publish_display() under
+		// disp_mtx_ — NOT the live core_ (which the worker frees + rebuilds off-thread; reading core_->grid()
+		// from paintGL raced that swap → dangling device grid → CUDA IMA). Call under display_mutex(), like
+		// the disp_* pointers it pairs with.
+		windcfd::core::MacGrid displayGrid() const { return disp_grid_; }
 
 		bool playing() const { return playing_.load(); }
 		// Master run gate ("hold until Start Simulation"): the worker steps NOTHING until started, so the
@@ -319,6 +321,7 @@ namespace windcfd::gui
 		double* dw_ = nullptr;
 		double* dp_ = nullptr;
 		unsigned char* ds_ = nullptr; // solid-cell snapshot (obstacle), for auto-range
+		windcfd::core::MacGrid disp_grid_; // grid (dims + device metrics) matching the snapshots; published under disp_mtx_ (see displayGrid())
 		std::atomic<bool> disp_ready_{ false };
 
 		// Display-snapshot throttle (GUI "Fast sim"): 0 ⇒ publish every step. When > 0 the worker skips
