@@ -103,12 +103,33 @@ namespace windcfd::core
 			p[t] = (rhs[t] + wnb) / diag;
 		}
 
-		// factor-2 transfer: fine cell fi maps to coarse index space cpos = fi/2 - 0.25.
-		WINDCFD_HD inline void axis_stencil(int fi, int nc, int& C0, int& C1, double& w0, double& w1)
+		// factor-2 transfer weights. UNIFORM (fc/cc null): index space, cpos = fi/2 − 0.25 (unchanged).
+		// GRADED (metric arrays given): LINEAR interpolation in PHYSICAL space between the two bracketing
+		// coarse cell CENTRES — index-space weights are geometrically wrong on stretched cells and cripple the
+		// coarse-grid correction, so the MG preconditioner can't reduce the anisotropic fine↔coarse modes and
+		// CG stalls (relres stuck ≫ tol → residual divergence → the graded-obstacle blow-up). Restrict uses the
+		// SAME weights as prolong (R = ⅛Pᵀ), so the V-cycle stays symmetric / SPD either way.
+		WINDCFD_HD inline void axis_stencil(int fi, int nc, const double* fc, const double* cc, int& C0, int& C1, double& w0, double& w1)
 		{
-			double cpos = (fi + 0.5) * 0.5 - 0.5;
-			int Cb = (int)floor(cpos); double t = cpos - Cb;
-			C0 = Cb; C1 = Cb + 1; w0 = 1.0 - t; w1 = t;
+			double t;
+			if (fc && cc)
+			{
+				double x = fc[fi];
+				int Cb = fi >> 1; if (Cb > nc - 1) Cb = nc - 1;   // coarse cell owning fine cell fi
+				if (x < cc[Cb] && Cb > 0) --Cb;                   // left bracket if the fine centre is left of this coarse centre
+				int Cn = (Cb + 1 <= nc - 1) ? Cb + 1 : nc - 1;
+				double d = cc[Cn] - cc[Cb];
+				t = (d > 1e-30) ? (x - cc[Cb]) / d : 0.0;
+				if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+				C0 = Cb; C1 = Cn;
+			}
+			else
+			{
+				double cpos = (fi + 0.5) * 0.5 - 0.5;
+				int Cb = (int)floor(cpos); t = cpos - Cb;
+				C0 = Cb; C1 = Cb + 1;
+			}
+			w0 = 1.0 - t; w1 = t;
 			if (C0 < 0) C0 = 0; else if (C0 > nc - 1) C0 = nc - 1;
 			if (C1 < 0) C1 = 0; else if (C1 > nc - 1) C1 = nc - 1;
 		}
@@ -117,9 +138,9 @@ namespace windcfd::core
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= nf) return;
 			int fi = t % gf.nx, fj = (t / gf.nx) % gf.ny, fk = t / (gf.nx * gf.ny);
 			int Cx0, Cx1, Cy0, Cy1, Cz0, Cz1; double wx0, wx1, wy0, wy1, wz0, wz1;
-			axis_stencil(fi, gc.nx, Cx0, Cx1, wx0, wx1);
-			axis_stencil(fj, gc.ny, Cy0, Cy1, wy0, wy1);
-			axis_stencil(fk, gc.nz, Cz0, Cz1, wz0, wz1);
+			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
+			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
+			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
 			double f = fine[t] * 0.125; // R = (1/8) P^T
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
@@ -131,9 +152,9 @@ namespace windcfd::core
 			int t = blockIdx.x * blockDim.x + threadIdx.x; if (t >= nf) return;
 			int fi = t % gf.nx, fj = (t / gf.nx) % gf.ny, fk = t / (gf.nx * gf.ny);
 			int Cx0, Cx1, Cy0, Cy1, Cz0, Cz1; double wx0, wx1, wy0, wy1, wz0, wz1;
-			axis_stencil(fi, gc.nx, Cx0, Cx1, wx0, wx1);
-			axis_stencil(fj, gc.ny, Cy0, Cy1, wy0, wy1);
-			axis_stencil(fk, gc.nz, Cz0, Cz1, wz0, wz1);
+			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
+			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
+			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
 			double v = 0.0;
@@ -289,9 +310,9 @@ namespace windcfd::core
 		for (int fk = 0; fk < gf.nz; ++fk) for (int fj = 0; fj < gf.ny; ++fj) for (int fi = 0; fi < gf.nx; ++fi)
 		{
 			int Cx0, Cx1, Cy0, Cy1, Cz0, Cz1; double wx0, wx1, wy0, wy1, wz0, wz1;
-			axis_stencil(fi, gc.nx, Cx0, Cx1, wx0, wx1);
-			axis_stencil(fj, gc.ny, Cy0, Cy1, wy0, wy1);
-			axis_stencil(fk, gc.nz, Cz0, Cz1, wz0, wz1);
+			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
+			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
+			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
 			double f = fine[gf.pidx(fi, fj, fk)] * 0.125;
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
@@ -304,9 +325,9 @@ namespace windcfd::core
 		for (int fk = 0; fk < gf.nz; ++fk) for (int fj = 0; fj < gf.ny; ++fj) for (int fi = 0; fi < gf.nx; ++fi)
 		{
 			int Cx0, Cx1, Cy0, Cy1, Cz0, Cz1; double wx0, wx1, wy0, wy1, wz0, wz1;
-			axis_stencil(fi, gc.nx, Cx0, Cx1, wx0, wx1);
-			axis_stencil(fj, gc.ny, Cy0, Cy1, wy0, wy1);
-			axis_stencil(fk, gc.nz, Cz0, Cz1, wz0, wz1);
+			axis_stencil(fi, gc.nx, gf.xca, gc.xca, Cx0, Cx1, wx0, wx1);
+			axis_stencil(fj, gc.ny, gf.yca, gc.yca, Cy0, Cy1, wy0, wy1);
+			axis_stencil(fk, gc.nz, gf.zca, gc.zca, Cz0, Cz1, wz0, wz1);
 			int cx[2] = {Cx0, Cx1}, cy[2] = {Cy0, Cy1}, cz[2] = {Cz0, Cz1};
 			double wx[2] = {wx0, wx1}, wy[2] = {wy0, wy1}, wz[2] = {wz0, wz1};
 			double val = 0.0;
