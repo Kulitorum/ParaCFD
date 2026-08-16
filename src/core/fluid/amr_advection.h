@@ -99,6 +99,9 @@ namespace paracfd::core
 		const std::vector<PairwiseMomentumConnection>& connections, double dt,
 		std::vector<double>& velocity_x, std::vector<double>& velocity_y,
 		std::vector<double>& velocity_z);
+	void conservative_pairwise_scalar_cpu(const std::vector<double>& dual_volume,
+		const std::vector<PairwiseMomentumConnection>& connections, double dt,
+		std::vector<double>& velocity);
 
 	// GPU twin of conservative_pairwise_momentum_cpu. Static volumes and topology are
 	// uploaded once; only the per-step signed connection velocities are supplied by the
@@ -115,6 +118,7 @@ namespace paracfd::core
 
 		void step(Real* velocity_x, Real* velocity_y, Real* velocity_z,
 			const Real* connection_normal_velocity, Real dt);
+		void step_scalar(Real* velocity, const Real* connection_normal_velocity, Real dt);
 		int node_count() const { return node_count_; }
 		int connection_count() const { return connection_count_; }
 		std::size_t bytes() const { return bytes_; }

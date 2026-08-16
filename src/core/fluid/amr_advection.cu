@@ -37,6 +37,17 @@ namespace paracfd::core
 			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=count)return;const Real inverse=Real(1)/volume[node];
 			velocity_x[node]+=delta_x[node]*inverse;velocity_y[node]+=delta_y[node]*inverse;velocity_z[node]+=delta_z[node]*inverse;
 		}
+		__global__ void accumulate_pairwise_scalar_kernel(const int* a,const int* b,
+			const Real* area,const Real* normal_velocity,const Real* velocity,Real dt,
+			Real* delta,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int first=a[edge],second=b[edge];const Real transport=dt*area[edge]*normal_velocity[edge];const Real momentum=transport*velocity[transport>=Real(0)?first:second];atomicAdd(delta+first,-momentum);atomicAdd(delta+second,momentum);
+		}
+		__global__ void apply_pairwise_scalar_kernel(const Real* volume,const Real* delta,
+			Real* velocity,int count)
+		{
+			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node<count)velocity[node]+=delta[node]/volume[node];
+		}
 		__global__ void gather_mac_face_map_kernel(const DeviceAmrFieldLevelView* levels,
 			const int* level,const std::uint64_t* index,const std::int8_t* component,
 			Real* compact,int count)
@@ -268,6 +279,14 @@ namespace paracfd::core
 		for(std::size_t node=0;node<n;++node){velocity_x[node]+=dx[node]/dual_volume[node];velocity_y[node]+=dy[node]/dual_volume[node];velocity_z[node]+=dz[node]/dual_volume[node];}
 	}
 
+	void conservative_pairwise_scalar_cpu(const std::vector<double>& dual_volume,
+		const std::vector<PairwiseMomentumConnection>& connections,double dt,
+		std::vector<double>& velocity)
+	{
+		if(!(dt>0))throw std::invalid_argument("pairwise scalar timestep must be positive");const std::size_t n=dual_volume.size();if(velocity.size()!=n)throw std::invalid_argument("pairwise scalar state size mismatch");for(double volume:dual_volume)if(!(volume>0)||!std::isfinite(volume))throw std::invalid_argument("pairwise scalar dual volume must be finite and positive");std::vector<double> delta(n,0);
+		for(const PairwiseMomentumConnection& edge:connections){if(edge.a<0||edge.b<0||edge.a==edge.b||edge.a>=static_cast<int>(n)||edge.b>=static_cast<int>(n)||!(edge.open_area>=0)||!std::isfinite(edge.open_area)||!std::isfinite(edge.normal_velocity))throw std::invalid_argument("invalid pairwise scalar connection");const double transport=dt*edge.open_area*edge.normal_velocity,momentum=transport*velocity[transport>=0?edge.a:edge.b];delta[edge.a]-=momentum;delta[edge.b]+=momentum;}for(std::size_t node=0;node<n;++node)velocity[node]+=delta[node]/dual_volume[node];
+	}
+
 	std::vector<NormalMomentumInterfaceTile> build_normal_momentum_interface_tiles(
 		const CompositeAmrPressureSystem& system)
 	{
@@ -341,6 +360,11 @@ namespace paracfd::core
 		check(cudaMemset(delta_x_,0,node_count_*sizeof(Real)),"clear pairwise momentum x scratch");check(cudaMemset(delta_y_,0,node_count_*sizeof(Real)),"clear pairwise momentum y scratch");check(cudaMemset(delta_z_,0,node_count_*sizeof(Real)),"clear pairwise momentum z scratch");
 		if(connection_count_)accumulate_pairwise_momentum_kernel<<<(connection_count_+255)/256,256>>>(a_,b_,area_,connection_normal_velocity,velocity_x,velocity_y,velocity_z,dt,delta_x_,delta_y_,delta_z_,connection_count_);
 		apply_pairwise_momentum_kernel<<<(node_count_+255)/256,256>>>(volume_,delta_x_,delta_y_,delta_z_,velocity_x,velocity_y,velocity_z,node_count_);check(cudaDeviceSynchronize(),"pairwise conservative momentum transport");
+	}
+
+	void DevicePairwiseMomentumTransport::step_scalar(Real* velocity,const Real* connection_normal_velocity,Real dt)
+	{
+		if(!velocity||(!connection_normal_velocity&&connection_count_))throw std::invalid_argument("pairwise GPU scalar transport has null state");if(!(dt>Real(0)))throw std::invalid_argument("pairwise GPU scalar transport timestep must be positive");check(cudaMemset(delta_x_,0,node_count_*sizeof(Real)),"clear pairwise scalar scratch");if(connection_count_)accumulate_pairwise_scalar_kernel<<<(connection_count_+255)/256,256>>>(a_,b_,area_,connection_normal_velocity,velocity,dt,delta_x_,connection_count_);apply_pairwise_scalar_kernel<<<(node_count_+255)/256,256>>>(volume_,delta_x_,velocity,node_count_);check(cudaDeviceSynchronize(),"pairwise conservative scalar transport");
 	}
 
 	DeviceAmrAdvection::DeviceAmrAdvection(const AmrHierarchy& hierarchy,const TriangleBvh& fabric,double protection_cells):locator_(hierarchy)
