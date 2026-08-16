@@ -40,6 +40,7 @@ namespace paracfd::core
 	}
 
 	void ExternalAeroCore::download_fields(AmrHostFields& host) const{fields_->download(host);}
+	double ExternalAeroCore::max_abs_divergence() const{std::vector<Real> divergence;projection_->download_divergence(divergence);double maximum=0;for(Real value:divergence)maximum=std::max(maximum,std::abs(static_cast<double>(value)));return maximum;}
 	std::size_t ExternalAeroCore::gpu_bytes() const{return fields_->bytes()+advection_->bytes()+projection_->bytes();}
 	std::size_t ExternalAeroCore::protected_face_count() const{return advection_->protected_face_count();}
 	std::size_t ExternalAeroCore::active_face_count() const{return advection_->active_face_count();}

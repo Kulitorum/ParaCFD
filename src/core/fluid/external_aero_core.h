@@ -40,6 +40,7 @@ namespace paracfd::core
 		ExternalAeroStepStats step();
 		AerodynamicLoads pressure_loads(double pressure_reference = 0.0) const;
 		void download_fields(AmrHostFields& host) const;
+		double max_abs_divergence() const; // throttled validation/statistics download
 
 		const AmrHierarchy& hierarchy() const { return hierarchy_; }
 		const AmrEmbeddedBoundaryAtlas& embedded_boundary() const { return embedded_boundary_; }

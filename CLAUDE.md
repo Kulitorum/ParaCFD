@@ -76,6 +76,7 @@ Important probes are:
 
 - `paraglider_geometry_probe`: deterministic geometry, EB topology, pressure/operator, AMR exchange, FP32 parity, and load tests;
 - `paraglider_gpu_probe`: CUDA pressure-operator timing and allocation estimates;
+- `paraglider_flow_probe`: dynamic normal/parallel/inclined plates, projection divergence, opened-cavity connectivity, and AMR-versus-uniform force comparison;
 - `paraglider_probe`: STEP/config preprocessing diagnostics;
 - `parity_probe`: retained CPU/GPU parity coverage for useful legacy kernels.
 
@@ -92,6 +93,6 @@ The repository is in an incremental migration state and must not yet be describe
 - Compact coarse/fine and EB aperture velocities participate in projection but are not yet advected/diffused as independent velocity states.
 - The Qt viewer can inspect AMR bricks and owned EB cells and reports whether the composite pressure topology is ready. It deliberately refuses to run the legacy channel timestep for a loaded paraglider, but its controls remain substantially inherited from the building/channel product.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
-- Required full-flow validations such as the opening-cavity case and AMR-versus-uniform force comparison remain outstanding.
+- The opened-cavity gate currently proves pressure-graph connectivity through the missing inlet face; it does not yet measure a developed internal mass-flow rate. Longer force-convergence studies and a resolved paraglider reference case remain outstanding.
 
 The legacy channel/building code is retained only as a numerical and visualization reference while these missing replacements are completed. Do not extend it as the new architecture, and do not delete it until the replacement path supplies equivalent working functionality and tests.

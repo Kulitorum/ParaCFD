@@ -215,6 +215,11 @@ add_executable(paraglider_gpu_probe tools/paraglider_gpu_probe.cpp)
 target_link_libraries(paraglider_gpu_probe PRIVATE libparacfd)
 add_test(NAME paraglider_gpu COMMAND paraglider_gpu_probe)
 
+add_executable(paraglider_flow_probe tools/paraglider_flow_probe.cpp)
+target_link_libraries(paraglider_flow_probe PRIVATE libparacfd)
+add_test(NAME paraglider_flow COMMAND paraglider_flow_probe)
+set_tests_properties(paraglider_flow PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # --- paracfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
 # Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can
 # link the slice kernel + its CPU reference without pulling in Qt/GL.

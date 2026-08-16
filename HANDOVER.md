@@ -19,6 +19,7 @@ Implemented:
 - first-order finest-brick GPU backtrace advection, a static no-cross-fabric protection band, and explicit molecular/Smagorinsky diffusion;
 - `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> composite projection without bulk per-step transfers;
 - composite surface-patch mappings to global p+/p- pressure states and pressure-only triangle/whole-wing load publication;
+- deterministic dynamic normal/parallel/inclined plate gates, opened/closed cavity pressure connectivity, and an equal-finest AMR-versus-uniform inclined-plate comparison;
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a GUI AMR/EB preview that validates pressure-topology construction and refuses to run the unrelated legacy channel timestep.
@@ -48,6 +49,7 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 1. Replace the static first-order fabric protection fallback with a higher-order side-aware reconstruction and make velocity interpolation/diffusion fully consistent across brick and 2:1 interfaces.
 2. Advect/diffuse compact EB and coarse/fine aperture velocity states and add the normal/parallel/inclined plate, opened-cavity, and AMR-versus-uniform dynamic validations.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
+4. Extend the opened-cavity topology test into a developed internal mass-flow test once compact aperture velocities receive full advection/diffusion updates.
 4. Add dynamic normal/parallel/inclined plate and opened-cavity tests, followed by AMR-versus-uniform force validation.
 5. Complete the Qt workflow and only then remove building/channel/ground/seabed/porous code.
 

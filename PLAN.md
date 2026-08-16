@@ -88,6 +88,7 @@ Remove the building, centerline, roof/wall, solid-voxel-load, channel/ground/sea
 - Composite AMR flux is conservative through EB and coarse/fine interfaces.
 - GPU projection reaches the declared residual tolerance with a documented norm.
 - FP32 agrees with CPU/FP64 reference cases at a justified tolerance.
-- Normal, parallel, and inclined plates; opened cavity; AMR interface; and AMR-versus-uniform cases pass.
+- Normal, parallel, and inclined dynamic plates pass; the current equal-finest AMR inclined-plate lift differs from uniform-fine by about 15% (25% initial gate).
+- A missing cavity inlet reconnects the internal pressure graph to external air; developed internal mass-flow validation remains pending.
 - End-to-end timestep contains no per-step CPU geometry work or bulk field transfers.
 - GUI and logs clearly distinguish pressure drag from total drag and expose unresolved geometry.
