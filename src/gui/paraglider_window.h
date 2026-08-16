@@ -39,7 +39,6 @@ namespace paracfd::gui
 		bool loadConfigFile(const QString& path,bool build_after_load=false);
 		bool saveConfigFile(const QString& path);
 		bool buildGrid();
-		void startSimulation();
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -73,7 +72,7 @@ namespace paracfd::gui
 		long long last_steps_=0;
 		double last_time_=0;
 
-		QPushButton *build_button_=nullptr,*start_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
+		QPushButton *build_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
 		QDoubleSpinBox *speed_=nullptr,*rho_=nullptr,*nu_=nullptr,*upstream_=nullptr,*downstream_=nullptr,
 			*lateral_=nullptr,*vertical_=nullptr,*base_h_=nullptr,*wing_refine_=nullptr,*surface_refine_=nullptr,
 			*wake_length_=nullptr,*wake_radius_=nullptr,*min_volume_fraction_=nullptr,*min_aperture_area_fraction_=nullptr,
