@@ -70,20 +70,21 @@ int main(int argc,char** argv)
 	// each diagnostic sample visible while the case is running instead of buffering
 	// the entire multi-minute history until process exit.
 	std::setvbuf(stdout,nullptr,_IONBF,0);
-	std::string config_path="configs/planb_parakite.json";int steps=50,sample_every=5,max_levels=0;double projection_tolerance=0,min_volume_fraction=0;bool locate_regular_max=false;
+	std::string config_path="configs/planb_parakite.json";int steps=50,sample_every=5,max_levels=0;double projection_tolerance=0,min_volume_fraction=0,target_physical_time=0;bool locate_regular_max=false,steps_explicit=false;
 	for(int i=1;i<argc;++i)
 	{
 		const std::string argument=argv[i];
 		if(argument=="--config"&&i+1<argc)config_path=argv[++i];
-		else if(argument=="--steps"&&i+1<argc)steps=std::atoi(argv[++i]);
+		else if(argument=="--steps"&&i+1<argc){steps=std::atoi(argv[++i]);steps_explicit=true;}
+		else if(argument=="--physical-time"&&i+1<argc)target_physical_time=std::atof(argv[++i]);
 		else if(argument=="--sample-every"&&i+1<argc)sample_every=std::atoi(argv[++i]);
 		else if(argument=="--projection-tolerance"&&i+1<argc)projection_tolerance=std::atof(argv[++i]);
 		else if(argument=="--min-volume-fraction"&&i+1<argc)min_volume_fraction=std::atof(argv[++i]);
 		else if(argument=="--max-levels"&&i+1<argc)max_levels=std::atoi(argv[++i]);
 		else if(argument=="--locate-regular-max")locate_regular_max=true;
-		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--steps N] [--sample-every N] [--projection-tolerance value] [--min-volume-fraction value] [--max-levels N] [--locate-regular-max]\n");return 2;}
+		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--steps N] [--physical-time seconds] [--sample-every N] [--projection-tolerance value] [--min-volume-fraction value] [--max-levels N] [--locate-regular-max]\n");return 2;}
 	}
-	if(steps<0||sample_every<1){std::fprintf(stderr,"steps must be nonnegative and sample-every must be positive\n");return 2;}
+	if(steps<0||sample_every<1||target_physical_time<0){std::fprintf(stderr,"steps and physical-time must be nonnegative and sample-every must be positive\n");return 2;}if(target_physical_time>0&&!steps_explicit)steps=std::numeric_limits<int>::max();
 	ParagliderConfig config;std::string error;if(!load_paraglider_config(config_path,config,&error)){std::fprintf(stderr,"[paraglider-case] %s\n",error.c_str());return 2;}if(projection_tolerance>0)config.solver.projection_tolerance=projection_tolerance;if(min_volume_fraction>0)config.amr.min_volume_fraction=min_volume_fraction;if(max_levels>0)config.amr.max_levels=max_levels;
 	const auto load_begin=std::chrono::steady_clock::now();TriMesh source=load_step_mesh(config.step_path,config.tessellation_deflection_mm,&error);if(source.empty()){std::fprintf(stderr,"[paraglider-case] STEP load failed: %s\n",error.c_str());return 2;}config.placement=frame_wing_for_external_domain(source,config.placement,config.domain.upstream_margin,config.domain.lateral_margin,config.domain.vertical_margin,config.amr.base_cell_size*config.amr.brick_size);std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config.placement.tx,config.placement.ty,config.placement.tz,config.placement.m[0],config.placement.m[1],config.placement.m[2],config.placement.m[3],config.placement.m[4],config.placement.m[5],config.placement.m[6],config.placement.m[7],config.placement.m[8]);TriMesh wing=placed_mesh(source,config.placement);TriangleBvh bvh(wing);const auto load_end=std::chrono::steady_clock::now();
 	try
@@ -94,11 +95,12 @@ int main(int argc,char** argv)
 		std::unique_ptr<AmrHostFields> diagnostic_fields=locate_regular_max?std::make_unique<AmrHostFields>(core.hierarchy()):nullptr;
 		const Aabb3d wing_box{{wing.bbox_min[0],wing.bbox_min[1],wing.bbox_min[2]},{wing.bbox_max[0],wing.bbox_max[1],wing.bbox_max[2]}};
 		if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] initialization did not converge: iterations=%d residual=%.3e\n",stats.pressure.iterations,stats.pressure.relative_residual);return 3;}report(0,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box);
-		for(int step=1;step<=steps;++step)
+		int completed_steps=0;for(int step=1;step<=steps&&(!(target_physical_time>0)||core.physical_time()<target_physical_time);++step)
 		{
-			stats=core.step();if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] step %d did not converge: iterations=%d residual=%.3e\n",step,stats.pressure.iterations,stats.pressure.relative_residual);return 4;}
-			if(step==1||step==steps||step%sample_every==0)report(step,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box);
+			stats=core.step();completed_steps=step;if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] step %d did not converge: iterations=%d residual=%.3e\n",step,stats.pressure.iterations,stats.pressure.relative_residual);return 4;}const bool reached_time=target_physical_time>0&&core.physical_time()>=target_physical_time;
+			if(step==1||step==steps||reached_time||step%sample_every==0)report(step,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box);
 		}
+		if(target_physical_time>0&&core.physical_time()<target_physical_time){std::fprintf(stderr,"[paraglider-case] physical-time target %.9g s not reached within %d steps (t=%.9g s)\n",target_physical_time,steps,core.physical_time());return 6;}const AerodynamicLoads summary_loads=core.pressure_loads();const ExternalAeroConservationStats summary_conservation=core.conservation_stats();std::printf("[paraglider-case-summary] levels=%zu finest_h=%.9g steps=%d t=%.9g prestep_regular_max=%.9g prestep_special_max=%.9g Fx=%.9g Fy=%.9g Fz=%.9g div_max=%.9g div_rms=%.9g flux_net=%.9g gpu_mib=%.9g step_ms=%.9g projection_ms=%.9g pressure_iterations=%d pressure_residual=%.9g\n",core.hierarchy().levels().size(),core.hierarchy().finest_cell_size(),completed_steps,core.physical_time(),stats.max_abs_regular_velocity,stats.max_abs_special_velocity,summary_loads.pressure_force.x,summary_loads.pressure_force.y,summary_loads.pressure_force.z,summary_conservation.max_abs_divergence,summary_conservation.volume_weighted_rms_divergence,summary_conservation.net_integrated_flux_error,core.gpu_bytes()/(1024.0*1024.0),stats.gpu_step_ms,stats.projection_ms,stats.pressure.iterations,stats.pressure.relative_residual);
 	}
 	catch(const std::exception& exception){std::fprintf(stderr,"[paraglider-case] failed: %s\n",exception.what());return 5;}
 	return 0;

@@ -90,5 +90,6 @@ The building, centerline, roof/wall, solid voxelizer/load, channel/ground/seabed
 - FP32 agrees with CPU/FP64 reference cases at a justified tolerance.
 - Normal, parallel, and inclined dynamic plates pass; the current short equal-finest AMR inclined-plate lift differs from uniform-fine by about 0.4%.
 - A missing cavity inlet admits developed bidirectional flow while its closed control has zero represented opening flux.
+- Imported-wing convergence runs stop at a common physical time and emit a machine-readable summary; step count is not accepted as a proxy for elapsed flow time.
 - End-to-end timestep contains no per-step CPU geometry work or bulk field transfers.
 - GUI and logs clearly distinguish pressure drag from total drag and expose unresolved geometry.
