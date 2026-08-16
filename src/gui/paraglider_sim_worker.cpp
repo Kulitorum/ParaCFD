@@ -16,6 +16,26 @@ namespace paracfd::gui
 		: core_(std::move(core))
 	{
 		display_amr_ = std::make_unique<paracfd::core::AmrHostFields>(core_->hierarchy());
+		latest_flow_change_=std::numeric_limits<double>::infinity();
+	}
+
+	void ParagliderSimWorker::setPlaying(bool playing)
+	{
+		playing_.store(playing);if(playing){auto_paused_.store(false);settling_reset_.store(true);}
+		else if(!auto_paused_.load())settling_reset_.store(true);
+		std::lock_guard lock(snapshot_mutex_);snapshot_.playing=playing;snapshot_.auto_paused=auto_paused_.load();++snapshot_.generation;
+	}
+
+	void ParagliderSimWorker::stepOnce()
+	{
+		auto_paused_.store(false);settling_reset_.store(true);step_requests_.fetch_add(1);
+		std::lock_guard lock(snapshot_mutex_);snapshot_.auto_paused=false;++snapshot_.generation;
+	}
+
+	void ParagliderSimWorker::configureAutoPause(bool enabled,double sensitivity)
+	{
+		auto_pause_enabled_.store(enabled);auto_pause_sensitivity_.store(std::clamp(sensitivity,0.0,1.0));settling_reset_.store(true);
+		std::lock_guard lock(snapshot_mutex_);snapshot_.auto_pause_enabled=enabled;++snapshot_.generation;
 	}
 
 	bool ParagliderSimWorker::withFlowField(
@@ -161,10 +181,41 @@ namespace paracfd::gui
 		display_lock.unlock();
 
 		std::lock_guard lock(flow_mutex_);
+		if(flow_u_.size()==u.size()&&flow_v_.size()==v.size()&&flow_w_.size()==w.size())
+		{
+			double difference2=0,scale2=0;auto accumulate=[&](const std::vector<double>& previous,const std::vector<double>& current){for(std::size_t q=0;q<current.size();++q){const double d=current[q]-previous[q];difference2+=d*d;scale2+=current[q]*current[q];}};accumulate(flow_u_,u);accumulate(flow_v_,v);accumulate(flow_w_,w);latest_flow_change_=std::sqrt(difference2/std::max(scale2,1e-30));
+		}
+		else latest_flow_change_=std::numeric_limits<double>::infinity();
 		flow_grid_ = grid;
 		flow_u_.swap(u); flow_v_.swap(v); flow_w_.swap(w); flow_p_.swap(pressure);
 		++flow_generation_;
 		flow_ready_ = true;
+	}
+
+	void ParagliderSimWorker::updateSettling(double physical_time,const paracfd::core::Vec3d& force,const paracfd::core::ExternalAeroConservationStats& conservation)
+	{
+		if(settling_reset_.exchange(false)){settling_history_.clear();settling_consecutive_=0;settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;settling_ready_=false;}
+		if(!auto_pause_enabled_.load())return;
+		const double speed=std::max(1e-9,std::abs(core_->config().freestream.speed));
+		const double flow_time=(core_->hierarchy().domain().hi.x-core_->hierarchy().domain().lo.x)/speed;
+		if(!(flow_time>0)||!std::isfinite(latest_flow_change_))return;
+		flow_throughs_=physical_time/flow_time;settling_history_.push_back({physical_time,force,latest_flow_change_});
+		const double window=std::max(0.25,0.5*flow_time),oldest=physical_time-window;
+		while(!settling_history_.empty()&&settling_history_.front().time<oldest)settling_history_.pop_front();
+		if(physical_time<1.5*flow_time||settling_history_.size()<10||settling_history_.front().time>oldest+0.1*window)return;
+		const double split=physical_time-0.5*window;paracfd::core::Vec3d old_mean{},new_mean{};int old_count=0,new_count=0;
+		for(const SettlingSample& sample:settling_history_){paracfd::core::Vec3d& mean=sample.time<split?old_mean:new_mean;mean.x+=sample.force.x;mean.y+=sample.force.y;mean.z+=sample.force.z;if(sample.time<split)++old_count;else ++new_count;}
+		if(old_count<4||new_count<4)return;old_mean.x/=old_count;old_mean.y/=old_count;old_mean.z/=old_count;new_mean.x/=new_count;new_mean.y/=new_count;new_mean.z/=new_count;
+		auto magnitude=[](const paracfd::core::Vec3d& value){return std::sqrt(value.x*value.x+value.y*value.y+value.z*value.z);};
+		const double scale=std::max(1.0,0.5*(magnitude(old_mean)+magnitude(new_mean)));settling_force_drift_=magnitude(new_mean-old_mean)/scale;
+		double square=0,flow_change=0;for(const SettlingSample& sample:settling_history_)if(sample.time>=split){const paracfd::core::Vec3d delta=sample.force-new_mean;square+=delta.x*delta.x+delta.y*delta.y+delta.z*delta.z;flow_change+=sample.flow_change;}
+		settling_force_rms_=std::sqrt(square/new_count)/scale;flow_change/=new_count;
+		const double sensitivity=auto_pause_sensitivity_.load(),range=std::pow(20.0,sensitivity);
+		const double drift_tolerance=0.001*range,noise_tolerance=0.003*range,flow_tolerance=0.0005*range;
+		settling_score_=std::max({settling_force_drift_/drift_tolerance,settling_force_rms_/noise_tolerance,flow_change/flow_tolerance});settling_ready_=true;
+		const bool conservative=conservation.volume_weighted_rms_divergence<1e-3;
+		if(settling_score_<1.0&&conservative)++settling_consecutive_;else settling_consecutive_=0;
+		if(settling_consecutive_>=3){playing_.store(false);auto_paused_.store(true);}
 	}
 
 	bool ParagliderSimWorker::latestSnapshot(std::uint64_t& generation,
@@ -193,7 +244,9 @@ namespace paracfd::gui
 		out.max_integrated_flux_error = snapshot_.max_integrated_flux_error;
 		out.absolute_integrated_flux_error = snapshot_.absolute_integrated_flux_error;
 		out.net_integrated_flux_error = snapshot_.net_integrated_flux_error;
+		out.flow_change=snapshot_.flow_change;out.settling_score=snapshot_.settling_score;out.settling_force_drift=snapshot_.settling_force_drift;out.settling_force_rms=snapshot_.settling_force_rms;out.flow_throughs=snapshot_.flow_throughs;
 		out.gpu_bytes = snapshot_.gpu_bytes;
+		out.playing=snapshot_.playing;out.auto_pause_enabled=snapshot_.auto_pause_enabled;out.auto_paused=snapshot_.auto_paused;out.settling_ready=snapshot_.settling_ready;
 		out.error = snapshot_.error;
 		out.cp_min = snapshot_.cp_min;
 		out.cp_max = snapshot_.cp_max;
@@ -245,6 +298,7 @@ namespace paracfd::gui
 			side_cp_min=-side_maximum;
 			side_cp_max=side_maximum;
 		}
+		if(have_surface)updateSettling(stats.physical_time,loads.pressure_force,conservation);
 
 		std::lock_guard lock(snapshot_mutex_);
 		snapshot_.steps = steps_;
@@ -261,6 +315,8 @@ namespace paracfd::gui
 		snapshot_.gpu_bytes = core_->gpu_bytes();
 		snapshot_.initialized = core_->initialized();
 		snapshot_.converged = stats.pressure.converged;
+		snapshot_.playing=playing_.load();snapshot_.auto_pause_enabled=auto_pause_enabled_.load();snapshot_.auto_paused=auto_paused_.load();snapshot_.settling_ready=settling_ready_;
+		snapshot_.flow_change=latest_flow_change_;snapshot_.settling_score=settling_score_;snapshot_.settling_force_drift=settling_force_drift_;snapshot_.settling_force_rms=settling_force_rms_;snapshot_.flow_throughs=flow_throughs_;
 		snapshot_.error.clear();
 		if (have_surface)
 		{
@@ -324,15 +380,17 @@ namespace paracfd::gui
 				// solver telemetry remains available after every GPU step.
 				const bool publish_fields = (steps_ % 10) == 0 || !stats.pressure.converged;
 				if (publish_fields) publishFlowField();
-				publish(stats, publish_fields);
 				if (!stats.pressure.converged) playing_.store(false);
+				publish(stats, publish_fields);
 			}
 		}
 		catch (const std::exception& exception)
 		{
+			playing_.store(false);
 			std::lock_guard lock(snapshot_mutex_);
 			snapshot_.error = exception.what();
 			snapshot_.converged = false;
+			snapshot_.playing = false;
 			++snapshot_.generation;
 		}
 		emit finished();

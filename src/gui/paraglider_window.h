@@ -87,9 +87,9 @@ namespace paracfd::gui
 			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
-		QSlider* slice_position_=nullptr;
+		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
-			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*thin_y_debug_=nullptr;
+			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*thin_y_debug_=nullptr,*auto_pause_=nullptr;
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
 		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
 

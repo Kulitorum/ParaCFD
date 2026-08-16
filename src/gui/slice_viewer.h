@@ -52,6 +52,8 @@ namespace paracfd::gui
 		bool frameWingView();
 		void setThinDebugState(bool enabled,int layers){thin_debug_=enabled;thin_debug_layers_=layers;update();}
 		void setSimulationStep(long long step){simulation_step_=step;update();}
+		void setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,
+			bool settling_ready,double settling_score,double flow_throughs);
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
@@ -290,6 +292,8 @@ namespace paracfd::gui
 		bool thin_debug_ = false;
 		int thin_debug_layers_ = 0;
 		long long simulation_step_ = 0;
+		bool simulation_running_=false,simulation_auto_paused_=false,simulation_auto_pause_enabled_=false,simulation_settling_ready_=false;
+		double simulation_settling_score_=0,simulation_flow_throughs_=0;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;
