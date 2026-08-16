@@ -63,4 +63,5 @@ namespace paracfd::core
 	std::size_t ExternalAeroCore::active_face_count() const{return advection_->active_face_count();}
 	int ExternalAeroCore::embedded_high_order_stencil_count() const{return projection_->embedded_high_order_stencil_count();}
 	int ExternalAeroCore::embedded_least_squares_full_rank_count() const{return projection_->embedded_least_squares_full_rank_count();}
+	int ExternalAeroCore::fabric_wall_node_count() const{return projection_->fabric_wall_node_count();}
 }

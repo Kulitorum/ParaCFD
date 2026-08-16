@@ -263,6 +263,7 @@ namespace paracfd::core
 		double max_embedded_cfl_rate() const;
 		int embedded_high_order_stencil_count() const { return embedded_high_order_stencil_count_; }
 		int embedded_least_squares_full_rank_count() const { return embedded_least_squares_full_rank_count_; }
+		int fabric_wall_node_count() const { return fabric_wall_node_count_; }
 		// Validation-only D2H diagnostic. Production timesteps never call this.
 		void download_embedded_node_gradients(std::vector<Real>& gradients,
 			std::vector<std::uint8_t>* component_rank = nullptr) const;
@@ -304,6 +305,13 @@ namespace paracfd::core
 			*eb_transport_scratch_ = nullptr, *eb_diffusion_rate_ = nullptr,
 			*eb_node_diffusion_sum_ = nullptr, *eb_node_neighbor_count_ = nullptr,
 			*eb_diffusion_scratch_ = nullptr;
+		int *wall_edge_node_a_ = nullptr, *wall_edge_node_b_ = nullptr;
+		int *wall_carrier_node_ = nullptr, *wall_carrier_level_ = nullptr;
+		std::uint64_t* wall_carrier_index_ = nullptr;
+		std::int8_t* wall_carrier_axis_ = nullptr;
+		Real *wall_carrier_mass_ = nullptr, *wall_node_rate_ = nullptr,
+			*wall_node_axis_sum_ = nullptr, *wall_node_axis_weight_ = nullptr,
+			*wall_node_velocity_delta_ = nullptr;
 		std::vector<int> brick_counts_;
 		std::vector<std::uint8_t> embedded_gradient_rank_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
@@ -311,6 +319,7 @@ namespace paracfd::core
 		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0;
 		int embedded_high_order_stencil_count_ = 0;
 		int embedded_least_squares_full_rank_count_ = 0;
+		int fabric_wall_node_count_ = 0, fabric_wall_carrier_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
