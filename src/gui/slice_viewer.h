@@ -35,6 +35,7 @@ class QPainter;
 namespace paracfd::gui
 {
 	class SimWorker;
+	class ParagliderSimWorker;
 
 	class SliceViewer : public QOpenGLWidget, protected QOpenGLFunctions_4_3_Core
 	{
@@ -46,6 +47,7 @@ namespace paracfd::gui
 		// Wire the data source + domain metadata (call before the first paint). Re-pushes the
 		// arrow host-flow request to the (possibly new) worker.
 		void setWorker(SimWorker* w);
+		void setParagliderWorker(ParagliderSimWorker* w);
 		void setInfo(const SimInfo& info);
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
@@ -276,6 +278,7 @@ namespace paracfd::gui
 		bool projectPoint(const QMatrix4x4& mvp, const QVector3D& w, QPointF& px) const; // world→screen px
 
 		SimWorker* worker_ = nullptr;
+		ParagliderSimWorker* paraglider_worker_ = nullptr;
 		SimInfo info_;
 		bool have_info_ = false;
 
@@ -298,6 +301,7 @@ namespace paracfd::gui
 		bool range_valid_ = false;
 		float auto_speed_max_ = 1.0f;   // smoothed max |u| over fluid cells [m/s] (arrow colour scale)
 		int range_ctr_ = 0;             // paint counter → reduce every kRangeEvery frames (~12 Hz)
+		std::vector<float4> host_slice_colours_; // display-only AMR snapshot -> GL upload
 		int range_log_ctr_ = 0;         // throttles the [vmin,vmax] diagnostic line
 		static constexpr int kRangeEvery = 5;
 

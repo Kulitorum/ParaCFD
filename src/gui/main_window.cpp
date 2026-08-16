@@ -319,6 +319,10 @@ namespace paracfd::gui
 		paraglider_group_ = pgGroup;
 		pgGroup->setVisible(false);
 		QVBoxLayout* pgCol = new QVBoxLayout(pgGroup);
+		QLabel* pgOrientationHint=new QLabel(QString::fromUtf8("WIND: +X  →   Bbox auto-aligns span/chord.\nLeading/trailing is ambiguous: flip 180° if needed."));
+		pgOrientationHint->setWordWrap(true);pgOrientationHint->setStyleSheet("font-weight:600;color:#ff8b69;background:#20242a;padding:6px;");pgCol->addWidget(pgOrientationHint);
+		QHBoxLayout* pgRotateRow=new QHBoxLayout;QPushButton* pgFlip=new QPushButton("Flip leading/trailing 180°");QPushButton* pgRotate=new QPushButton("Rotate +90° Z");pgFlip->setToolTip("The bbox identifies span and chord but not their sign. Flip the canopy when its leading edge points downwind; this rebuilds the CFD grid.");pgRotate->setToolTip("Manual axis correction for unusual STEP coordinates. Rotates the wing +90° about global Z and rebuilds the CFD grid.");connect(pgFlip,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,180,1);});connect(pgRotate,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,90,1);});pgRotateRow->addWidget(pgFlip);pgRotateRow->addWidget(pgRotate);pgCol->addLayout(pgRotateRow);
+		QPushButton* pgBuild=new QPushButton("Build CFD Grid");pgBuild->setToolTip("Rebuild static AMR and zero-thickness embedded-boundary topology from the current STEP placement, then initialize a fresh GPU solver.");connect(pgBuild,&QPushButton::clicked,this,[this]{sim_started_=false;if(play_btn_)play_btn_->setChecked(false);buildParagliderPreviewGrid();});pgCol->addWidget(pgBuild);
 		QFormLayout* pgForm = new QFormLayout;
 		pgForm->setLabelAlignment(Qt::AlignLeft);
 		auto pgDistance = [this](double value,double maximum,const char* tip)
@@ -349,8 +353,6 @@ namespace paracfd::gui
 		pgForm->addRow("CFL",pg_cfl_spin_);pgForm->addRow("Smagorinsky Cs",pg_cs_spin_);pgForm->addRow("Projection tolerance",pg_pressure_tolerance_spin_);pgForm->addRow("Pressure max iterations",pg_pressure_iterations_spin_);pgForm->addRow("Reference area",pg_reference_area_spin_);pgForm->addRow("Reference length",pg_reference_length_spin_);
 		pgCol->addLayout(pgForm);
 		pg_grid_readout_=new QLabel;pg_grid_readout_->setWordWrap(true);pg_grid_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");pgCol->addWidget(pg_grid_readout_);
-		QHBoxLayout* pgRotateRow=new QHBoxLayout;QPushButton* pgRotatePlus=new QPushButton("Rotate +90° Z");QPushButton* pgRotateMinus=new QPushButton("Rotate -90° Z");pgRotatePlus->setToolTip("Useful when the exporter stores forward as -Y (PlanB): one +90° rotation maps it to internal +X.");pgRotateMinus->setToolTip("Rotate the imported wing -90° about global Z. Use the placement readout to verify forward.");connect(pgRotatePlus,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,90,1);});connect(pgRotateMinus,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,-90,1);});pgRotateRow->addWidget(pgRotatePlus);pgRotateRow->addWidget(pgRotateMinus);pgCol->addLayout(pgRotateRow);
-		QPushButton* pgBuild=new QPushButton("Build CFD Grid");pgBuild->setToolTip("Rebuild static AMR and zero-thickness embedded-boundary topology from the current STEP placement, then initialize a fresh GPU solver.");connect(pgBuild,&QPushButton::clicked,this,[this]{sim_started_=false;if(play_btn_)play_btn_->setChecked(false);buildParagliderPreviewGrid();});pgCol->addWidget(pgBuild);
 		col->addWidget(pgGroup);
 		updateParagliderGridReadout();
 
@@ -1767,13 +1769,30 @@ namespace paracfd::gui
 			const paracfd::core::ParagliderConfig initial_config = paragliderConfigFromUi();
 			const paracfd::core::DomainConfig& margins = initial_config.domain;
 			const paracfd::core::AmrConfig& amr_defaults = initial_config.amr;
+			// A bbox reliably identifies span versus chord for a deployed paraglider, but not
+			// leading versus trailing edge. Both currently known exporters encode forward on
+			// the negative chord axis, so use that convention and leave a prominent 180-degree
+			// flip in the UI for files with the opposite sign.
+			SliceViewer::ModelGizmoXform x=viewer_->modelXform();
+			const double bbox_dx=model_mesh_.bbox_max[0]-model_mesh_.bbox_min[0];
+			const double bbox_dy=model_mesh_.bbox_max[1]-model_mesh_.bbox_min[1];
+			const double span_chord_ratio=std::max(bbox_dx,bbox_dy)/std::max(1e-9,std::min(bbox_dx,bbox_dy));
+			if(span_chord_ratio>=1.25)
+			{
+				const bool span_is_x=bbox_dx>bbox_dy;
+				const float yaw=span_is_x?90.0f:180.0f; // -Y or -X model-forward -> internal +X
+				x.rot=QQuaternion::fromAxisAndAngle(0,0,1,yaw);
+				viewer_->setModelXform(x);
+				std::fprintf(stderr,"[paraglider-orientation] bbox %.3f x %.3f m: span=%c, assumed forward=-%c, yaw=%.0f deg (use 180-deg flip if LE/TE is reversed)\n",bbox_dx,bbox_dy,span_is_x?'X':'Y',span_is_x?'Y':'X',yaw);
+			}
+			else std::fprintf(stderr,"[paraglider-orientation] bbox XY ratio %.3f is ambiguous; keeping imported yaw (use placement controls)\n",span_chord_ratio);
 			const paracfd::core::TriMesh initially_placed=paracfd::core::placed_mesh(model_mesh_,viewer_->modelPlacement());
 			const double base_brick_width=amr_defaults.base_cell_size*amr_defaults.brick_size;
 			const double requested_y=(initially_placed.bbox_max[1]-initially_placed.bbox_min[1])+2.0*margins.lateral_margin;
 			const double requested_z=(initially_placed.bbox_max[2]-initially_placed.bbox_min[2])+2.0*margins.vertical_margin;
 			const double padding_y=std::ceil(requested_y/base_brick_width)*base_brick_width-requested_y;
 			const double padding_z=std::ceil(requested_z/base_brick_width)*base_brick_width-requested_z;
-			SliceViewer::ModelGizmoXform x=viewer_->modelXform();
+			x=viewer_->modelXform();
 			x.t+=QVector3D(static_cast<float>(margins.upstream_margin-initially_placed.bbox_min[0]),static_cast<float>(margins.lateral_margin+0.5*padding_y-initially_placed.bbox_min[1]),static_cast<float>(margins.vertical_margin+0.5*padding_z-initially_placed.bbox_min[2]));
 			viewer_->setModelXform(x);scene_place_=viewer_->modelPlacement();
 		}
@@ -1834,7 +1853,17 @@ namespace paracfd::gui
 			for(const UnresolvedEbCell& problem:eb.unresolved)if(level_atlas.owned_cell[problem.parent_cell]){++unresolved;const auto q=grid.cell_coord(problem.parent_cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
 		}
 		const CompositeAmrPressureSystem& pressure=external_core->pressure_system();const bool pressure_ready=true;const std::size_t pressure_dofs=pressure.storage_size,pressure_edges=pressure.coarse_fine.size()+pressure.embedded.size();
-		viewer_->setShowSlice(false);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;const Vec3d padded_size=amr.domain().hi-amr.domain().lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8, static pockets %9; pressure topology %10").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved).arg(pressure_static).arg(pressure_ready?QString("ready (%1 DOFs/%2 edges)").arg(pressure_dofs).arg(pressure_edges):QString("not ready")),15000);
+		const Vec3d padded_size=amr.domain().hi-amr.domain().lo;
+		SimInfo display_info;
+		display_info.h=amr.levels().front().h; display_info.coarse_h=display_info.h;
+		display_info.nx=static_cast<int>(std::llround(padded_size.x/display_info.h));
+		display_info.ny=static_cast<int>(std::llround(padded_size.y/display_info.h));
+		display_info.nz=static_cast<int>(std::llround(padded_size.z/display_info.h));
+		display_info.Lx=padded_size.x; display_info.Ly=padded_size.y; display_info.Lz=padded_size.z;
+		display_info.U=cfg.freestream.speed; display_info.rho=cfg.freestream.rho; display_info.nu=cfg.freestream.nu;
+		display_info.name="paraglider_amr_display";
+		viewer_->setInfo(display_info); viewer_->setGridLines({}, {}, {});
+		viewer_->setShowSlice(true);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8, static pockets %9; pressure topology %10").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved).arg(pressure_static).arg(pressure_ready?QString("ready (%1 DOFs/%2 edges)").arg(pressure_dofs).arg(pressure_edges):QString("not ready")),15000);
 		std::fprintf(stderr,"[paraglider-preview] face-only requested domain %.3f x %.3f x %.3f m; padded AMR %.3f x %.3f x %.3f m, %zu bricks; EB fragments=%zu apertures=%zu patches=%zu unresolved=%zu static=%zu pressure=%s (%zu DOFs, %zu special edges)\n",requested_size.x,requested_size.y,requested_size.z,padded_size.x,padded_size.y,padded_size.z,amr.active_brick_count(),fragments,apertures,patches,unresolved,pressure_static,pressure_ready?"ready":"not-ready",pressure_dofs,pressure_edges);
 		spawnParagliderWorker(std::move(external_core));if(start_btn_){start_btn_->setEnabled(true);start_btn_->setText("Start Simulation");}
 	}
@@ -2285,6 +2314,7 @@ namespace paracfd::gui
 		paraglider_snapshot_generation_ = 0;
 		paraglider_surface_generation_ = 0;
 		paraglider_worker_ = new ParagliderSimWorker(std::move(core));
+		if (viewer_) viewer_->setParagliderWorker(paraglider_worker_);
 		paraglider_worker_->setPlaying(sim_started_ && play_btn_ && play_btn_->isChecked());
 		paraglider_thread_ = new QThread(this);
 		paraglider_worker_->moveToThread(paraglider_thread_);
@@ -2297,6 +2327,7 @@ namespace paracfd::gui
 
 	void MainWindow::shutdownParagliderWorker()
 	{
+		if (viewer_) viewer_->setParagliderWorker(nullptr);
 		if (paraglider_worker_) paraglider_worker_->stop();
 		if (paraglider_thread_)
 		{

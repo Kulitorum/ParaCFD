@@ -4,6 +4,7 @@
 #include "core/geometry/model_placement.h"
 #include "gui/colormap.h"
 #include "gui/gl_thread_check.h"
+#include "gui/paraglider_sim_worker.h"
 #include "gui/slice_gl.h"
 #include "gui/sim_worker.h"
 
@@ -224,6 +225,15 @@ void main()
 		has_vox_cp_ = false;
 		clearVoxelOverlay();    // drop any stale mask geometry until the new one is published
 		updateWantHostFlow();
+	}
+
+	void SliceViewer::setParagliderWorker(ParagliderSimWorker* w)
+	{
+		paraglider_worker_ = w;
+		range_valid_ = false;
+		arrows_.reset();
+		tracers_.reset();
+		update();
 	}
 
 	void SliceViewer::setColourByCp(bool on)
@@ -1158,7 +1168,7 @@ void main()
 	void SliceViewer::updateArrows()
 	{
 		PARACFD_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !show_arrows_ || !worker_ || !have_info_)
+		if (!gl_ready_ || !show_arrows_ || (!worker_ && !paraglider_worker_) || !have_info_)
 		{
 			arrow_draw_count_ = 0;
 			return;
@@ -1183,7 +1193,9 @@ void main()
 		view.gain = 1.5f * arrow_speed_mult_; // user speed multiplier [0,1] (visual only)
 
 		ensureFabricBvh();
-		bool got = worker_->withFlowField([&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); arrows_.advance(dt, view, ff); });
+		auto consume = [&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); arrows_.advance(dt, view, ff); };
+		const bool got = paraglider_worker_ ? paraglider_worker_->withFlowField(consume)
+			: worker_->withFlowField(consume);
 		if (!got) { arrow_draw_count_ = 0; return; }
 
 		const std::vector<float>& inst = arrows_.instance_data();
@@ -1259,7 +1271,7 @@ void main()
 	void SliceViewer::updateTracers()
 	{
 		PARACFD_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !show_tracers_ || !worker_ || !have_info_)
+		if (!gl_ready_ || !show_tracers_ || (!worker_ && !paraglider_worker_) || !have_info_)
 		{
 			tracer_strips_ = 0;
 			return;
@@ -1301,7 +1313,9 @@ void main()
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)
 
 		ensureFabricBvh();
-		bool got = worker_->withFlowField([&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); tracers_.advance(view, ff); });
+		auto consume = [&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); tracers_.advance(view, ff); };
+		const bool got = paraglider_worker_ ? paraglider_worker_->withFlowField(consume)
+			: worker_->withFlowField(consume);
 		if (!got) { tracer_strips_ = 0; return; }
 
 		tracer_strips_ = tracers_.strips();
@@ -1529,6 +1543,18 @@ void main()
 			const int cpX = barX - 130;
 			draw_bar(cpX, barY, barW, barH, "Cp", vox_cp_lo_, vox_cp_hi_, "pressure coeff.",
 				[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
+		}
+
+		// External-aero convention is deliberately fixed: prescribed freestream enters at
+		// X-min and travels along +X. Keep this visible even when no arrows cross the camera.
+		if (paraglider_worker_)
+		{
+			QFont f = p.font(); f.setPointSizeF(10.0); f.setBold(true); p.setFont(f);
+			const QRect cue(18, 16, 210, 28);
+			p.fillRect(cue, QColor(18, 20, 24, 190));
+			p.setPen(QColor(255, 120, 90));
+			p.drawText(cue.adjusted(9, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter,
+				QString::fromUtf8("FREESTREAM  +X  →"));
 		}
 	}
 
@@ -2056,6 +2082,36 @@ void main()
 			}
 			if (show_slice_) // slice fill skipped when hidden (no fill, no draw)
 				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), sp);
+		}
+		else if (paraglider_worker_ && have_info_)
+		{
+			// The production field is block-AMR/FP32. The worker publishes a throttled,
+			// coarse uniform host resampling exclusively for visualization, which lets the
+			// mature slice renderer remain useful while AMR-native GL interop is developed.
+			paraglider_worker_->withFlowField([&](const FlowField& field)
+			{
+				SliceParams sp = currentParams();
+				sp.grid = field.grid;
+				if (auto_range_ && (range_ctr_++ % kRangeEvery == 0))
+				{
+					float reduced[3]{};
+					slice_reduce_cpu(field.u, field.v, field.w, field.p, nullptr, field.grid, field_, reduced);
+					FieldRange range;
+					range.field_min = reduced[0]; range.field_max = reduced[1]; range.speed_max = reduced[2];
+					range.valid = std::isfinite(reduced[0]) && std::isfinite(reduced[1]) && reduced[0] <= reduced[1];
+					applyAutoRange(range);
+					sp.vmin = vmin_; sp.vmax = vmax_;
+				}
+				if (show_slice_)
+				{
+					host_slice_colours_.resize(static_cast<std::size_t>(sp.nu) * sp.nv);
+					slice_fill_cpu(field.u, field.v, field.w, field.p, sp, host_slice_colours_.data());
+					glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
+					glBufferSubData(GL_ARRAY_BUFFER, 0,
+						host_slice_colours_.size() * sizeof(float4), host_slice_colours_.data());
+					glBindBuffer(GL_ARRAY_BUFFER, 0);
+				}
+			});
 		}
 
 		updateArrows(); // advect the arrow tracers + upload instance data (reads the worker's host flow)

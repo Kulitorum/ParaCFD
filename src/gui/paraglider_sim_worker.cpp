@@ -12,6 +12,87 @@ namespace paracfd::gui
 		std::unique_ptr<paracfd::core::ExternalAeroCore> core)
 		: core_(std::move(core))
 	{
+		display_amr_ = std::make_unique<paracfd::core::AmrHostFields>(core_->hierarchy());
+	}
+
+	bool ParagliderSimWorker::withFlowField(
+		const std::function<void(const FlowField&)>& fn) const
+	{
+		std::lock_guard lock(flow_mutex_);
+		if (!flow_ready_ || flow_u_.empty()) return false;
+		FlowField field;
+		field.u = flow_u_.data(); field.v = flow_v_.data(); field.w = flow_w_.data();
+		field.p = flow_p_.data(); field.grid = flow_grid_; field.flow_sign = 1;
+		fn(field);
+		return true;
+	}
+
+	void ParagliderSimWorker::publishFlowField()
+	{
+		using namespace paracfd::core;
+		const AmrHierarchy& hierarchy = core_->hierarchy();
+		if (hierarchy.levels().empty()) return;
+		core_->download_fields(*display_amr_);
+
+		const Aabb3d& domain = hierarchy.domain();
+		const double h = hierarchy.levels().front().h;
+		const Vec3d extent = domain.hi - domain.lo;
+		MacGrid grid;
+		grid.nx = std::max(1, static_cast<int>(std::llround(extent.x / h)));
+		grid.ny = std::max(1, static_cast<int>(std::llround(extent.y / h)));
+		grid.nz = std::max(1, static_cast<int>(std::llround(extent.z / h)));
+		grid.h = h;
+
+		// Resample cell-centred values from the finest active brick. This copy is solely a
+		// visualization product; the CFD fields remain staggered, FP32, and GPU resident.
+		const std::size_t cells = static_cast<std::size_t>(grid.p_count());
+		std::vector<double> uc(cells), vc(cells), wc(cells), pressure(cells);
+		for (int k = 0; k < grid.nz; ++k)
+			for (int j = 0; j < grid.ny; ++j)
+				for (int i = 0; i < grid.nx; ++i)
+				{
+					const Vec3d world{domain.lo.x + (i + 0.5) * h,
+						domain.lo.y + (j + 0.5) * h, domain.lo.z + (k + 0.5) * h};
+					const BrickLocation location = hierarchy.locate_finest(world);
+					if (!location.found()) continue;
+					const AmrHostLevelFields& level = display_amr_->levels()[location.level];
+					const BrickFieldLayout& layout = level.layout;
+					const int bi = location.brick, li = location.cell.x, lj = location.cell.y, lk = location.cell.z;
+					const std::size_t out = static_cast<std::size_t>(grid.pidx(i, j, k));
+					uc[out] = 0.5 * (static_cast<double>(level.u[layout.u_index(bi, li, lj, lk)])
+						+ static_cast<double>(level.u[layout.u_index(bi, li + 1, lj, lk)]));
+					vc[out] = 0.5 * (static_cast<double>(level.v[layout.v_index(bi, li, lj, lk)])
+						+ static_cast<double>(level.v[layout.v_index(bi, li, lj + 1, lk)]));
+					wc[out] = 0.5 * (static_cast<double>(level.w[layout.w_index(bi, li, lj, lk)])
+						+ static_cast<double>(level.w[layout.w_index(bi, li, lj, lk + 1)]));
+					pressure[out] = static_cast<double>(level.p[layout.cell_index(bi, li, lj, lk)]);
+				}
+
+		std::vector<double> u(static_cast<std::size_t>(grid.u_count()));
+		std::vector<double> v(static_cast<std::size_t>(grid.v_count()));
+		std::vector<double> w(static_cast<std::size_t>(grid.w_count()));
+		auto finite_or_zero = [](double value) { return std::isfinite(value) ? value : 0.0; };
+		for (int k = 0; k < grid.nz; ++k) for (int j = 0; j < grid.ny; ++j) for (int i = 0; i <= grid.nx; ++i)
+		{
+			const int left = std::max(0, i - 1), right = std::min(grid.nx - 1, i);
+			u[grid.uidx(i,j,k)] = finite_or_zero(0.5 * (uc[grid.pidx(left,j,k)] + uc[grid.pidx(right,j,k)]));
+		}
+		for (int k = 0; k < grid.nz; ++k) for (int j = 0; j <= grid.ny; ++j) for (int i = 0; i < grid.nx; ++i)
+		{
+			const int below = std::max(0, j - 1), above = std::min(grid.ny - 1, j);
+			v[grid.vidx(i,j,k)] = finite_or_zero(0.5 * (vc[grid.pidx(i,below,k)] + vc[grid.pidx(i,above,k)]));
+		}
+		for (int k = 0; k <= grid.nz; ++k) for (int j = 0; j < grid.ny; ++j) for (int i = 0; i < grid.nx; ++i)
+		{
+			const int back = std::max(0, k - 1), front = std::min(grid.nz - 1, k);
+			w[grid.widx(i,j,k)] = finite_or_zero(0.5 * (wc[grid.pidx(i,j,back)] + wc[grid.pidx(i,j,front)]));
+		}
+		for (double& value : pressure) value = finite_or_zero(value);
+
+		std::lock_guard lock(flow_mutex_);
+		flow_grid_ = grid;
+		flow_u_.swap(u); flow_v_.swap(v); flow_w_.swap(w); flow_p_.swap(pressure);
+		flow_ready_ = true;
 	}
 
 	bool ParagliderSimWorker::latestSnapshot(std::uint64_t& generation,
@@ -122,6 +203,7 @@ namespace paracfd::gui
 		try
 		{
 			paracfd::core::ExternalAeroStepStats stats = core_->initialize();
+			publishFlowField();
 			publish(stats, true);
 			while (!stop_.load())
 			{
@@ -141,7 +223,9 @@ namespace paracfd::gui
 				++steps_;
 				// Surface loads require a deliberately throttled pressure download; scalar
 				// solver telemetry remains available after every GPU step.
-				publish(stats, (steps_ % 10) == 0 || !stats.pressure.converged);
+				const bool publish_fields = (steps_ % 10) == 0 || !stats.pressure.converged;
+				if (publish_fields) publishFlowField();
+				publish(stats, publish_fields);
 				if (!stats.pressure.converged) playing_.store(false);
 			}
 		}

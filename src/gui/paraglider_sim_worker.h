@@ -1,11 +1,13 @@
 #pragma once
 
 #include "core/fluid/external_aero_core.h"
+#include "gui/flow_particles.h"
 
 #include <QObject>
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -46,6 +48,9 @@ namespace paracfd::gui
 		void stepOnce() { step_requests_.fetch_add(1); }
 		bool latestSnapshot(std::uint64_t& generation, std::uint64_t& surface_generation,
 			ParagliderDisplaySnapshot& out) const;
+		// Borrow the latest coarse, uniform display resampling of the live AMR fields.
+		// The callback runs under a short mutex and must not retain the pointers.
+		bool withFlowField(const std::function<void(const FlowField&)>& fn) const;
 
 	public slots:
 		void run();
@@ -55,11 +60,17 @@ namespace paracfd::gui
 
 	private:
 		void publish(const paracfd::core::ExternalAeroStepStats& stats,bool include_surface);
+		void publishFlowField();
 		std::unique_ptr<paracfd::core::ExternalAeroCore> core_;
+		std::unique_ptr<paracfd::core::AmrHostFields> display_amr_;
 		std::atomic<bool> stop_{false},playing_{false};
 		std::atomic<int> step_requests_{0};
 		mutable std::mutex snapshot_mutex_;
 		ParagliderDisplaySnapshot snapshot_;
+		mutable std::mutex flow_mutex_;
+		paracfd::core::MacGrid flow_grid_{};
+		std::vector<double> flow_u_, flow_v_, flow_w_, flow_p_;
+		bool flow_ready_ = false;
 		long long steps_ = 0;
 	};
 }

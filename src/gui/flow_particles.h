@@ -33,6 +33,7 @@ namespace paracfd::gui
 		const double* u = nullptr;
 		const double* v = nullptr;
 		const double* w = nullptr;
+		const double* p = nullptr;
 		const unsigned char* solid = nullptr;
 		// Zero-thickness fabric has no inside/solid classification. Collision is a segment crossing
 		// against the static placed-mesh BVH, so particles cannot tunnel from one fluid side to the other.
