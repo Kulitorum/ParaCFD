@@ -8,6 +8,51 @@
 
 namespace paracfd::core
 {
+	// Geometry-independent conservative transport contract used by the composite
+	// momentum path. A node is one velocity-component dual control volume (a regular
+	// MAC face, a 2:1 tile, or a compact EB aperture state). Every connection is
+	// oriented a -> b and contributes one shared upwind momentum flux to both nodes.
+	// Fabric is impermeable by topology: no connection is emitted through a patch.
+	struct PairwiseMomentumConnection
+	{
+		int a = -1;
+		int b = -1;
+		double open_area = 0.0;
+		double normal_velocity = 0.0; // signed a -> b
+	};
+
+	void conservative_pairwise_momentum_cpu(const std::vector<double>& dual_volume,
+		const std::vector<PairwiseMomentumConnection>& connections, double dt,
+		std::vector<double>& velocity_x, std::vector<double>& velocity_y,
+		std::vector<double>& velocity_z);
+
+	// GPU twin of conservative_pairwise_momentum_cpu. Static volumes and topology are
+	// uploaded once; only the per-step signed connection velocities are supplied by the
+	// caller. Integrated momentum increments are accumulated pairwise in persistent SoA
+	// scratch, so the two endpoints receive exactly opposite transfers.
+	class DevicePairwiseMomentumTransport
+	{
+	public:
+		DevicePairwiseMomentumTransport(const std::vector<double>& dual_volume,
+			const std::vector<PairwiseMomentumConnection>& connections);
+		~DevicePairwiseMomentumTransport();
+		DevicePairwiseMomentumTransport(const DevicePairwiseMomentumTransport&) = delete;
+		DevicePairwiseMomentumTransport& operator=(const DevicePairwiseMomentumTransport&) = delete;
+
+		void step(Real* velocity_x, Real* velocity_y, Real* velocity_z,
+			const Real* connection_normal_velocity, Real dt);
+		int node_count() const { return node_count_; }
+		int connection_count() const { return connection_count_; }
+		std::size_t bytes() const { return bytes_; }
+
+	private:
+		int *a_ = nullptr, *b_ = nullptr;
+		Real *volume_ = nullptr, *area_ = nullptr;
+		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
+		int node_count_ = 0, connection_count_ = 0;
+		std::size_t bytes_ = 0;
+	};
+
 	// Production AMR advection layer. Backtraces locate the finest active brick
 	// through the integer-coordinate GPU hash. Static preprocessing marks faces within
 	// `protection_cells * h` of fabric and stores their six Cartesian same-side links.

@@ -13,6 +13,28 @@ namespace paracfd::core
 	{
 		void check(cudaError_t error,const char* operation){if(error!=cudaSuccess)throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(error));}
 		template<class T>T* allocate(std::size_t count,const char* operation){if(!count)return nullptr;T* pointer=nullptr;check(cudaMalloc(&pointer,count*sizeof(T)),operation);return pointer;}
+		template<class T>T* upload(const std::vector<T>& host,const char* operation){T* pointer=allocate<T>(host.size(),operation);if(pointer)check(cudaMemcpy(pointer,host.data(),host.size()*sizeof(T),cudaMemcpyHostToDevice),operation);return pointer;}
+
+		__global__ void accumulate_pairwise_momentum_kernel(const int* a,const int* b,
+			const Real* area,const Real* normal_velocity,const Real* velocity_x,
+			const Real* velocity_y,const Real* velocity_z,Real dt,Real* delta_x,
+			Real* delta_y,Real* delta_z,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;
+			const int first=a[edge],second=b[edge];const Real transport=dt*area[edge]*normal_velocity[edge];
+			const int donor=transport>=Real(0)?first:second;
+			const Real mx=transport*velocity_x[donor],my=transport*velocity_y[donor],mz=transport*velocity_z[donor];
+			atomicAdd(delta_x+first,-mx);atomicAdd(delta_x+second,mx);
+			atomicAdd(delta_y+first,-my);atomicAdd(delta_y+second,my);
+			atomicAdd(delta_z+first,-mz);atomicAdd(delta_z+second,mz);
+		}
+		__global__ void apply_pairwise_momentum_kernel(const Real* volume,const Real* delta_x,
+			const Real* delta_y,const Real* delta_z,Real* velocity_x,Real* velocity_y,
+			Real* velocity_z,int count)
+		{
+			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=count)return;const Real inverse=Real(1)/volume[node];
+			velocity_x[node]+=delta_x[node]*inverse;velocity_y[node]+=delta_y[node]*inverse;velocity_z[node]+=delta_z[node]*inverse;
+		}
 
 		__host__ __device__ std::uint64_t coordinate_hash(int x,int y,int z)
 		{
@@ -211,6 +233,46 @@ namespace paracfd::core
 		{
 			return brick.origin+Vec3d{(i+(component==0?0.0:0.5))*h,(j+(component==1?0.0:0.5))*h,(k+(component==2?0.0:0.5))*h};
 		}
+	}
+
+	void conservative_pairwise_momentum_cpu(const std::vector<double>& dual_volume,
+		const std::vector<PairwiseMomentumConnection>& connections,double dt,
+		std::vector<double>& velocity_x,std::vector<double>& velocity_y,
+		std::vector<double>& velocity_z)
+	{
+		if(!(dt>0))throw std::invalid_argument("pairwise momentum timestep must be positive");const std::size_t n=dual_volume.size();
+		if(velocity_x.size()!=n||velocity_y.size()!=n||velocity_z.size()!=n)throw std::invalid_argument("pairwise momentum state size mismatch");
+		for(double volume:dual_volume)if(!(volume>0)||!std::isfinite(volume))throw std::invalid_argument("pairwise momentum dual volume must be finite and positive");
+		std::vector<double> dx(n,0),dy(n,0),dz(n,0);
+		for(const PairwiseMomentumConnection& edge:connections)
+		{
+			if(edge.a<0||edge.b<0||edge.a==edge.b||edge.a>=static_cast<int>(n)||edge.b>=static_cast<int>(n)||!(edge.open_area>=0)||!std::isfinite(edge.open_area)||!std::isfinite(edge.normal_velocity))throw std::invalid_argument("invalid pairwise momentum connection");
+			const double transport=dt*edge.open_area*edge.normal_velocity;const int donor=transport>=0?edge.a:edge.b;
+			const double mx=transport*velocity_x[donor],my=transport*velocity_y[donor],mz=transport*velocity_z[donor];
+			dx[edge.a]-=mx;dx[edge.b]+=mx;dy[edge.a]-=my;dy[edge.b]+=my;dz[edge.a]-=mz;dz[edge.b]+=mz;
+		}
+		for(std::size_t node=0;node<n;++node){velocity_x[node]+=dx[node]/dual_volume[node];velocity_y[node]+=dy[node]/dual_volume[node];velocity_z[node]+=dz[node]/dual_volume[node];}
+	}
+
+	DevicePairwiseMomentumTransport::DevicePairwiseMomentumTransport(const std::vector<double>& dual_volume,
+		const std::vector<PairwiseMomentumConnection>& connections)
+	{
+		node_count_=static_cast<int>(dual_volume.size());connection_count_=static_cast<int>(connections.size());if(!node_count_)throw std::invalid_argument("pairwise GPU transport requires nodes");
+		std::vector<Real> volume(node_count_),area(connection_count_);std::vector<int> a(connection_count_),b(connection_count_);
+		for(int node=0;node<node_count_;++node){if(!(dual_volume[node]>0)||!std::isfinite(dual_volume[node]))throw std::invalid_argument("pairwise GPU dual volume must be finite and positive");volume[node]=static_cast<Real>(dual_volume[node]);}
+		for(int edge=0;edge<connection_count_;++edge){const auto& source=connections[edge];if(source.a<0||source.b<0||source.a==source.b||source.a>=node_count_||source.b>=node_count_||!(source.open_area>=0)||!std::isfinite(source.open_area))throw std::invalid_argument("invalid pairwise GPU connection");a[edge]=source.a;b[edge]=source.b;area[edge]=static_cast<Real>(source.open_area);}
+		volume_=upload(volume,"upload pairwise momentum volumes");a_=upload(a,"upload pairwise momentum first nodes");b_=upload(b,"upload pairwise momentum second nodes");area_=upload(area,"upload pairwise momentum areas");delta_x_=allocate<Real>(node_count_,"allocate pairwise momentum x scratch");delta_y_=allocate<Real>(node_count_,"allocate pairwise momentum y scratch");delta_z_=allocate<Real>(node_count_,"allocate pairwise momentum z scratch");bytes_=node_count_*4*sizeof(Real)+connection_count_*(2*sizeof(int)+sizeof(Real));
+	}
+
+	DevicePairwiseMomentumTransport::~DevicePairwiseMomentumTransport(){for(void* pointer:{(void*)a_,(void*)b_,(void*)volume_,(void*)area_,(void*)delta_x_,(void*)delta_y_,(void*)delta_z_})if(pointer)cudaFree(pointer);}
+
+	void DevicePairwiseMomentumTransport::step(Real* velocity_x,Real* velocity_y,Real* velocity_z,
+		const Real* connection_normal_velocity,Real dt)
+	{
+		if(!velocity_x||!velocity_y||!velocity_z||(!connection_normal_velocity&&connection_count_))throw std::invalid_argument("pairwise GPU transport has null state");if(!(dt>Real(0)))throw std::invalid_argument("pairwise GPU transport timestep must be positive");
+		check(cudaMemset(delta_x_,0,node_count_*sizeof(Real)),"clear pairwise momentum x scratch");check(cudaMemset(delta_y_,0,node_count_*sizeof(Real)),"clear pairwise momentum y scratch");check(cudaMemset(delta_z_,0,node_count_*sizeof(Real)),"clear pairwise momentum z scratch");
+		if(connection_count_)accumulate_pairwise_momentum_kernel<<<(connection_count_+255)/256,256>>>(a_,b_,area_,connection_normal_velocity,velocity_x,velocity_y,velocity_z,dt,delta_x_,delta_y_,delta_z_,connection_count_);
+		apply_pairwise_momentum_kernel<<<(node_count_+255)/256,256>>>(volume_,delta_x_,delta_y_,delta_z_,velocity_x,velocity_y,velocity_z,node_count_);check(cudaDeviceSynchronize(),"pairwise conservative momentum transport");
 	}
 
 	DeviceAmrAdvection::DeviceAmrAdvection(const AmrHierarchy& hierarchy,const TriangleBvh& fabric,double protection_cells):locator_(hierarchy)
