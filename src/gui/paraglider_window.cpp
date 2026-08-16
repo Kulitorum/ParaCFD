@@ -98,9 +98,22 @@ namespace paracfd::gui
 
 		QString resolve_step_path(const QString& config_path,const std::string& stored)
 		{
-			QString candidate=QString::fromStdString(stored);if(QFileInfo(candidate).isAbsolute()&&QFileInfo::exists(candidate))return candidate;
-			const QString beside=QFileInfo(config_path).dir().absoluteFilePath(candidate);if(QFileInfo::exists(beside))return beside;
-			return QFileInfo(candidate).absoluteFilePath();
+			const QString candidate=QString::fromStdString(stored);
+			const QFileInfo candidate_info(candidate);
+			if(candidate_info.isAbsolute())return candidate_info.absoluteFilePath();
+
+			// Relative STEP provenance is primarily relative to the config.  Historic
+			// ParaCFD configs used repository-root paths such as Test-Data/wing.step,
+			// though, so also search the config directory's ancestors.  This keeps a
+			// pinned Release executable independent of its process working directory.
+			QDir directory=QFileInfo(config_path).absoluteDir();
+			for(;;)
+			{
+				const QString resolved=directory.absoluteFilePath(candidate);
+				if(QFileInfo::exists(resolved))return QFileInfo(resolved).absoluteFilePath();
+				if(!directory.cdUp())break;
+			}
+			return QFileInfo(config_path).absoluteDir().absoluteFilePath(candidate);
 		}
 	}
 
