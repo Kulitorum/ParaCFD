@@ -93,7 +93,7 @@ namespace paracfd::gui
 		double latest_flow_change_ = 0;
 		std::deque<SettlingSample> settling_history_;
 		int settling_consecutive_=0;
-		double settling_score_=0,settling_force_drift_=0,settling_force_rms_=0,flow_throughs_=0;
+		double settling_score_=0,settling_force_drift_=0,settling_force_rms_=0,flow_throughs_=0,settling_epoch_time_=0;
 		bool settling_ready_=false;
 		long long steps_ = 0;
 	};

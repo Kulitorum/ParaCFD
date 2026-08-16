@@ -23,7 +23,9 @@ namespace paracfd::gui
 	{
 		playing_.store(playing);if(playing){auto_paused_.store(false);settling_reset_.store(true);}
 		else if(!auto_paused_.load())settling_reset_.store(true);
-		std::lock_guard lock(snapshot_mutex_);snapshot_.playing=playing;snapshot_.auto_paused=auto_paused_.load();++snapshot_.generation;
+		std::lock_guard lock(snapshot_mutex_);snapshot_.playing=playing;snapshot_.auto_paused=auto_paused_.load();
+		if(playing){snapshot_.settling_ready=false;snapshot_.settling_score=0;snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;snapshot_.flow_throughs=0;}
+		++snapshot_.generation;
 	}
 
 	void ParagliderSimWorker::stepOnce()
@@ -194,15 +196,15 @@ namespace paracfd::gui
 
 	void ParagliderSimWorker::updateSettling(double physical_time,const paracfd::core::Vec3d& force,const paracfd::core::ExternalAeroConservationStats& conservation)
 	{
-		if(settling_reset_.exchange(false)){settling_history_.clear();settling_consecutive_=0;settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;settling_ready_=false;}
+		if(settling_reset_.exchange(false)){settling_history_.clear();settling_consecutive_=0;settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;settling_epoch_time_=physical_time;settling_ready_=false;}
 		if(!auto_pause_enabled_.load())return;
 		const double speed=std::max(1e-9,std::abs(core_->config().freestream.speed));
 		const double flow_time=(core_->hierarchy().domain().hi.x-core_->hierarchy().domain().lo.x)/speed;
 		if(!(flow_time>0)||!std::isfinite(latest_flow_change_))return;
-		flow_throughs_=physical_time/flow_time;settling_history_.push_back({physical_time,force,latest_flow_change_});
+		flow_throughs_=std::max(0.0,physical_time-settling_epoch_time_)/flow_time;settling_history_.push_back({physical_time,force,latest_flow_change_});
 		const double window=std::max(0.25,0.5*flow_time),oldest=physical_time-window;
 		while(!settling_history_.empty()&&settling_history_.front().time<oldest)settling_history_.pop_front();
-		if(physical_time<1.5*flow_time||settling_history_.size()<10||settling_history_.front().time>oldest+0.1*window)return;
+		if(flow_throughs_<1.5||settling_history_.size()<10||settling_history_.front().time>oldest+0.1*window)return;
 		const double split=physical_time-0.5*window;paracfd::core::Vec3d old_mean{},new_mean{};int old_count=0,new_count=0;
 		for(const SettlingSample& sample:settling_history_){paracfd::core::Vec3d& mean=sample.time<split?old_mean:new_mean;mean.x+=sample.force.x;mean.y+=sample.force.y;mean.z+=sample.force.z;if(sample.time<split)++old_count;else ++new_count;}
 		if(old_count<4||new_count<4)return;old_mean.x/=old_count;old_mean.y/=old_count;old_mean.z/=old_count;new_mean.x/=new_count;new_mean.y/=new_count;new_mean.z/=new_count;
