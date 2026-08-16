@@ -2,7 +2,7 @@
 
 ## Current state
 
-ParaCFD is being migrated from the building/channel solver to a purpose-built static-geometry paraglider solver. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.
+ParaCFD is a purpose-built static-geometry paraglider solver. The former building/channel product path has been removed. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.
 
 Implemented:
 
@@ -25,10 +25,10 @@ Implemented:
 - deterministic dynamic normal/parallel/inclined plate gates, developed opened/closed cavity flux validation, and an equal-finest AMR-versus-uniform inclined-plate comparison;
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
-- a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors the STEP triangles by live delta-Cp; loading a paraglider releases the unrelated legacy channel GPU core.
-- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with explicit exporter-axis rotation controls and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
+- a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors STEP triangles by visible-side Cp, Cp+, Cp-, or live delta-Cp;
+- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
 
-The old solver remains buildable only as a reference. It is not a paraglider result path.
+Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 
 ## Current acceptance geometry
 
@@ -56,7 +56,7 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and tighten force/conservation convergence gates.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
-5. Complete AMR velocity/pressure slices, per-side Cp selection, and paraglider scene persistence, then remove building/channel/ground/seabed/porous code.
+5. Replace throttled host visualization snapshots with direct AMR-aware CUDA/OpenGL field sampling and add pressure-force vectors.
 
 ## Important files
 
@@ -64,7 +64,8 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - AMR fields/exchange: `src/core/fluid/amr_grid.*`, `amr_fields.*`, `amr_exchange.*`
 - AMR EB/pressure: `src/core/fluid/amr_eb.*`, `amr_pressure.*`, `eb_pressure.*`
 - Loads/config: `src/core/aero_loads.*`, `src/core/paraglider_config.*`
-- Tests/probes: `tools/paraglider_geometry_probe.cpp`, `paraglider_gpu_probe.cpp`, `paraglider_probe.cpp`
+- GUI: `src/gui/paraglider_window.*`, `paraglider_sim_worker.*`, `slice_viewer.*`
+- Tests/probes: `tools/paraglider_geometry_probe.cpp`, `paraglider_gpu_probe.cpp`, `paraglider_flow_probe.cpp`, `paraglider_probe.cpp`
 
 ## Validation policy
 

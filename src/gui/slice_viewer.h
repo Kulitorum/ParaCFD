@@ -1,17 +1,14 @@
-// slice_viewer.h — G1 slice-plane viewer widget. A QOpenGLWidget (GL 4.3 core) that
-// renders an axis-aligned slice of the live simulation: CUDA writes RGBA vertex colours
-// straight into a GL-registered VBO (zero copy, slice_gl.cu) and the widget draws the
-// coloured grid mesh with a slicer-style orbit/pan/zoom camera. ALL GL happens here on
-// the main thread (PARACFD_ASSERT_GL_THREAD guards every entry point); the widget only
-// READS the worker's post-step device snapshots, under the worker's display_mutex().
+// OpenGL paraglider flow viewer. It renders host snapshots of the live AMR fields,
+// two-sided STEP pressure colours, AMR/EB debug boxes, arrows, and fabric-stopped
+// tracers. All OpenGL calls remain on the GUI thread.
 #pragma once
 
 #include "core/geometry/model_placement.h"
 #include "core/geometry/step_import.h"
 #include "gui/camera.h"
+#include "gui/display_info.h"
 #include "gui/flow_particles.h"
 #include "gui/flow_tracers.h"
-#include "gui/sim_setup.h"
 #include "gui/slice_field.h"
 
 #include <QElapsedTimer>
@@ -34,7 +31,6 @@ class QPainter;
 
 namespace paracfd::gui
 {
-	class SimWorker;
 	class ParagliderSimWorker;
 
 	class SliceViewer : public QOpenGLWidget, protected QOpenGLFunctions_4_3_Core
@@ -46,7 +42,6 @@ namespace paracfd::gui
 
 		// Wire the data source + domain metadata (call before the first paint). Re-pushes the
 		// arrow host-flow request to the (possibly new) worker.
-		void setWorker(SimWorker* w);
 		void setParagliderWorker(ParagliderSimWorker* w);
 		void setInfo(const SimInfo& info);
 
@@ -69,32 +64,18 @@ namespace paracfd::gui
 		// --- Layer visibility toggles (feature 2) --------------------------------
 		void setShowSlice(bool on) { show_slice_ = on; update(); }
 		void setShowModel(bool on) { show_model_ = on; update(); }
-		// The voxel-mask overlay is the exposed-face staircase of the rigid solid mask (obstacle).
-		void setShowSolidVoxels(bool on) { show_solid_vox_ = on; update(); }
 		void setShowAxes(bool on) { show_axes_ = on; update(); }
-		// Grid overlay: draw the cell-boundary LINES where the grid intersects the current slice plane, so
-		// the graded mesh is visible (lines cluster in the fine h_fine core, spread out in the coarse far
-		// field). Uses the per-axis face coordinates from setGridLines (uniform i·h if none set). Main thread.
+		// Optional cell-boundary lines on the current slice plane.
 		void setShowGrid(bool on) { show_grid_ = on; update(); }
 		bool showGrid() const { return show_grid_; }
-		// Per-axis cumulative cell-face coordinates (metres) for the grid overlay — the graded metric arrays
-		// (GridMetrics::xf/yf/zf) or i·h for a uniform grid. Empty ⇒ fall back to info_'s uniform spacing.
+		// Per-axis cumulative cell-face coordinates in metres. Empty uses uniform spacing.
 		void setGridLines(const std::vector<double>& xf, const std::vector<double>& yf, const std::vector<double>& zf);
 		bool showSlice() const { return show_slice_; }
 		bool showModel() const { return show_model_; }
-		bool showSolidVoxels() const { return show_solid_vox_; }
 		bool showAxes() const { return show_axes_; }
 
-		// Colour the building's voxel-overlay faces by the owning cell's surface pressure coefficient Cp
-		// (published by the worker; mapped through colormap.h over a symmetric range). ON (default) tints
-		// the staircase blue=suction … red=pressure; OFF reverts to the uniform dark-blue solid colour.
-		// Toggling re-uploads the overlay (recolour) on the next paint. Main thread.
-		void setColourByCp(bool on);
-		bool colourByCp() const { return colour_by_cp_; }
-
-		// --- Clip plane (see inside hollow structures) ---------------------------
-		// A single movable plane that hides SOLIDS on the camera side — the STEP mesh and the voxel-solid
-		// staircase — so the interior of a hollow structure is exposed. The flow
+		// --- Clip plane (inspect internal canopy structure) -----------------------
+		// A movable plane hides the STEP surface on the camera side. The flow
 		// slice and the arrows are NEVER clipped, so the flow field inside the revealed cavity stays on
 		// screen. Modes: axis-aligned X/Y/Z (the position slider shifts it along that axis, auto-oriented
 		// to hide the camera side) or "Face camera" (normal = view direction; the slider pushes it into
@@ -174,13 +155,6 @@ namespace paracfd::gui
 			const std::vector<std::array<float, 6>>& eb_cells);
 		void clearParagliderDebugBoxes();
 
-		// Solid-cell overlay: the staircase voxelization of the model, drawn as the exposed
-		// voxel-surface faces over/under the smooth mesh so the user can judge resolution. The
-		// mask is the ChannelBC cell field (1=solid). Geometry build is deferred to the next
-		// paint (main thread). clearVoxelOverlay hides it.
-		void setVoxelOverlay(const std::vector<unsigned char>& solid, paracfd::core::MacGrid grid);
-		void clearVoxelOverlay();
-
 		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement.
 		void setMeshTranslate(double tx, double ty, double tz);
 		// Draw the loaded model under an explicit AFFINE placement (rotation·scale + translation),
@@ -191,9 +165,7 @@ namespace paracfd::gui
 		// A single UNIFIED 3D manipulator: all handles are drawn at once — 3 translate arrows, 3 rotate
 		// rings and 3 scale cubes (one per axis) plus a uniform-scale centre cube — and whichever handle
 		// you grab picks the operation dynamically (no mode switching). The transform is the model's world
-		// placement — world(v) = t + rot·(scale ⊙ (v − pivot)) about its bbox centre — exposed to the
-		// voxelizer as a ModelPlacement so the model is voxelized exactly where it is drawn (on the next
-		// "Apply" / obstacle-inject).
+		// placement — world(v) = t + rot·(scale ⊙ (v − pivot)) about its bbox centre.
 		struct ModelGizmoXform
 		{
 			QVector3D pivot, t, scale{ 1, 1, 1 };
@@ -203,13 +175,10 @@ namespace paracfd::gui
 		void setGizmoEnabled(bool on);
 		bool gizmoEnabled() const { return gizmo_on_; }
 		bool gizmoEditable() const { return has_mesh_ && gz_valid_ && !mesh_override_; }
-		// True once a gizmo placement exists (a model is loaded and not seated by an override) —
-		// so the voxelizer can use modelPlacement() instead of the default place_model_on_bed, even
-		// before the first paint (the CLI --load-step path voxelizes immediately). Unlike gizmoEditable
-		// it does not require the GL upload to have happened.
+		// True once a host-side placement exists, including before the first GL upload.
 		bool hasModelPlacement() const { return gz_valid_ && !mesh_override_; }
 		void resetModelPlacement();                                  // back to centre-on-bed
-		paracfd::core::ModelPlacement modelPlacement() const;          // the affine the voxelizer uses
+		paracfd::core::ModelPlacement modelPlacement() const;
 		void setModelPlacement(const paracfd::core::ModelPlacement& p);// restore an affine (scene load)
 		ModelGizmoXform modelXform() const;                          // full gizmo state (Apply capture/restore)
 		void setModelXform(const ModelGizmoXform& x);
@@ -220,7 +189,7 @@ namespace paracfd::gui
 	signals:
 		void fpsUpdated(double fps);
 		// Emitted when the gizmo finishes editing the model placement (drag release / reset), so the
-		// host can refresh its readout. The re-voxelization happens on the next "Apply", not per-drag.
+		// host can invalidate and rebuild the static AMR/EB hierarchy.
 		void modelPlacementChanged();
 
 	protected:
@@ -239,7 +208,6 @@ namespace paracfd::gui
 		void uploadMesh();        // push pending_mesh_ into GL buffers (main thread)
 		void uploadTriangleSurfaceColours();
 		void uploadParagliderDebugBoxes();
-		void uploadVoxelOverlay(); // build exposed voxel-surface faces into GL (main thread)
 		void ensureFabricBvh();     // rebuild placed zero-thickness collision geometry lazily
 		void updateRange();
 		void applyAutoRange(const FieldRange& fr); // EMA-fold a live reduction into [vmin_,vmax_]+speed scale
@@ -252,7 +220,6 @@ namespace paracfd::gui
 		void buildTracerBuffers(); // wire the streakline VAO/VBOs into the slice shader (main thread)
 		void updateTracers();      // advect the streaklines + upload line geometry (main thread)
 		void drawTracers(const QMatrix4x4& mvp); // glMultiDrawArrays line-strip draw of the streaklines
-		void updateWantHostFlow(); // ask the worker for the host-flow snapshot iff arrows OR tracers are on
 		void drawLegendWith(QPainter& p); // QPainter colorbar overlay (feature 3)
 
 		// Clip plane: world-space plane (n.x, n.y, n.z, d); the KEPT half-space is dot(pos,n)+d >= 0, so
@@ -279,7 +246,6 @@ namespace paracfd::gui
 		void drawAxesLabels(QPainter& p);      // X/Y/Z + metre tick labels via the QPainter overlay
 		bool projectPoint(const QMatrix4x4& mvp, const QVector3D& w, QPointF& px) const; // world→screen px
 
-		SimWorker* worker_ = nullptr;
 		ParagliderSimWorker* paraglider_worker_ = nullptr;
 		SimInfo info_;
 		bool have_info_ = false;
@@ -315,7 +281,6 @@ namespace paracfd::gui
 		unsigned int slice_vao_ = 0, pos_vbo_ = 0, color_vbo_ = 0, idx_ebo_ = 0;
 		unsigned int box_vao_ = 0, box_vbo_ = 0;
 		int index_count_ = 0, box_vertex_count_ = 0;
-		void* cuda_res_ = nullptr; // registered color_vbo_
 		bool gl_ready_ = false;
 		bool geometry_dirty_ = true;
 
@@ -361,34 +326,11 @@ namespace paracfd::gui
 		float gz_rot_last_ang_ = 0.0f;
 		unsigned int gizmo_vao_ = 0, gizmo_vbo_ = 0; // dynamic manipulator line geometry
 
-		// Voxel-overlay (staircase mask) GL objects. Exposed solid-cell faces, lit shader.
-		unsigned int vox_vao_ = 0, vox_pos_vbo_ = 0, vox_norm_vbo_ = 0, vox_color_vbo_ = 0;
-		int vox_vertex_count_ = 0;     // total exposed-face vertices
-		bool has_vox_ = false;
-		bool vox_upload_pending_ = false;
-		std::vector<unsigned char> pending_vox_solid_; // retained after upload so a Cp update can re-colour
-		paracfd::core::MacGrid pending_vox_grid_;
-		// Live flow-mask overlay: the last mask generation pulled from the worker. The overlay is
-		// re-extracted (exposed faces only) whenever the worker republishes a changed mask.
-		std::uint64_t vox_mask_gen_ = 0;
-
-		// Cp colouring of the voxel overlay (feature: colour building by surface pressure coefficient).
-		// vox_cell_cp_ is the worker's per-solid-cell mean Cp (g.p_count(), NaN off the surface); the
-		// symmetric range [vox_cp_lo_,vox_cp_hi_] is auto-tracked from the published cp_min/cp_max. The
-		// overlay carries a per-vertex colour VBO built from these when colour_by_cp_ is on. vox_load_gen_
-		// mirrors the worker's loadGeneration() so a fresh Cp field triggers a recolour (like the mask).
-		bool colour_by_cp_ = true;
-		std::vector<float> vox_cell_cp_;
-		float vox_cp_lo_ = -1.5f, vox_cp_hi_ = 1.0f;
-		bool has_vox_cp_ = false;      // per-vertex Cp colours are built + valid for the current overlay
-		std::uint64_t vox_load_gen_ = 0;
-
 		// Layer visibility (feature 2). All default ON.
 		bool show_slice_ = true;
 		bool show_model_ = true;
-		bool show_solid_vox_ = true; // rigid solid voxels (obstacle, dark-blue)
 
-		// Clip plane (see inside hollow structures). Cuts SOLIDS only (mesh + voxel solids); the
+		// Clip plane cuts the STEP surface only; the
 		// flow slice + arrows stay visible. clip_mode_: 0=X 1=Y 2=Z 3=Camera-facing; clip_frac_ ∈ [0,1]
 		// sweeps the plane (axis position, or view-depth about the camera target); clip_flip_ swaps the
 		// hidden side. clip_vao_/vbo_ hold the translucent plane-visualisation quad (4 corners, per-paint).
@@ -398,13 +340,12 @@ namespace paracfd::gui
 		bool clip_flip_ = false;
 		unsigned int clip_vao_ = 0, clip_vbo_ = 0;
 
-		// XYZ axis triad: coloured axes from the WORLD ORIGIN (0,0,0 = the x=0/y=0/z=0 domain corner,
-		// the inlet-side bed corner; place_model_on_bed centres the model in x/y at z=0) with metre
+		// XYZ axis triad: coloured axes from the world/domain origin with metre
 		// ticks + labels, plus a camera-aligned orientation gizmo in the bottom-left. Default ON.
 		bool show_axes_ = true;
 		bool axes_dirty_ = true;                       // rebuild world-triad geometry on a domain change
 
-		// Grid overlay (cell-boundary lines on the current slice plane; shows the graded mesh). Default OFF.
+		// Grid overlay (cell-boundary lines on the current slice plane). Default OFF.
 		// grid_*f_ are the per-axis cumulative face coordinates (metres); empty ⇒ uniform i·h from info_.
 		bool show_grid_ = false;
 		bool grid_dirty_ = true;                       // rebuild on a plane/axis/domain/metric change

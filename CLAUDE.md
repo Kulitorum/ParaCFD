@@ -62,7 +62,7 @@ Every owned composite surface patch retains its global plus/minus pressure DOFs 
 
 The Qt/OpenGL viewer still displays the STEP surface. Flow particles and tracers can use the placed triangle BVH for segment-crossing tests and cannot pass through fabric. This does not use an inside-solid or parity classification. The mesh renderer accepts per-source-triangle delta-Cp through an OpenGL shader-storage buffer indexed by primitive ID, so shared CAD vertices do not smear results across fabric panels. A dedicated worker now advances `ExternalAeroCore`, throttles surface/conservation downloads, publishes delta-Cp automatically, and reports instantaneous pressure-only loads, CFL, regular/compact-EB velocity maxima, projection convergence, divergence/flux diagnostics, and persistent GPU memory.
 
-The visible paraglider grid panel controls density/viscosity, face-bbox domain margins, base spacing/level count, surface/wing/wake refinement, CFL, Smagorinsky coefficient, projection tolerance/iterations, and optional aerodynamic reference values. `Build CFD Grid` reconstructs the static hierarchy and resets the flow. The internal freestream axis remains +X; explicit +/-90-degree Z placement buttons handle known exporter conventions without inferring forward from bbox dimensions.
+The purpose-built paraglider window controls density/viscosity, face-bbox domain margins, base spacing/level count, surface/wing/wake refinement, CFL, Smagorinsky coefficient, projection tolerance/iterations, and optional aerodynamic reference values. `Build CFD Grid` reconstructs the static hierarchy and resets the flow. The internal freestream axis remains +X. On direct STEP load, the longer horizontal face-only bbox axis is treated as span and the shorter as chord; ParaCFD rotates either known `-X`-forward or `-Y`-forward exporter layout into +X flow. A prominent 180-degree LE/TE flip remains because bbox extents cannot determine chord polarity. Config files store the confirmed placement matrix and do not re-infer it.
 
 ## Build and test
 
@@ -83,22 +83,22 @@ Important probes are:
 - `paraglider_flow_probe`: dynamic normal/parallel/inclined plates, projection divergence, opened-cavity connectivity, and AMR-versus-uniform force comparison;
 - `paraglider_probe`: STEP/config preprocessing diagnostics;
 - `paraglider_case_probe`: imported-wing multi-step force, CFL, conservation, and performance history (manual long-running diagnostic);
-- `parity_probe`: retained CPU/GPU parity coverage for useful legacy kernels.
+- `parity_probe`: CPU/GPU parity and immutable snapshots for the reusable FP64 uniform-MAC reference kernels.
 
 `configs/paraglider.json` is the new configuration reference.
 `configs/planb_parakite.json` is the checked-in PlanB acceptance case; its +90-degree Z placement maps that exporter’s forward direction (-Y) to ParaCFD freestream (+X).
 
 ## Current limitations
 
-The repository is in an incremental migration state and must not yet be described as a trustworthy end-to-end paraglider CFD product:
+ParaCFD is now a paraglider-only application, but it must not yet be described as producing trustworthy end-to-end paraglider aerodynamic results:
 
 - EB that reaches a 2:1 interface is currently rejected instead of receiving aperture-aware cross-level fragment reconstruction. The tested PlanB hierarchy keeps its EB atlas away from these interfaces.
 - The composite solver has a two-level additive geometric/Galerkin preconditioner, not yet a complete recursive multigrid hierarchy. The checked-in PlanB initial projection converges at the configured global residual tolerance, but local maximum divergence remains sensitive to the very small irregular control volumes and needs a stricter local/conservation acceptance criterion.
 - The new external-aero timestep is wired end to end with bounded MacCormack/RK2 advection. Fabric-near faces still use a conservative static protection fallback. Same-level brick crossings and normal 2:1 interface fluxes are synchronized conservatively; general cross-level interpolation remains nonconservative.
 - Compact EB aperture velocities use a first-order same-side graph transport with molecular diffusion. It still needs a higher-order reconstruction and consistent Smagorinsky treatment before force convergence can be considered complete.
 - Long PlanB diagnostics retain bounded regular velocity and local divergence, but some micro-aperture velocity states grow above the incompressible model's credible range. Their compact transport/stabilization must be improved before internal pressure or aerodynamic loads are trusted.
-- The Qt viewer can inspect AMR bricks and owned EB cells, configure/rebuild the paraglider hierarchy, run the new GPU timestep, color the mesh by delta-Cp, and show pressure-only force plus numerical-health readouts. Its flow slices, scene format, and averaging UI remain substantially inherited from the building/channel product; plus/minus side selection is not yet exposed.
+- The Qt viewer displays live velocity/pressure slices, arrows, fabric-stopped tracers, AMR/EB boxes, and triangle-native visible-side Cp, Cp+, Cp-, or delta-Cp. Visualization currently uses throttled host snapshots and OpenGL uploads rather than direct AMR CUDA/OpenGL interop.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
 - The opened-cavity gate measures developed bidirectional flow through a deliberately missing fabric face while the closed control has zero represented opening flux. Longer internal-pressure and force-convergence studies on resolved paraglider geometry remain outstanding.
 
-The legacy channel/building code is retained only as a numerical and visualization reference while these missing replacements are completed. Do not extend it as the new architecture, and do not delete it until the replacement path supplies equivalent working functionality and tests.
+The former building, binary-solid voxel, ground/channel, seabed, porous, scene, and building GUI paths have been removed. Only mathematically reusable uniform-MAC FP64 kernels remain as validation references; they are not linked into the production external-aero timestep.

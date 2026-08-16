@@ -1,4 +1,4 @@
-// gl_thread_check.h — G1 hard rule: every OpenGL call happens on the main (GUI) thread.
+// Hard rule: every OpenGL call happens on the main GUI thread.
 // PARACFD_ASSERT_GL_THREAD() fires a Qt debug assertion (and aborts in a debug build) if a
 // GL entry point is ever reached off the main thread. This is the automated half of the
 // PLAN §4 "no GL calls off the main thread (assert via Qt debug)" gate.

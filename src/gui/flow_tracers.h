@@ -1,4 +1,4 @@
-// flow_tracers.h — inlet-seeded streamlines for the G1 viewer.
+// Inlet-seeded streamlines for the paraglider viewer.
 //
 // Companion to the arrow field (flow_particles.h): where the arrows are short instanced glyphs, the
 // tracers are LONG lines. A grid of seeds on the INLET face each integrate a streamline through the
@@ -79,7 +79,6 @@ namespace paracfd::gui
 	private:
 		struct Pt { float x, y, z, spd; }; // world position [m] + speed [m/s]
 		void sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const;
-		bool is_solid(const FlowField& f, float x, float y, float z) const;
 		bool crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const;
 		// (Re)build the persistent inlet seed lattice when the config changes; resets the holds.
 		void build_seeds(const TracerView& view, const FlowField& f);
@@ -97,7 +96,7 @@ namespace paracfd::gui
 		// Seed-config signature: rebuild seeds + reset the holds when any of these change.
 		bool cfg_valid_ = false;
 		bool s_three_d_ = true;
-		int s_axis_ = 2, s_density_ = 0, s_nx_ = 0, s_ny_ = 0, s_nz_ = 0, s_sign_ = 1;
+		int s_axis_ = 2, s_density_ = 0, s_nx_ = 0, s_ny_ = 0, s_nz_ = 0;
 		float s_plane_ = 0.0f;
 	};
 }

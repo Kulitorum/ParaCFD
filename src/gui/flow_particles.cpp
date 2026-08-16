@@ -29,24 +29,12 @@ namespace paracfd::gui
 		needs_reset_ = true; // fresh particles spawn on the next advance() (needs the field)
 	}
 
-	bool FlowParticles::is_solid(const FlowField& f, float x, float y, float z) const
-	{
-		const MacGrid& g = f.grid;
-		if (!f.solid) return false;
-		int i = clampi((int)std::floor(paracfd::core::grid_fx(g, x)), 0, g.nx - 1);
-		int j = clampi((int)std::floor(paracfd::core::grid_fy(g, y)), 0, g.ny - 1);
-		int k = clampi((int)std::floor(paracfd::core::grid_fz(g, z)), 0, g.nz - 1);
-		return f.solid[(size_t)g.pidx(i, j, k)] != 0;
-	}
-
 	bool FlowParticles::crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const
 	{
 		return f.fabric && f.fabric->intersect_segment({ax, ay, az}, {bx, by, bz}, 1e-8).hit;
 	}
 
-	// Cell-centred velocity component helpers (average of the two bracketing MAC faces), with
-	// solid cells treated as zero flow so tracers slow + respawn into obstacles rather than
-	// tunnelling. Reads clamp to the valid index range.
+	// Cell-centred velocity component helpers (average of the two bracketing MAC faces).
 	void FlowParticles::sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const
 	{
 		const MacGrid& g = f.grid;
@@ -64,7 +52,6 @@ namespace paracfd::gui
 
 		auto cc = [&](int i, int j, int k, double& cu, double& cv, double& cw)
 		{
-			if (f.solid && f.solid[(size_t)g.pidx(i, j, k)]) { cu = cv = cw = 0.0; return; }
 			cu = 0.5 * (f.u[g.uidx(i, j, k)] + f.u[g.uidx(i + 1, j, k)]);
 			cv = 0.5 * (f.v[g.vidx(i, j, k)] + f.v[g.vidx(i, j + 1, k)]);
 			cw = 0.5 * (f.w[g.widx(i, j, k)] + f.w[g.widx(i, j, k + 1)]);
@@ -95,26 +82,13 @@ namespace paracfd::gui
 		const MacGrid& g = f.grid;
 		float Lx = (float)g.Lx(), Ly = (float)g.Ly(), Lz = (float)g.Lz();
 		float x = 0, y = 0, z = 0;
-		for (int t = 0; t < 8; ++t) // reject solid spawn points (up to 8 tries)
+		if (view.three_d)
 		{
-			if (view.three_d)
-			{
-				x = frand(rng_) * Lx; y = frand(rng_) * Ly; z = frand(rng_) * Lz;
-			}
-			else if (view.axis == 0) // X-normal: in-plane (y,z)
-			{
-				x = view.plane_pos; y = frand(rng_) * Ly; z = frand(rng_) * Lz;
-			}
-			else if (view.axis == 1) // Y-normal: (x,z)
-			{
-				x = frand(rng_) * Lx; y = view.plane_pos; z = frand(rng_) * Lz;
-			}
-			else // Z-normal: (x,y)
-			{
-				x = frand(rng_) * Lx; y = frand(rng_) * Ly; z = view.plane_pos;
-			}
-			if (!is_solid(f, x, y, z)) break;
+			x = frand(rng_) * Lx; y = frand(rng_) * Ly; z = frand(rng_) * Lz;
 		}
+		else if (view.axis == 0) { x = view.plane_pos; y = frand(rng_) * Ly; z = frand(rng_) * Lz; }
+		else if (view.axis == 1) { x = frand(rng_) * Lx; y = view.plane_pos; z = frand(rng_) * Lz; }
+		else { x = frand(rng_) * Lx; y = frand(rng_) * Ly; z = view.plane_pos; }
 		px_[k] = x; py_[k] = y; pz_[k] = z;
 		life_[k] = 2.5f + frand(rng_) * 2.5f;              // 2.5..5 s
 		age_[k] = initial ? frand(rng_) * life_[k] : 0.0f; // stagger initial ages so it looks alive
@@ -161,7 +135,7 @@ namespace paracfd::gui
 			bool dead = false;
 			for (int s = 0; s < nsub; ++s)
 			{
-				if (x < 0 || x > Lx || y < 0 || y > Ly || z < 0 || z > Lz || is_solid(f, x, y, z)) { dead = true; break; }
+				if (x < 0 || x > Lx || y < 0 || y > Ly || z < 0 || z > Lz) { dead = true; break; }
 				double uu, vv, ww;
 				sample(f, x, y, z, uu, vv, ww);
 				if (view.three_d) { vx = uu; vy = vv; vz = ww; }

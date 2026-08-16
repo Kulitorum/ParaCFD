@@ -1,4 +1,4 @@
-// camera.h — slicer-style orbit/pan/zoom camera for the G1 viewer. Self-contained
+// Slicer-style orbit/pan/zoom camera for the paraglider viewer. Self-contained
 // (Qt math only), modelled on cobod-slicer's Render::Camera: azimuth/elevation/distance
 // about a target, Z-up. Produces a view-projection QMatrix4x4 for the slice shader.
 // Units: metres (SI), matching the simulation domain.

@@ -17,16 +17,6 @@ namespace paracfd::gui
 
 	// --- velocity sampling (mirrors FlowParticles: cell-centred trilinear MAC reconstruction) ------
 
-	bool FlowTracers::is_solid(const FlowField& f, float x, float y, float z) const
-	{
-		const MacGrid& g = f.grid;
-		if (!f.solid) return false;
-		int i = clampi((int)std::floor(paracfd::core::grid_fx(g, x)), 0, g.nx - 1);
-		int j = clampi((int)std::floor(paracfd::core::grid_fy(g, y)), 0, g.ny - 1);
-		int k = clampi((int)std::floor(paracfd::core::grid_fz(g, z)), 0, g.nz - 1);
-		return f.solid[(size_t)g.pidx(i, j, k)] != 0;
-	}
-
 	bool FlowTracers::crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const
 	{
 		return f.fabric && f.fabric->intersect_segment({ax, ay, az}, {bx, by, bz}, 1e-8).hit;
@@ -49,7 +39,6 @@ namespace paracfd::gui
 
 		auto cc = [&](int i, int j, int k, double& cu, double& cv, double& cw)
 		{
-			if (f.solid && f.solid[(size_t)g.pidx(i, j, k)]) { cu = cv = cw = 0.0; return; }
 			cu = 0.5 * (f.u[g.uidx(i, j, k)] + f.u[g.uidx(i + 1, j, k)]);
 			cv = 0.5 * (f.v[g.vidx(i, j, k)] + f.v[g.vidx(i, j + 1, k)]);
 			cw = 0.5 * (f.w[g.widx(i, j, k)] + f.w[g.widx(i, j, k + 1)]);
@@ -82,10 +71,8 @@ namespace paracfd::gui
 		const MacGrid& g = f.grid;
 		const float Lx = (float)g.Lx(), Ly = (float)g.Ly(), Lz = (float)g.Lz();
 		const float h = (float)g.h;
-		// Seed just inside the INLET face, which flips with the flow direction (a reversed tide drives
-		// the current in −x from the x-max face). integrate_line() then steps along the local flow, so
-		// the streamlines run downstream from whichever face is the inlet.
-		const float x0 = (f.flow_sign < 0) ? (Lx - 0.5f * h) : (0.5f * h);
+		// External aerodynamic convention is fixed: inlet X-min, freestream +X.
+		const float x0 = 0.5f * h;
 		const int density = std::max(1, view.density);
 		auto lin = [](int i, int n, float L) { return (((float)i + 0.5f) / (float)n) * L; };
 
@@ -137,7 +124,6 @@ namespace paracfd::gui
 		for (int s = 0; s < view.max_points; ++s)
 		{
 			if (x < 0 || x > Lx || y < 0 || y > Ly || z < 0 || z > Lz) break; // left an edge
-			if (is_solid(f, x, y, z)) break;                                    // met a solid
 			double uu, vv, ww; sample(f, x, y, z, uu, vv, ww);
 			double vx = uu, vy = vv, vz = ww;
 			if (!view.three_d) // constrain to the slice plane: drop the out-of-plane component + pin
@@ -208,13 +194,13 @@ namespace paracfd::gui
 		const float plane_sig = view.three_d ? 0.0f : view.plane_pos;
 		const bool changed = !cfg_valid_ || view.three_d != s_three_d_ || view.axis != s_axis_
 			|| view.density != s_density_ || g.nx != s_nx_ || g.ny != s_ny_ || g.nz != s_nz_
-			|| f.flow_sign != s_sign_ || std::fabs(plane_sig - s_plane_) > 1e-6f;
+			|| std::fabs(plane_sig - s_plane_) > 1e-6f;
 		if (changed)
 		{
 			build_seeds(view, f);
 			cfg_valid_ = true;
 			s_three_d_ = view.three_d; s_axis_ = view.axis; s_density_ = view.density;
-			s_nx_ = g.nx; s_ny_ = g.ny; s_nz_ = g.nz; s_sign_ = f.flow_sign; s_plane_ = plane_sig;
+			s_nx_ = g.nx; s_ny_ = g.ny; s_nz_ = g.nz; s_plane_ = plane_sig;
 		}
 
 		const float dt = std::clamp(view.dt, 0.0f, 0.5f);

@@ -12,9 +12,8 @@
 //   (c) smooth normals — per-vertex normals are the area-weighted average of incident face
 //       normals (summing UN-normalised cross products naturally area-weights, then normalise).
 //
-// load_step_mesh() is the paraglider path and accumulates the whole shape, including open shells
-// and internal fabric. load_step_solids() remains temporarily for legacy consumers. Both share
-// read_step_shape() and mesh_from_faces() so tessellation/provenance stay consistent.
+// load_step_mesh() accumulates every face, including open shells and internal fabric, while
+// deliberately ignoring standalone STEP wires/edges.
 #include "core/geometry/step_import.h"
 
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -38,8 +37,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <sstream>
-#include <utility>
 
 namespace paracfd::core
 {
@@ -86,20 +83,6 @@ namespace paracfd::core
 			if (status != IFSelect_RetDone)
 			{
 				set_error(error, "STEPControl_Reader::ReadFile failed for '" + path + "'");
-				return false;
-			}
-			return transfer_and_mesh(reader, deflection_mm, out, error);
-		}
-
-		// Read + transfer a STEP file held in an in-memory stream (raw .stp bytes). Same pipeline as
-		// read_step_shape but sourced from a stream — used to reconstruct a scene's embedded STEP.
-		bool read_step_shape_stream(std::istream& in, double deflection_mm, TopoDS_Shape& out, std::string* error)
-		{
-			STEPControl_Reader reader;
-			IFSelect_ReturnStatus status = reader.ReadStream("scene.stp", in);
-			if (status != IFSelect_RetDone)
-			{
-				set_error(error, "STEPControl_Reader::ReadStream failed (embedded STEP bytes)");
 				return false;
 			}
 			return transfer_and_mesh(reader, deflection_mm, out, error);
@@ -239,71 +222,4 @@ namespace paracfd::core
 		}
 	}
 
-	TriMesh load_step_mesh_from_memory(const std::vector<unsigned char>& step_bytes, double deflection_mm, std::string* error)
-	{
-		if (step_bytes.empty())
-		{
-			set_error(error, "empty STEP byte buffer");
-			return TriMesh{};
-		}
-		try
-		{
-			std::string s(reinterpret_cast<const char*>(step_bytes.data()), step_bytes.size());
-			std::istringstream in(s, std::ios::binary);
-
-			TopoDS_Shape shape;
-			if (!read_step_shape_stream(in, deflection_mm, shape, error)) return TriMesh{};
-
-			TriMesh mesh = mesh_from_faces(shape);
-			if (mesh.empty())
-			{
-				set_error(error, "embedded STEP produced no triangulable faces");
-				return TriMesh{};
-			}
-			if (error) error->clear();
-			return mesh;
-		}
-		catch (const Standard_Failure& f)
-		{
-			set_error(error, std::string("OpenCascade exception: ") + f.GetMessageString());
-			return TriMesh{};
-		}
-	}
-
-	std::vector<TriMesh> load_step_solids(const std::string& path, double deflection_mm, std::string* error)
-	{
-		std::vector<TriMesh> solids;
-		try
-		{
-			TopoDS_Shape shape;
-			if (!read_step_shape(path, deflection_mm, shape, error)) return {};
-
-			for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next())
-			{
-				TriMesh m = mesh_from_faces(exp.Current());
-				if (!m.empty()) solids.push_back(std::move(m));
-			}
-
-			// Shell/face-only STEP (no TopAbs_SOLID): fall back to the whole shape as one piece.
-			if (solids.empty())
-			{
-				TriMesh whole = mesh_from_faces(shape);
-				if (!whole.empty()) solids.push_back(std::move(whole));
-			}
-
-			if (solids.empty())
-			{
-				set_error(error, "STEP produced no triangulable solids");
-				return {};
-			}
-		}
-		catch (const Standard_Failure& f)
-		{
-			set_error(error, std::string("OpenCascade exception: ") + f.GetMessageString());
-			return {};
-		}
-
-		if (error) error->clear();
-		return solids;
-	}
 }

@@ -15,7 +15,6 @@ namespace paracfd::gui
 
 	namespace
 	{
-		PARACFD_HD inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
 		PARACFD_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 		// Perceptual 5-stop gradient blue->cyan->green->yellow->red over t in [0,1]. Delegates to
@@ -25,7 +24,7 @@ namespace paracfd::gui
 		{
 			float4 c;
 			scour_colormap(t, c.x, c.y, c.z);
-			c.w = 1.0f;
+			c.w = 0.72f;
 			return c;
 		}
 

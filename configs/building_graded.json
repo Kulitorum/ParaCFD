@@ -1,8 +1,0 @@
-{
-	"name": "building_graded",
-	"domain_x": 30.0, "domain_y": 30.0, "domain_z": 5.0,
-	"voxel_h": 0.25,
-	"U": 5.0, "rho": 1.225, "nu": 1.0e-3, "Cs": 0.1, "v_blip": 0.0,
-	"proj_tol": 1e-3, "proj_max_iter": 40,
-	"fine_core": { "enabled": true, "x0": 7.0, "x1": 23.0, "y0": 7.0, "y1": 23.0, "z0": 0.0, "z1": 4.5, "h_fine": 0.15, "growth": 1.2 }
-}

@@ -31,33 +31,16 @@ namespace paracfd::core
 			oz = m[6] * x + m[7] * y + m[8] * z + tz;
 		}
 
-		// Determinant of the linear part = the factor by which M scales volume (1 for a pure
-		// rotation/translation). Used to place-correct the mesh volume so the voxelizer's
-		// mesh-vs-voxel volume gate stays meaningful when the model is scaled.
+		// Determinant of the linear part (1 for a proper rotation). Its sign is needed
+		// when transforming face normals through a reflected placement.
 		double linear_det() const
 		{
 			return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
 		}
 	};
 
-	// Centre the model in x/y over a domain of extent (Lx,Ly) and drop it onto the bed so its
-	// minimum-z vertex rests on z = 0. Identity linear part ⇒ identical to the slice viewer's
-	// default display transform (translation only).
-	inline ModelPlacement place_model_on_bed(const TriMesh& mesh, double Lx, double Ly)
-	{
-		ModelPlacement p;
-		if (mesh.empty()) return p;
-		const double cx = 0.5 * ((double)mesh.bbox_min[0] + (double)mesh.bbox_max[0]);
-		const double cy = 0.5 * ((double)mesh.bbox_min[1] + (double)mesh.bbox_max[1]);
-		p.tx = 0.5 * Lx - cx;
-		p.ty = 0.5 * Ly - cy;
-		p.tz = -(double)mesh.bbox_min[2];
-		return p;
-	}
-
 	// Return a copy of `mesh` with the placement applied to every vertex position and the bbox
-	// recomputed. Used to section/voxelize a model exactly where the gizmo placed it (normals +
-	// indices are copied as-is; the section/voxelizer use only positions).
+	// recomputed. Indices and CAD provenance are preserved.
 	inline TriMesh placed_mesh(const TriMesh& mesh, const ModelPlacement& p)
 	{
 		TriMesh out = mesh;

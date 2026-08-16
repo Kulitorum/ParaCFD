@@ -23,7 +23,7 @@ namespace paracfd::gui
 		if (!flow_ready_ || flow_u_.empty()) return false;
 		FlowField field;
 		field.u = flow_u_.data(); field.v = flow_v_.data(); field.w = flow_w_.data();
-		field.p = flow_p_.data(); field.grid = flow_grid_; field.flow_sign = 1;
+		field.p = flow_p_.data(); field.grid = flow_grid_;
 		fn(field);
 		return true;
 	}

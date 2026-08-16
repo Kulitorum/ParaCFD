@@ -1,4 +1,4 @@
-// slice_field.h — GUI G1 slice colour-fill kernel (pure CUDA, no Qt/GL).
+// Qt-free field sampling/colour reference used by the paraglider viewer tests.
 //
 // Samples a scalar field of the MAC state on an axis-aligned slice plane and maps it
 // through a colour map into a dense float4 (RGBA) vertex-colour array. This is the

@@ -5,8 +5,6 @@
 #include "gui/colormap.h"
 #include "gui/gl_thread_check.h"
 #include "gui/paraglider_sim_worker.h"
-#include "gui/slice_gl.h"
-#include "gui/sim_worker.h"
 
 #include <QMatrix3x3>
 #include <QMouseEvent>
@@ -64,7 +62,7 @@ void main() { fragColor = vColor; }
 		const char* kMeshVert = R"(#version 430 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
-layout(location=2) in vec3 aColor; // per-vertex Cp colour (voxel overlay only; ignored unless uUseVertexColor)
+layout(location=2) in vec3 aColor; // optional per-vertex debug colour
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform vec4 uClipPlane; // (n, d); keep dot(world,n)+d >= 0. Only clips when GL_CLIP_DISTANCE0 is enabled.
@@ -87,7 +85,7 @@ in vec3 vWorld;
 in vec3 vColor;
 uniform vec3 uEye;
 uniform vec4 uBaseColor;
-uniform int  uUseVertexColor; // 0 = flat uBaseColor (STEP model / uniform voxels); !=0 = per-vertex Cp colour
+uniform int  uUseVertexColor; // 0 = flat uBaseColor; nonzero = per-vertex colour
 uniform int  uUseTriangleColor; // STEP surface: gl_PrimitiveID -> per-triangle, per-side Cp SSBO
 struct TriangleSideColour { vec4 plus; vec4 minus; };
 layout(std430, binding=3) readonly buffer TriangleColours { TriangleSideColour uTriangleColor[]; };
@@ -221,17 +219,6 @@ void main()
 		arrows_.set_count(arrow_density_);
 	}
 
-	void SliceViewer::setWorker(SimWorker* w)
-	{
-		worker_ = w;
-		vox_mask_gen_ = 0;      // re-pull the voxel overlay from the (new) worker's live mask
-		vox_load_gen_ = 0;      // re-pull the Cp field from the (new) worker
-		vox_cell_cp_.clear();
-		has_vox_cp_ = false;
-		clearVoxelOverlay();    // drop any stale mask geometry until the new one is published
-		updateWantHostFlow();
-	}
-
 	void SliceViewer::setParagliderWorker(ParagliderSimWorker* w)
 	{
 		paraglider_worker_ = w;
@@ -241,28 +228,9 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setColourByCp(bool on)
-	{
-		if (colour_by_cp_ == on) return;
-		colour_by_cp_ = on;
-		// Re-extract the overlay so it picks up (or drops) the per-vertex Cp colours. The mask geometry is
-		// retained in pending_vox_solid_, so this is a pure recolour when a building is present.
-		if (has_vox_ || !pending_vox_solid_.empty()) vox_upload_pending_ = true;
-		update();
-	}
-
-	// The worker only D2H-publishes the host {u,v,w,solid} snapshot when asked; both the arrows AND
-	// the tracers advect from it, so it is needed iff EITHER is on (a viewer with both hidden pays
-	// nothing).
-	void SliceViewer::updateWantHostFlow()
-	{
-		if (worker_) worker_->setWantHostFlow(show_arrows_ || show_tracers_);
-	}
-
 	void SliceViewer::setShowArrows(bool on)
 	{
 		show_arrows_ = on;
-		updateWantHostFlow();
 		if (on) arrows_.reset(); // re-seed so they don't reappear frozen
 		update();
 	}
@@ -270,7 +238,6 @@ void main()
 	void SliceViewer::setShowTracers(bool on)
 	{
 		show_tracers_ = on;
-		updateWantHostFlow();
 		if (on) tracers_.reset(); // re-seed the grid so streaks don't reappear frozen
 		update();
 	}
@@ -319,7 +286,6 @@ void main()
 	{
 		if (!gl_ready_) return;
 		makeCurrent();
-		if (cuda_res_) slice_gl_unregister(cuda_res_);
 		if (pos_vbo_) glDeleteBuffers(1, &pos_vbo_);
 		if (color_vbo_) glDeleteBuffers(1, &color_vbo_);
 		if (idx_ebo_) glDeleteBuffers(1, &idx_ebo_);
@@ -331,9 +297,6 @@ void main()
 		if (mesh_triangle_colour_ssbo_) glDeleteBuffers(1, &mesh_triangle_colour_ssbo_);
 		if (amr_debug_vbo_) glDeleteBuffers(1, &amr_debug_vbo_);
 		if (eb_debug_vbo_) glDeleteBuffers(1, &eb_debug_vbo_);
-		if (vox_pos_vbo_) glDeleteBuffers(1, &vox_pos_vbo_);
-		if (vox_norm_vbo_) glDeleteBuffers(1, &vox_norm_vbo_);
-		if (vox_color_vbo_) glDeleteBuffers(1, &vox_color_vbo_);
 		if (arrow_glyph_vbo_) glDeleteBuffers(1, &arrow_glyph_vbo_);
 		if (arrow_inst_vbo_) glDeleteBuffers(1, &arrow_inst_vbo_);
 		if (tracer_vbo_) glDeleteBuffers(1, &tracer_vbo_);
@@ -347,7 +310,6 @@ void main()
 		if (mesh_vao_) glDeleteVertexArrays(1, &mesh_vao_);
 		if (amr_debug_vao_) glDeleteVertexArrays(1, &amr_debug_vao_);
 		if (eb_debug_vao_) glDeleteVertexArrays(1, &eb_debug_vao_);
-		if (vox_vao_) glDeleteVertexArrays(1, &vox_vao_);
 		if (arrow_vao_) glDeleteVertexArrays(1, &arrow_vao_);
 		if (tracer_vao_) glDeleteVertexArrays(1, &tracer_vao_);
 		if (axis_vao_) glDeleteVertexArrays(1, &axis_vao_);
@@ -368,7 +330,7 @@ void main()
 		auto_speed_max_ = 1.8f * (float)info.U;
 		geometry_dirty_ = true;
 		axes_dirty_ = true; // rebuild the world triad + ticks for the new domain extents
-		grid_dirty_ = true; // rebuild the grid overlay for the new domain (a graded grid re-pushes faces via setGridLines)
+		grid_dirty_ = true;
 		// Base arrow length ~2% of the domain diagonal (a few cells) — visible over both the wake
 		// slice and the model without cluttering. Re-seed the tracers for the new domain.
 		float diag = std::sqrt((float)(info.Lx * info.Lx + info.Ly * info.Ly + info.Lz * info.Lz));
@@ -412,9 +374,7 @@ void main()
 		// Aerodynamic data belongs to a specific tessellation. Never let a newly loaded
 		// STEP accidentally inherit colours merely because it has the same triangle count.
 		clearTriangleSurfaceColouring();
-		// Seed the gizmo transform (centre-on-bed default) from the model bbox NOW — host-side, so
-		// modelPlacement() is valid even before the first paint (the CLI --load-step path voxelizes
-		// immediately). The GL upload is still deferred to uploadMesh().
+		// Seed host-side placement before the deferred GL upload.
 		gz_bbox_min_ = QVector3D(mesh.bbox_min[0], mesh.bbox_min[1], mesh.bbox_min[2]);
 		gz_bbox_max_ = QVector3D(mesh.bbox_max[0], mesh.bbox_max[1], mesh.bbox_max[2]);
 		computeDefaultXform();
@@ -445,22 +405,6 @@ void main()
 		update();
 	}
 
-	void SliceViewer::setVoxelOverlay(const std::vector<unsigned char>& solid, paracfd::core::MacGrid grid)
-	{
-		pending_vox_solid_ = solid;
-		pending_vox_grid_ = grid;
-		vox_upload_pending_ = true;
-		update(); // built on the next paint (main thread, context current)
-	}
-
-	void SliceViewer::clearVoxelOverlay()
-	{
-		has_vox_ = false;
-		vox_upload_pending_ = false;
-		pending_vox_solid_.clear();
-		vox_vertex_count_ = 0;
-		update();
-	}
 
 	void SliceViewer::setMeshTranslate(double tx, double ty, double tz)
 	{
@@ -515,9 +459,8 @@ void main()
 		gz_pivot_ = c;
 		gz_rot_ = QQuaternion();
 		gz_scale_ = QVector3D(1, 1, 1);
-		// Centre in x/y over the domain and drop the model's min-z vertex onto the bed (z=0). Falls back
-		// to the model's own centre (no domain shift) when the domain is not yet known (Lx = min+max ⇒ the
-		// x/y translate is a no-op), matching place_model_on_bed's fallback.
+		// Generic viewer fallback placement. The paraglider window normally supplies an
+		// explicit aerodynamic placement immediately after loading the mesh.
 		const float Lx = have_info_ ? (float)info_.Lx : (gz_bbox_min_.x() + gz_bbox_max_.x());
 		const float Ly = have_info_ ? (float)info_.Ly : (gz_bbox_min_.y() + gz_bbox_max_.y());
 		gz_t_ = QVector3D(0.5f * Lx, 0.5f * Ly, c.z() - gz_bbox_min_.z());
@@ -1008,7 +951,7 @@ void main()
 			range_log_ctr_ = 0;
 			const char* fn = (field_ == Field::SpeedMag) ? "|u|" : (field_ == Field::VelU) ? "u"
 				: (field_ == Field::VelV) ? "v" : (field_ == Field::VelW) ? "w" : "p";
-			std::fprintf(stderr, "[G1] auto-range %s: vmin=%.4g vmax=%.4g (raw[%.4g,%.4g]) speed_max=%.4g\n",
+			std::fprintf(stderr, "[viewer] auto-range %s: vmin=%.4g vmax=%.4g (raw[%.4g,%.4g]) speed_max=%.4g\n",
 				fn, vmin_, vmax_, fr.field_min, fr.field_max, auto_speed_max_);
 		}
 	}
@@ -1017,9 +960,7 @@ void main()
 	{
 		SliceParams sp;
 		sp.grid.nx = info_.nx; sp.grid.ny = info_.ny; sp.grid.nz = info_.nz; sp.grid.h = info_.h;
-		// TRUE domain extent (graded: xf[nx] via info_.Lx; uniform: nx·h). Positions the slice quad correctly
-		// on a graded grid without dereferencing metric pointers here (the host geometry path has none). The
-		// device sampler additionally gets the metric ARRAYS via worker_->displayGrid() (see paintGL).
+		// True AMR domain extent supplied by the worker's host visualization snapshot.
 		sp.Lx = (float)info_.Lx; sp.Ly = (float)info_.Ly; sp.Lz = (float)info_.Lz;
 		sp.axis = axis_;
 		float L = (axis_ == Axis::X) ? (float)info_.Lx : (axis_ == Axis::Y) ? (float)info_.Ly : (float)info_.Lz;
@@ -1036,7 +977,7 @@ void main()
 		initializeOpenGLFunctions();
 
 		const char* ver = reinterpret_cast<const char*>(glGetString(GL_VERSION));
-		std::fprintf(stderr, "[G1] GL context: %s\n", ver ? ver : "(null)");
+		std::fprintf(stderr, "[viewer] GL context: %s\n", ver ? ver : "(null)");
 
 		glClearColor(0.09f, 0.10f, 0.12f, 1.0f);
 		glEnable(GL_DEPTH_TEST);
@@ -1045,28 +986,28 @@ void main()
 			|| !prog_.addShaderFromSourceCode(QOpenGLShader::Fragment, kFrag)
 			|| !prog_.link())
 		{
-			std::fprintf(stderr, "[G1] shader error: %s\n", prog_.log().toUtf8().constData());
+			std::fprintf(stderr, "[viewer] shader error: %s\n", prog_.log().toUtf8().constData());
 		}
 
 		if (!mesh_prog_.addShaderFromSourceCode(QOpenGLShader::Vertex, kMeshVert)
 			|| !mesh_prog_.addShaderFromSourceCode(QOpenGLShader::Fragment, kMeshFrag)
 			|| !mesh_prog_.link())
 		{
-			std::fprintf(stderr, "[G1] mesh shader error: %s\n", mesh_prog_.log().toUtf8().constData());
+			std::fprintf(stderr, "[viewer] mesh shader error: %s\n", mesh_prog_.log().toUtf8().constData());
 		}
 
 		if (!arrow_prog_.addShaderFromSourceCode(QOpenGLShader::Vertex, kArrowVert)
 			|| !arrow_prog_.addShaderFromSourceCode(QOpenGLShader::Fragment, kArrowFrag)
 			|| !arrow_prog_.link())
 		{
-			std::fprintf(stderr, "[G1] arrow shader error: %s\n", arrow_prog_.log().toUtf8().constData());
+			std::fprintf(stderr, "[viewer] arrow shader error: %s\n", arrow_prog_.log().toUtf8().constData());
 		}
 
 		if (!tracer_prog_.addShaderFromSourceCode(QOpenGLShader::Vertex, kTracerVert)
 			|| !tracer_prog_.addShaderFromSourceCode(QOpenGLShader::Fragment, kTracerFrag)
 			|| !tracer_prog_.link())
 		{
-			std::fprintf(stderr, "[G1] tracer shader error: %s\n", tracer_prog_.log().toUtf8().constData());
+			std::fprintf(stderr, "[viewer] tracer shader error: %s\n", tracer_prog_.log().toUtf8().constData());
 		}
 
 		glGenVertexArrays(1, &slice_vao_);
@@ -1075,7 +1016,6 @@ void main()
 		glGenVertexArrays(1, &mesh_vao_);
 		glGenVertexArrays(1, &amr_debug_vao_);
 		glGenVertexArrays(1, &eb_debug_vao_);
-		glGenVertexArrays(1, &vox_vao_);
 		glGenVertexArrays(1, &arrow_vao_);
 		glGenVertexArrays(1, &tracer_vao_);
 		glGenVertexArrays(1, &axis_vao_);
@@ -1092,9 +1032,6 @@ void main()
 		glGenBuffers(1, &mesh_triangle_colour_ssbo_);
 		glGenBuffers(1, &amr_debug_vbo_);
 		glGenBuffers(1, &eb_debug_vbo_);
-		glGenBuffers(1, &vox_pos_vbo_);
-		glGenBuffers(1, &vox_norm_vbo_);
-		glGenBuffers(1, &vox_color_vbo_);
 		glGenBuffers(1, &arrow_glyph_vbo_);
 		glGenBuffers(1, &arrow_inst_vbo_);
 		glGenBuffers(1, &tracer_vbo_);
@@ -1117,7 +1054,8 @@ void main()
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, idx_ebo_);
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
 
-		// Colour VBO: NRES*NRES float4, written by CUDA every frame. Allocate then register.
+		// Colour VBO: NRES*NRES float4, updated from the worker's throttled
+		// visualization resampling. The production AMR timestep remains GPU resident.
 		glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
 		glBufferData(GL_ARRAY_BUFFER, (size_t)NRES * NRES * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
 		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
@@ -1129,10 +1067,6 @@ void main()
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(0);
 		glBindVertexArray(0);
-
-		cuda_res_ = slice_gl_register(color_vbo_);
-		if (!cuda_res_)
-			std::fprintf(stderr, "[G1] WARNING: CUDA-GL interop registration failed; slice will be blank.\n");
 
 		gl_ready_ = true;
 		buildBoxGeometry();
@@ -1183,7 +1117,7 @@ void main()
 	void SliceViewer::updateArrows()
 	{
 		PARACFD_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !show_arrows_ || (!worker_ && !paraglider_worker_) || !have_info_)
+		if (!gl_ready_ || !show_arrows_ || !paraglider_worker_ || !have_info_)
 		{
 			arrow_draw_count_ = 0;
 			return;
@@ -1209,8 +1143,7 @@ void main()
 
 		ensureFabricBvh();
 		auto consume = [&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); arrows_.advance(dt, view, ff); };
-		const bool got = paraglider_worker_ ? paraglider_worker_->withFlowField(consume)
-			: worker_->withFlowField(consume);
+		const bool got = paraglider_worker_->withFlowField(consume);
 		if (!got) { arrow_draw_count_ = 0; return; }
 
 		const std::vector<float>& inst = arrows_.instance_data();
@@ -1221,7 +1154,7 @@ void main()
 		if (!arrows_logged_)
 		{
 			arrows_logged_ = true;
-			std::fprintf(stderr, "[G1] flow arrows live: %d particles, %s mode\n", n, arrow_3d_ ? "3D" : "2D");
+			std::fprintf(stderr, "[viewer] flow arrows live: %d particles, %s mode\n", n, arrow_3d_ ? "3D" : "2D");
 		}
 
 		glBindVertexArray(arrow_vao_);
@@ -1286,7 +1219,7 @@ void main()
 	void SliceViewer::updateTracers()
 	{
 		PARACFD_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !show_tracers_ || (!worker_ && !paraglider_worker_) || !have_info_)
+		if (!gl_ready_ || !show_tracers_ || !paraglider_worker_ || !have_info_)
 		{
 			tracer_strips_ = 0;
 			return;
@@ -1329,8 +1262,7 @@ void main()
 
 		ensureFabricBvh();
 		auto consume = [&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); tracers_.advance(view, ff); };
-		const bool got = paraglider_worker_ ? paraglider_worker_->withFlowField(consume)
-			: worker_->withFlowField(consume);
+		const bool got = paraglider_worker_->withFlowField(consume);
 		if (!got) { tracer_strips_ = 0; return; }
 
 		tracer_strips_ = tracers_.strips();
@@ -1341,7 +1273,7 @@ void main()
 		if (!tracers_logged_)
 		{
 			tracers_logged_ = true;
-			std::fprintf(stderr, "[G1] flow tracers live: %d inlet streamlines, %s mode\n",
+			std::fprintf(stderr, "[viewer] flow tracers live: %d inlet streamlines, %s mode\n",
 				tracer_strips_, tracer_3d_ ? "3D" : "2D");
 		}
 
@@ -1547,18 +1479,6 @@ void main()
 		}
 		draw_bar(barX, barY, barW, barH, title, vmin_, vmax_, units,
 			[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
-
-		// --- Cp wind-load ramp (shown when "Colour building by Cp" is ON and the building is Cp-coloured) --
-		// Same 5-stop ramp the overlay uses, over the current SYMMETRIC Cp range [vox_cp_lo_, vox_cp_hi_], so
-		// it's clear what surface pressures the building colours mean (blue = suction, red = pressure). Ticks
-		// read min / 0 / max (0 falls on the mid, since the range is symmetric about Cp = 0). Placed to the
-		// LEFT of the slice bar so the two colorbars + their labels don't collide.
-		if (colour_by_cp_ && has_vox_cp_)
-		{
-			const int cpX = barX - 130;
-			draw_bar(cpX, barY, barW, barH, "Cp", vox_cp_lo_, vox_cp_hi_, "pressure coeff.",
-				[](float t) { float r, g, b; scour_colormap(t, r, g, b); return QColor::fromRgbF(r, g, b); });
-		}
 
 		// External-aero convention is deliberately fixed: prescribed freestream enters at
 		// X-min and travels along +X. Keep this visible even when no arrows cross the camera.
@@ -1911,109 +1831,6 @@ void main()
 		upload(amr_debug_vao_,amr_debug_vbo_,pending_amr_debug_lines_,amr_debug_vertex_count_);upload(eb_debug_vao_,eb_debug_vbo_,pending_eb_debug_lines_,eb_debug_vertex_count_);
 	}
 
-	void SliceViewer::uploadVoxelOverlay()
-	{
-		PARACFD_ASSERT_GL_THREAD();
-		if (!gl_ready_ || !vox_upload_pending_) return;
-		vox_upload_pending_ = false;
-
-		const paracfd::core::MacGrid g = pending_vox_grid_;
-		const std::vector<unsigned char>& s = pending_vox_solid_;
-		if (s.empty() || (int)s.size() != g.p_count() || g.h <= 0.0)
-		{
-			has_vox_ = false;
-			vox_vertex_count_ = 0;
-			pending_vox_solid_.clear();
-			return;
-		}
-
-		// The mask is the flow solid mask (0 = fluid, nonzero = solid). Emit the exposed voxel-surface
-		// faces — a face wherever a solid cell's across-neighbour is fluid or outside the domain — i.e.
-		// the solid staircase skin, not its interior. Each face = 2 triangles, each vertex = 3 pos + 3 nrm.
-		auto solid_at = [&](int i, int j, int k) -> bool
-		{
-			if (i < 0 || i >= g.nx || j < 0 || j >= g.ny || k < 0 || k >= g.nz) return false; // out of domain = fluid
-			return s[(std::size_t)g.pidx(i, j, k)] != 0;
-		};
-
-		// Colour by Cp when enabled AND the worker has published a Cp field matching this grid. Each solid
-		// cell's exposed faces take the cell's mean Cp, mapped through the shared colormap ramp over the
-		// symmetric range [vox_cp_lo_,vox_cp_hi_] (blue = suction … red = pressure).
-		const bool want_cp = colour_by_cp_ && (int)vox_cell_cp_.size() == g.p_count();
-		const float cp_span = (vox_cp_hi_ > vox_cp_lo_) ? (vox_cp_hi_ - vox_cp_lo_) : 1.0f;
-
-		std::vector<float> pos, nrm, col;
-		float cr = 0.5f, cg = 0.5f, cb = 0.5f; // current cell's Cp colour (set per solid cell below)
-		auto quad = [&](float ox, float oy, float oz, float ux, float uy, float uz, float vx, float vy, float vz, float nx, float ny, float nz)
-		{
-			float p0[3] = { ox, oy, oz };
-			float p1[3] = { ox + ux, oy + uy, oz + uz };
-			float p2[3] = { ox + ux + vx, oy + uy + vy, oz + uz + vz };
-			float p3[3] = { ox + vx, oy + vy, oz + vz };
-			const float* tris[6] = { p0, p1, p2, p0, p2, p3 };
-			for (const float* p : tris)
-			{
-				pos.push_back(p[0]); pos.push_back(p[1]); pos.push_back(p[2]);
-				nrm.push_back(nx); nrm.push_back(ny); nrm.push_back(nz);
-				if (want_cp) { col.push_back(cr); col.push_back(cg); col.push_back(cb); }
-			}
-		};
-		for (int k = 0; k < g.nz; ++k)
-			for (int j = 0; j < g.ny; ++j)
-				for (int i = 0; i < g.nx; ++i)
-				{
-					if (!solid_at(i, j, k)) continue;
-					if (want_cp)
-					{
-						const float cp = vox_cell_cp_[(std::size_t)g.pidx(i, j, k)];
-						if (cp == cp) // finite (NaN off the surface → neutral grey)
-							scour_colormap((cp - vox_cp_lo_) / cp_span, cr, cg, cb);
-						else { cr = cg = cb = 0.6f; }
-					}
-					// Cell's minimum-corner face coords + per-axis widths from the grid metrics — on a GRADED
-					// grid these are the true (non-uniform) cell bounds xf[i]/dx[i]; the accessors fall back to
-					// exact i·h / h on a uniform grid, so the staircase lands on the same voxels the flow uses.
-					const float x0 = (float)g.xf(i), y0 = (float)g.yf(j), z0 = (float)g.zf(k);
-					const float hx = (float)g.dx(i), hy = (float)g.dy(j), hz = (float)g.dz(k);
-					if (!solid_at(i - 1, j, k)) quad(x0, y0, z0, 0, hy, 0, 0, 0, hz, -1, 0, 0); // -x
-					if (!solid_at(i + 1, j, k)) quad(x0 + hx, y0, z0, 0, 0, hz, 0, hy, 0, 1, 0, 0); // +x
-					if (!solid_at(i, j - 1, k)) quad(x0, y0, z0, 0, 0, hz, hx, 0, 0, 0, -1, 0); // -y
-					if (!solid_at(i, j + 1, k)) quad(x0, y0 + hy, z0, hx, 0, 0, 0, 0, hz, 0, 1, 0); // +y
-					if (!solid_at(i, j, k - 1)) quad(x0, y0, z0, hx, 0, 0, 0, hy, 0, 0, 0, -1); // -z
-					if (!solid_at(i, j, k + 1)) quad(x0, y0, z0 + hz, 0, hy, 0, hx, 0, 0, 0, 0, 1); // +z
-				}
-
-		vox_vertex_count_ = (int)(pos.size() / 3);
-		if (vox_vertex_count_ == 0) { has_vox_ = false; has_vox_cp_ = false; return; }
-
-		glBindVertexArray(vox_vao_);
-		glBindBuffer(GL_ARRAY_BUFFER, vox_pos_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, pos.size() * sizeof(float), pos.data(), GL_STATIC_DRAW);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-		glEnableVertexAttribArray(0);
-		glBindBuffer(GL_ARRAY_BUFFER, vox_norm_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, nrm.size() * sizeof(float), nrm.data(), GL_STATIC_DRAW);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-		glEnableVertexAttribArray(1);
-		has_vox_cp_ = want_cp && col.size() == pos.size();
-		if (has_vox_cp_)
-		{
-			glBindBuffer(GL_ARRAY_BUFFER, vox_color_vbo_);
-			glBufferData(GL_ARRAY_BUFFER, col.size() * sizeof(float), col.data(), GL_STATIC_DRAW);
-			glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-			glEnableVertexAttribArray(2);
-		}
-		else
-			glDisableVertexAttribArray(2); // fall back to the flat uBaseColor path
-		glBindVertexArray(0);
-
-		has_vox_ = true;
-		// NB: pending_vox_solid_ is RETAINED (not cleared) so a fresh Cp field — or a colour_by_cp_ toggle —
-		// can re-extract + re-colour the overlay without a mask republish from the worker.
-		std::fprintf(stderr, "[G1] voxel overlay: %d solid exposed-face triangles%s\n",
-			vox_vertex_count_ / 3, has_vox_cp_ ? " (Cp-coloured)" : "");
-	}
-
 	void SliceViewer::resizeGL(int w, int h)
 	{
 		PARACFD_ASSERT_GL_THREAD();
@@ -2032,73 +1849,11 @@ void main()
 
 		if (geometry_dirty_) { buildSliceGeometry(); buildBoxGeometry(); } // both track info_.Lx/Ly/Lz — rebuild together on a domain resize
 
-		// Sync the voxel overlay to the live flow solid mask (obstacle ∪ any runtime-marked solid) so
-		// EVERY cell the fluid treats as solid is drawn — a mis-placed solid
-		// voxel becomes visible. The worker bumps its mask generation only on a mask change (load /
-		// obstacle rebuild / bed re-mask), so this copies the host mask + rebuilds the exposed-face
-		// geometry ONLY then (no per-frame mask D2H). uploadVoxelOverlay() (below) does the extraction.
-		if (worker_ && worker_->maskGeneration() != vox_mask_gen_)
-		{
-			std::vector<unsigned char> mask;
-			paracfd::core::MacGrid mg;
-			if (worker_->copyMask(mask, mg))
-			{
-				vox_mask_gen_ = worker_->maskGeneration();
-				setVoxelOverlay(mask, mg); // queues uploadVoxelOverlay() for this same paint
-			}
-		}
-
-		// Sync the per-cell Cp field for the building overlay. The worker republishes it (bumping its load
-		// generation) only when it re-integrates the loads (~every 30 steps), so this pulls the fresh Cp +
-		// its symmetric colour range and queues a recolour ONLY then — never per-frame. Runs after the mask
-		// sync so both feed the SAME uploadVoxelOverlay() below.
-		if (worker_ && worker_->loadGeneration() != vox_load_gen_)
-		{
-			std::vector<float> cp;
-			float lo = 0.0f, hi = 0.0f;
-			paracfd::core::MacGrid lg;
-			// The worker hands back the TIME-AVERAGED Cp (+ its symmetric range) once an averaging window is
-			// active, else the live instantaneous Cp — so the building recolours to the converged field the
-			// moment the user starts averaging, with no extra plumbing here.
-			if (worker_->copyDisplayCp(cp, lo, hi, lg))
-			{
-				vox_load_gen_ = worker_->loadGeneration();
-				vox_cell_cp_.swap(cp);
-				vox_cp_lo_ = lo;
-				vox_cp_hi_ = hi;
-				if (colour_by_cp_ && !pending_vox_solid_.empty()) vox_upload_pending_ = true; // recolour
-			}
-		}
-
 		if (mesh_upload_pending_) uploadMesh();
 		if (mesh_triangle_colour_upload_pending_) uploadTriangleSurfaceColours();
 		if (paraglider_debug_upload_pending_) uploadParagliderDebugBoxes();
-		if (vox_upload_pending_) uploadVoxelOverlay();
 
-		// CUDA writes the slice colours directly into the registered VBO (zero copy), sampling the
-		// worker's post-step device snapshots under display_mutex(). The interop runs on its own
-		// stream, so this never blocks on the worker's step(). The same locked scope runs the
-		// throttled auto-range reduction (fluid cells only, 3 scalars back — never the whole field)
-		// FIRST, so the fill + legend + arrows all use the freshly-tracked [vmin_,vmax_].
-		if (worker_ && worker_->display_ready() && cuda_res_ && have_info_)
-		{
-			std::lock_guard<std::mutex> lk(worker_->display_mutex());
-			// Sampler grid = the core's DEVICE-view metrics (grid_fx maps each vertex to the correct GRADED
-			// cell on the device). currentParams() alone carries only nx/ny/nz/h + the true extent (sp.Lx…);
-			// displayGrid() adds the device metric ARRAYS with identical dims. Uniform ⇒ null metrics (x/h).
-			SliceParams sp = currentParams();
-			sp.grid = worker_->displayGrid();
-			if (auto_range_ && (range_ctr_++ % kRangeEvery == 0))
-			{
-				FieldRange fr;
-				if (slice_gl_reduce(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(),
-					worker_->disp_p(), worker_->disp_solid(), sp.grid, field_, &fr))
-					applyAutoRange(fr);
-			}
-			if (show_slice_) // slice fill skipped when hidden (no fill, no draw)
-				slice_gl_fill(cuda_res_, worker_->disp_u(), worker_->disp_v(), worker_->disp_w(), worker_->disp_p(), sp);
-		}
-		else if (paraglider_worker_ && have_info_)
+		if (paraglider_worker_ && have_info_)
 		{
 			// The production field is block-AMR/FP32. The worker publishes a throttled,
 			// coarse uniform host resampling exclusively for visualization, which lets the
@@ -2134,8 +1889,7 @@ void main()
 
 		// QPainter::beginNativePainting() resets GL to DEFAULT state (depth test OFF, depth mask
 		// undefined, clear colour black, blending on) — so the scene's depth buffer must be
-		// re-established every frame here, else geometry draws in submission order (voxels on top,
-		// polygons unsorted). Restore the exact state initializeGL() used to set once.
+		// re-established every frame here, otherwise geometry draws in submission order.
 		glEnable(GL_DEPTH_TEST);
 		glDepthFunc(GL_LESS);
 		glDepthMask(GL_TRUE);
@@ -2149,21 +1903,11 @@ void main()
 
 		// Clip plane (see inside hollow structures): the KEPT half-space is dot(pos,n)+d ≥ 0. Every scene
 		// vertex shader writes gl_ClipDistance[0] = dot(pos, uClipPlane), but it only cuts geometry while
-		// GL_CLIP_DISTANCE0 is enabled — enabled per SOLID draw below (mesh, voxels) and left OFF for
+		// GL_CLIP_DISTANCE0 is enabled per STEP-surface draw and left off for
 		// the flow slice + arrows + reference geometry, so the flow field inside the cavity stays visible.
 		const QVector4D clipPlane = computeClipPlane();
 		prog_.setUniformValue("uClipPlane", clipPlane);
 		glDisable(GL_CLIP_DISTANCE0);
-
-		// Slice mesh (per-vertex CUDA colours). Hidden by the "Show slice" toggle. Also suppressed while the
-		// grid overlay is on, so "Show grid on slice" shows the bare cell wireframe (not the filled colours).
-		// Never clipped.
-		if (show_slice_ && !show_grid_)
-		{
-			prog_.setUniformValue("uFlat", 0);
-			glBindVertexArray(slice_vao_);
-			glDrawElements(GL_TRIANGLES, index_count_, GL_UNSIGNED_INT, (void*)0);
-		}
 
 		// Domain wireframe (flat grey).
 		prog_.setUniformValue("uFlat", 1);
@@ -2186,7 +1930,7 @@ void main()
 			mesh_prog_.setUniformValue("uUseVertexColor", 0); // STEP model: flat base colour
 			mesh_prog_.setUniformValue("uUseTriangleColor", has_mesh_triangle_colours_ ? 1 : 0);
 			if (has_mesh_triangle_colours_) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, mesh_triangle_colour_ssbo_);
-			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // the STEP model is a SOLID ⇒ clipped
+			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // visual section only; CFD remains two-sided fabric
 			glBindVertexArray(mesh_vao_);
 			const QMatrix4x4 model = modelMatrix();
 			mesh_prog_.setUniformValue("uMVP", mvp * model);
@@ -2198,28 +1942,23 @@ void main()
 			mesh_prog_.release();
 		}
 
-		// Voxelization overlay (exposed staircase faces) of the rigid solid mask (obstacle, dark-blue).
-		// Reuses the lit mesh shader (identity model).
-		if (has_vox_ && show_solid_vox_ && vox_vertex_count_ > 0)
+		// Draw the field slice after the opaque canopy so the translucent plane does not
+		// write depth before the STEP surface. This keeps both the field and wing readable.
+		if (show_slice_ && !show_grid_)
 		{
-			QMatrix4x4 ident;
-			mesh_prog_.bind();
-			mesh_prog_.setUniformValue("uMVP", mvp);
-			mesh_prog_.setUniformValue("uModel", ident);
-			mesh_prog_.setUniformValue("uEye", camera_.eye());
-			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
-			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // voxel solids ⇒ clipped
-			glBindVertexArray(vox_vao_);
-			// Cp colouring: per-vertex ramp colours when built (checkbox ON + a Cp field published); else the
-			// uniform dark-blue solid. The overlay is re-extracted on toggle so has_vox_cp_ tracks the choice.
-			const bool cp_shade = colour_by_cp_ && has_vox_cp_;
-			mesh_prog_.setUniformValue("uUseVertexColor", cp_shade ? 1 : 0);
-			mesh_prog_.setUniformValue("uUseTriangleColor", 0);
-			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid (uUseVertexColor==0)
-			glDrawArrays(GL_TRIANGLES, 0, vox_vertex_count_);
+			prog_.bind();
+			prog_.setUniformValue("uMVP",mvp);
+			prog_.setUniformValue("uClipPlane",clipPlane);
+			prog_.setUniformValue("uFlat",0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glBindVertexArray(slice_vao_);
+			glDrawElements(GL_TRIANGLES,index_count_,GL_UNSIGNED_INT,(void*)0);
 			glBindVertexArray(0);
-			glDisable(GL_CLIP_DISTANCE0);
-			mesh_prog_.release();
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			prog_.release();
 		}
 
 		// World-origin XYZ triad + camera-aligned corner gizmo (depth-tested world axes; gizmo on top).
@@ -2330,7 +2069,7 @@ void main()
 			gz_drag_op_ = -1;
 			gz_drag_axis_ = -1;
 			fabric_bvh_dirty_ = true;
-			emit modelPlacementChanged(); // re-voxelization happens on the next Apply, not per-drag
+			emit modelPlacementChanged();
 			update();
 		}
 		drag_btn_ = Qt::NoButton;

@@ -1,4 +1,4 @@
-// colormap.h — the ONE source of truth for the G1 viewer's perceptual speed→colour ramp.
+// Shared perceptual field colour map for the paraglider viewer.
 //
 // A 5-stop blue→cyan→green→yellow→red gradient over t in [0,1]. Shared verbatim by:
 //   - the slice colour kernel (gui/slice_field.cu, __host__ __device__),

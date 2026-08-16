@@ -1,9 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 # ParaCFD — GPU paraglider aerodynamics from zero-thickness STEP fabric
-# (C++20/CUDA + Qt6/OpenGL + OpenCascade). The legacy channel/building sources
-# remain temporarily buildable as migration references; new development belongs
-# in the block-AMR/embedded-boundary path below.
+# (C++20/CUDA + Qt6/OpenGL + OpenCascade).
 project(ParaCFD LANGUAGES CXX CUDA)
 
 option(PARACFD_VALIDATION_FP64 "Use FP64 fields in the new paraglider solver path" OFF)
@@ -38,30 +36,15 @@ find_package(CUDAToolkit REQUIRED)
 
 # --- libparacfd (static core, no Qt) -----------------------------------------
 add_library(libparacfd STATIC
-	src/core/config.cpp
 	src/core/paraglider_config.cpp
-	src/core/vti_writer.cpp
-	src/core/vti_reader.cpp
 	src/core/aero_loads.cpp
-	# Legacy voxel-building wind loads (migration reference; not the new load path).
-	src/core/windloads.cpp
 	src/core/cuda_probe.cu
-	# M1 — fluid core (MAC + MacCormack + Smagorinsky + MGPCG)
+	# Reusable FP64 reference kernels retained for CPU/GPU parity validation.
 	src/core/fluid/advect.cu
 	src/core/fluid/turbulence.cu
 	src/core/fluid/project.cu
 	src/core/fluid/mgpcg.cu
-	src/core/fluid/stam_fluid_core.cu
-	src/core/fluid/cavity.cpp
-	# M2 — open channel + obstacles (inlet/Orlanski/lid, voxelized obstacle mask)
-	src/core/fluid/channel_ops.cu
-	src/core/fluid/channel_pressure.cu
-	src/core/fluid/channel_core.cu
-	src/core/fluid/channel_porous.cu
-	src/core/fluid/channel_empty.cpp
-	# Graded structured grid — fine-core → per-axis metric arrays (host) + device upload owner.
-	src/core/fluid/grid_metrics.cpp
-	# Paraglider solver foundation — static 2:1 bricks and pooled FP32 SoA fields.
+	# Production paraglider path: static 2:1 bricks and pooled FP32 SoA fields.
 	src/core/fluid/amr_grid.cpp
 	src/core/fluid/amr_fields.cu
 	src/core/fluid/amr_advection.cu
@@ -73,21 +56,9 @@ add_library(libparacfd STATIC
 	src/core/fluid/external_aero_core.cpp
 	src/core/fluid/eb_pressure.cpp
 	src/core/fluid/eb_pressure.cu
-	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor
-	src/core/fluid/bedshear.cu
-	src/core/fluid/channel_periodic.cu
-	src/core/fluid/plane_ops.cu
-	src/core/fluid/sem_inlet.cu
-	src/core/fluid/channel_sem.cpp
-	src/core/fluid/precursor.cpp
 	# Paraglider geometry acceleration and zero-thickness embedded boundaries.
 	src/core/geometry/triangle_bvh.cpp
 	src/core/geometry/embedded_boundary.cpp
-	# Legacy solid voxelizer/building generators retained until the replacement UI
-	# and end-to-end timestep are operational.
-	src/core/geometry/voxelize.cpp
-	# Building — 3D-print centerline surface -> thickened wall + flat roof solid mask (distance-field).
-	src/core/geometry/building.cpp
 )
 set_target_properties(libparacfd PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
@@ -177,13 +148,6 @@ foreach(_tk ${OCC_LINK_TOOLKITS})
 	target_link_libraries(paracfd_geometry PRIVATE "${OCC_LIB_DIR}/${_tk}.lib")
 endforeach()
 
-# --- building_probe (dev tool: centerline STEP -> building solid mask) -------
-# Loads a centerline STEP via paracfd_geometry, sections + voxelizes a building. Links OCC
-# (through paracfd_geometry) so the OCC DLLs are deployed next to it.
-add_executable(building_probe tools/building_probe.cpp)
-target_link_libraries(building_probe PRIVATE libparacfd paracfd_geometry)
-paracfd_deploy_occ_dlls(building_probe)
-
 add_executable(paraglider_probe tools/paraglider_probe.cpp)
 target_link_libraries(paraglider_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(paraglider_probe)
@@ -194,13 +158,7 @@ add_executable(paraglider_case_probe tools/paraglider_case_probe.cpp)
 target_link_libraries(paraglider_case_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(paraglider_case_probe)
 
-# --- parity_probe (Phase-0 migration oracle for the graded-structured-grid change) ---
-# Restores the CLAUDE.md "1e-5 GPU-vs-CPU parity per kernel" invariant (no test target had
-# existed — the CPU twins were defined but never run) AND adds the behaviour-preservation
-# "grading collapses to uniform" golden gate. For every MAC-solver kernel in the Phase-A
-# rewrite scope it checks (1) GPU kernel == CPU twin at rel. max-norm 1e-5 and (2) GPU output
-# == a blessed snapshot. Bless once against the current uniform solver; every later run must
-# still match, making "zero behaviour change" falsifiable. Pure CUDA + libparacfd (no Qt/OCC/GL).
+# --- parity_probe: immutable CPU/GPU oracle for reusable FP64 MAC kernels -----
 enable_testing()
 add_executable(parity_probe tools/parity_probe.cu)
 set_target_properties(parity_probe PROPERTIES
@@ -211,7 +169,7 @@ add_test(NAME parity COMMAND parity_probe)
 set_tests_properties(parity PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # Deterministic CPU geometry/EB/AMR gates plus a tiny CUDA halo parity check. This is the
-# zero-thickness membrane acceptance oracle; it does not use or bless legacy voxel goldens.
+# zero-thickness membrane acceptance oracle; it does not use snapshot goldens.
 add_executable(paraglider_geometry_probe tools/paraglider_geometry_probe.cpp)
 target_link_libraries(paraglider_geometry_probe PRIVATE libparacfd)
 add_test(NAME paraglider_geometry COMMAND paraglider_geometry_probe)
@@ -226,12 +184,9 @@ target_link_libraries(paraglider_flow_probe PRIVATE libparacfd)
 add_test(NAME paraglider_flow COMMAND paraglider_flow_probe)
 set_tests_properties(paraglider_flow PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-# --- paracfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
-# Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can
-# link the slice kernel + its CPU reference without pulling in Qt/GL.
+# --- paracfd_gui_cuda (Qt-free slice sampler/colour reference) ----------------
 add_library(paracfd_gui_cuda STATIC
-	src/gui/slice_field.cu   # pure CUDA sampler+colourmap (+ CPU reference)
-	src/gui/slice_gl.cu      # cudaGraphicsGLRegisterBuffer interop (the only GL-header TU)
+	src/gui/slice_field.cu   # shared sampler/colourmap CPU reference (+ CUDA validation kernel)
 )
 set_target_properties(paracfd_gui_cuda PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
@@ -240,10 +195,10 @@ set_target_properties(paracfd_gui_cuda PROPERTIES
 )
 target_link_libraries(paracfd_gui_cuda PUBLIC libparacfd)
 
-# --- paracfd-gui (Qt6 + GL 4.3 slice viewer; G1) ------------------------------
-# Default ON from G1 onward (Qt 6.11.1 present on this machine). Turn OFF to build
+# --- paracfd-gui (Qt6 + GL paraglider viewer) ---------------------------------
+# Default ON. Turn OFF to build
 # a Qt-less stub (main_stub.cpp) on hosts without Qt.
-option(PARACFD_ENABLE_QT "Build paracfd-gui against Qt6 (G1 slice viewer)" ON)
+option(PARACFD_ENABLE_QT "Build the Qt6 ParaCFD paraglider application" ON)
 add_executable(paracfd-gui)
 if(PARACFD_ENABLE_QT)
 	file(GLOB _qt_candidates "C:/Qt/6.*/msvc2022_64")
@@ -262,7 +217,6 @@ if(PARACFD_ENABLE_QT)
 		src/gui/paraglider_main.cpp
 		src/gui/paraglider_window.cpp
 		src/gui/slice_viewer.cpp
-		src/gui/sim_worker.cpp
 		src/gui/paraglider_sim_worker.cpp
 		src/gui/flow_particles.cpp
 		src/gui/flow_tracers.cpp

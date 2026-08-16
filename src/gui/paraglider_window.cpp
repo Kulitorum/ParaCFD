@@ -9,7 +9,7 @@
 #include "core/geometry/step_import.h"
 #include "core/geometry/triangle_bvh.h"
 #include "gui/paraglider_sim_worker.h"
-#include "gui/sim_setup.h"
+#include "gui/display_info.h"
 #include "gui/slice_viewer.h"
 
 #include <QApplication>
@@ -79,7 +79,7 @@ namespace paracfd::gui
 		setWindowTitle("ParaCFD — GPU paraglider aerodynamics");resize(1320,820);
 		viewer_=new SliceViewer(this);setCentralWidget(viewer_);
 		SimInfo initial;initial.nx=initial.ny=initial.nz=32;initial.h=0.5;initial.coarse_h=0.5;initial.Lx=initial.Ly=initial.Lz=16;initial.U=config_.freestream.speed;initial.rho=config_.freestream.rho;initial.nu=config_.freestream.nu;initial.name="paraglider";viewer_->setInfo(initial);
-		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(1500);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(10);
+		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(400);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(7);
 		buildMenus();buildControls();configToUi(config_);
 		repaint_timer_=new QTimer(this);connect(repaint_timer_,&QTimer::timeout,this,[this]{updateSnapshot();viewer_->update();});repaint_timer_->start(16);
 		statusBar()->showMessage("Open a STEP wing, inspect its orientation, then Build CFD Grid.");
@@ -117,7 +117,7 @@ namespace paracfd::gui
 		for(auto* spin:{speed_,rho_,nu_,tessellation_,upstream_,downstream_,lateral_,vertical_,base_h_,wing_refine_,surface_refine_,wake_length_,wake_radius_,cfl_,smagorinsky_,projection_tolerance_,reference_area_,reference_length_})connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(levels_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(brick_size_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});
 		grid_readout_=new QLabel;grid_readout_->setStyleSheet("font-family:Consolas;color:#bcd;");grid_readout_->setWordWrap(true);column->addWidget(grid_readout_);
 
-		auto* visualization=new QGroupBox("Visualization");auto* viz_form=new QFormLayout(visualization);field_=new QComboBox;field_->addItems({"Speed |u|","X velocity u","Y velocity v","Z velocity w","Pressure p"});slice_axis_=new QComboBox;slice_axis_->addItems({"X-normal","Y-normal","Z-normal"});slice_axis_->setCurrentIndex(2);slice_position_=new QSlider(Qt::Horizontal);slice_position_->setRange(0,1000);slice_position_->setValue(500);auto_range_=new QCheckBox("Auto range");auto_range_->setChecked(true);show_slice_=new QCheckBox("Slice");show_slice_->setChecked(true);show_model_=new QCheckBox("STEP surface");show_model_->setChecked(true);show_amr_=new QCheckBox("AMR bricks");show_amr_->setChecked(true);show_eb_=new QCheckBox("EB cells");show_eb_->setChecked(true);show_arrows_=new QCheckBox("Velocity arrows");show_arrows_->setChecked(true);show_tracers_=new QCheckBox("Flow tracers");show_tracers_->setChecked(true);surface_colour_=new QComboBox;surface_colour_->addItems({"Visible side Cp+/Cp-",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});surface_colour_->setCurrentIndex(1);auto* layers=new QWidget;auto* layers_row=new QHBoxLayout(layers);layers_row->setContentsMargins(0,0,0,0);for(auto* check:{show_slice_,show_model_,show_amr_,show_eb_,show_arrows_,show_tracers_})layers_row->addWidget(check);viz_form->addRow("Field",field_);viz_form->addRow("Slice plane",slice_axis_);viz_form->addRow("Plane position",slice_position_);viz_form->addRow(auto_range_);viz_form->addRow("Layers",layers);viz_form->addRow("Canopy colour",surface_colour_);column->addWidget(visualization);
+		auto* visualization=new QGroupBox("Visualization");auto* viz_form=new QFormLayout(visualization);field_=new QComboBox;field_->addItems({"Speed |u|","X velocity u","Y velocity v","Z velocity w","Pressure p"});slice_axis_=new QComboBox;slice_axis_->addItems({"X-normal","Y-normal","Z-normal"});slice_axis_->setCurrentIndex(2);slice_position_=new QSlider(Qt::Horizontal);slice_position_->setRange(0,1000);slice_position_->setValue(500);auto_range_=new QCheckBox("Auto range");auto_range_->setChecked(true);show_slice_=new QCheckBox("Slice");show_slice_->setChecked(true);show_model_=new QCheckBox("STEP surface");show_model_->setChecked(true);show_amr_=new QCheckBox("AMR bricks");show_amr_->setChecked(false);show_eb_=new QCheckBox("EB cells");show_eb_->setChecked(false);show_arrows_=new QCheckBox("Velocity arrows");show_arrows_->setChecked(true);show_tracers_=new QCheckBox("Flow tracers");show_tracers_->setChecked(true);surface_colour_=new QComboBox;surface_colour_->addItems({"Visible side Cp+/Cp-",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});surface_colour_->setCurrentIndex(1);auto* layers=new QWidget;auto* layers_row=new QHBoxLayout(layers);layers_row->setContentsMargins(0,0,0,0);for(auto* check:{show_slice_,show_model_,show_amr_,show_eb_,show_arrows_,show_tracers_})layers_row->addWidget(check);viz_form->addRow("Field",field_);viz_form->addRow("Slice plane",slice_axis_);viz_form->addRow("Plane position",slice_position_);viz_form->addRow(auto_range_);viz_form->addRow("Layers",layers);viz_form->addRow("Canopy colour",surface_colour_);column->addWidget(visualization);
 		connect(field_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){static constexpr Field fields[]={Field::SpeedMag,Field::VelU,Field::VelV,Field::VelW,Field::Pressure};viewer_->setField(fields[index]);});connect(slice_axis_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){viewer_->setAxis(static_cast<Axis>(index));});connect(slice_position_,&QSlider::valueChanged,this,[this](int value){viewer_->setPlaneFraction(value/1000.0f);});connect(auto_range_,&QCheckBox::toggled,viewer_,&SliceViewer::setAutoRange);connect(show_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowSlice);connect(show_model_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowModel);connect(show_amr_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_eb_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_arrows_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowArrows);connect(show_tracers_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowTracers);connect(surface_colour_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{applySurfaceColour();});
 
 		solver_readout_=new QLabel("Grid not built");solver_readout_->setWordWrap(true);solver_readout_->setStyleSheet("font-family:Consolas;color:#cdd;");load_readout_=new QLabel("Pressure loads unavailable");load_readout_->setWordWrap(true);load_readout_->setStyleSheet("font-family:Consolas;color:#cdd;");column->addWidget(solver_readout_);column->addWidget(load_readout_);column->addStretch();
@@ -146,7 +146,49 @@ namespace paracfd::gui
 
 	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation)
 	{
-		shutdownWorker();QApplication::setOverrideCursor(Qt::WaitCursor);std::string error;TriMesh mesh=load_step_mesh(path.toStdString(),tessellation_->value(),&error);QApplication::restoreOverrideCursor();if(mesh.empty()){QMessageBox::critical(this,"STEP import failed",QString::fromStdString(error));return false;}source_mesh_=mesh;step_path_=QFileInfo(path).absoluteFilePath();config_.step_path=step_path_.toStdString();if(infer_orientation){config_.placement=ModelPlacement{};const double dx=mesh.bbox_max[0]-mesh.bbox_min[0],dy=mesh.bbox_max[1]-mesh.bbox_min[1],ratio=std::max(dx,dy)/std::max(1e-9,std::min(dx,dy));if(ratio>=1.25)config_.placement=left_rotation(config_.placement,dx>dy?90:180,{0,0,1});std::fprintf(stderr,"[paraglider-orientation] bbox %.3f x %.3f m: %s\n",dx,dy,ratio>=1.25?(dx>dy?"span X, assume forward -Y":"span Y, assume forward -X"):"ambiguous; imported orientation retained");}viewer_->setMesh(source_mesh_);normalizePlacementToDomain();wing_label_->setText(QString("%1\n%2 triangles — zero-thickness two-sided fabric").arg(QFileInfo(path).fileName()).arg(source_mesh_.triangle_count()));amr_boxes_.clear();eb_boxes_.clear();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();updateDebugBoxes();viewer_->clearTriangleSurfaceColouring();start_button_->setEnabled(false);play_button_->setEnabled(false);step_button_->setEnabled(false);statusBar()->showMessage("STEP loaded. Confirm leading/trailing direction, then Build CFD Grid.",8000);return true;
+		shutdownWorker();
+		QApplication::setOverrideCursor(Qt::WaitCursor);
+		std::string error;
+		TriMesh mesh=load_step_mesh(path.toStdString(),tessellation_->value(),&error);
+		QApplication::restoreOverrideCursor();
+		if(mesh.empty())
+		{
+			QMessageBox::critical(this,"STEP import failed",QString::fromStdString(error));
+			return false;
+		}
+
+		source_mesh_=mesh;
+		step_path_=QFileInfo(path).absoluteFilePath();
+		config_.step_path=step_path_.toStdString();
+		QString orientation_note="placement restored from config";
+		if(infer_orientation)
+		{
+			config_.placement=ModelPlacement{};
+			const double dx=mesh.bbox_max[0]-mesh.bbox_min[0];
+			const double dy=mesh.bbox_max[1]-mesh.bbox_min[1];
+			const double ratio=std::max(dx,dy)/std::max(1e-9,std::min(dx,dy));
+			if(ratio>=1.25)
+			{
+				const bool span_x=dx>dy;
+				config_.placement=left_rotation(config_.placement,span_x?90:180,{0,0,1});
+				orientation_note=span_x
+					?"bbox: span X / chord Y; assumed forward -Y -> +X"
+					:"bbox: span Y / chord X; assumed forward -X -> +X";
+			}
+			else orientation_note="bbox span/chord ambiguous; imported axes retained";
+			std::fprintf(stderr,"[paraglider-orientation] bbox %.3f x %.3f m: %s\n",
+				dx,dy,orientation_note.toUtf8().constData());
+		}
+
+		viewer_->setMesh(source_mesh_);
+		normalizePlacementToDomain();
+		wing_label_->setText(QString("%1\n%2 face triangles — wires ignored\n%3\nLE/TE polarity must be confirmed")
+			.arg(QFileInfo(path).fileName()).arg(source_mesh_.triangle_count()).arg(orientation_note));
+		amr_boxes_.clear();eb_boxes_.clear();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();
+		updateDebugBoxes();viewer_->clearTriangleSurfaceColouring();
+		start_button_->setEnabled(false);play_button_->setEnabled(false);step_button_->setEnabled(false);
+		statusBar()->showMessage("STEP loaded and face bbox centred. Confirm leading/trailing direction, then Build CFD Grid.",8000);
+		return true;
 	}
 
 	bool ParagliderWindow::loadConfigFile(const QString& path,bool build_after_load)

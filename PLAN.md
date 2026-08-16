@@ -8,7 +8,7 @@ This file records actual migration status, not a claim that unfinished architect
 - Retain source STEP face ID and optional UV data per tessellated triangle.
 - Build a static triangle BVH with AABB, segment, nearest-point, and distance queries.
 - Add paraglider configuration and external-aero data structures.
-- Keep the old solver usable only as a reference during migration.
+- Retain only mathematically reusable FP64 MAC kernels as immutable CPU/GPU validation references.
 
 ## B. Uniform brick grid — implemented foundation
 
@@ -71,15 +71,15 @@ The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composit
 - CL/CD/CS only with explicit positive reference area.
 - Pressure drag is labelled pressure-only.
 
-Composite patches now retain global plus/minus pressure DOFs and publish triangle/whole-wing pressure-only loads. The GUI worker automatically transfers throttled per-triangle delta-Cp and pressure-force summaries. Pending: establish a converged validated paraglider flow and add selectable plus/minus surface rendering.
+Composite patches now retain global plus/minus pressure DOFs and publish triangle/whole-wing pressure-only loads. The GUI worker automatically transfers throttled per-triangle Cp+, Cp-, delta-Cp, and pressure-force summaries. Visible-side and explicit plus/minus surface rendering are implemented. Pending: establish a converged validated paraglider flow.
 
-## H. GUI migration — live solver foundation implemented
+## H. GUI migration — implemented foundation
 
-The STEP viewer and CUDA/OpenGL infrastructure remain useful. Particle/tracer fabric collision uses the triangle BVH. The viewer displays static AMR/owned-EB debug boxes and reports the composite pressure readiness/counts. Loading a STEP releases the legacy channel GPU core, builds `ExternalAeroCore`, and hands that exact topology to a dedicated simulation thread. Start/Play/Step now advance the GPU external-aero solver; the status bar reports CFL and pressure convergence/timing, the load panel labels pressure-only force and exposes regular/EB velocity plus conservation/memory diagnostics, and the STEP mesh is colored by live delta-Cp. The purpose-built panel now drives freestream material properties, domain margins, static refinement, solver tolerances, and reference values into the real core. Config/scene integration, AMR velocity/pressure slices, plus/minus side selection, and full removal of building UI still require migration.
+The executable now starts a paraglider-only Qt window. Particle/tracer fabric collision uses the triangle BVH. The viewer displays live velocity/pressure slices, arrows, tracers, static AMR/owned-EB debug boxes, and two-sided triangle pressure colours. Direct STEP load infers horizontal span/chord from the face-only bbox, rotates the assumed negative chord direction into the fixed +X freestream, then sizes and centres the domain around the placed wing; LE/TE polarity remains an explicit user confirmation. Start/Play/Step advance only `ExternalAeroCore`. The panel reports pressure convergence/timing, pressure-only loads, regular/EB velocity, conservation, and persistent-memory diagnostics. Pending: direct AMR CUDA/OpenGL sampling and pressure-force-vector display.
 
-## I. Obsolete-code removal — intentionally pending
+## I. Obsolete-code removal — implemented
 
-Remove the building, centerline, roof/wall, solid-voxel-load, channel/ground/seabed/porous, building probe/config, and corresponding UI/doc paths only after the new timestep and UI replacements pass their validation cases. Until then they are reference code, not current architecture.
+The building, centerline, roof/wall, solid voxelizer/load, channel/ground/seabed/porous, old scene/worker/window, building probe/config, old installer, and misleading legacy research paths have been deleted after the replacement release and tests passed. Git history remains the reference if an old numerical idea must be recovered.
 
 ## Definition of trustworthy version 1
 

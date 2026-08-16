@@ -1,9 +1,8 @@
-// flow_particles.h — variomigo-style animated particle-arrow field for the G1 viewer.
+// Animated velocity-arrow particles for the paraglider viewer.
 //
 // A CPU particle system (Qt-free, no GL): N massless tracers seeded at random fluid points
 // and advected each frame along the bilinearly/trilinearly sampled local MAC velocity. A
-// particle respawns when it ages out, leaves the domain, or enters a solid cell — so arrows
-// stream along the flow and die into obstacles / the bed. Ported from variomigo's Dart
+// particle respawns when it ages out, leaves the domain, or crosses fabric. Ported from variomigo's Dart
 // `FlowParticles` (app/lib/features/ridge_airflow/ridge_flow_painters.dart); here the DRAW is
 // GL 4.3 instancing (slice_viewer.cpp), and this class only owns the CPU state + per-frame
 // integration, emitting an interleaved instance array for the arrow shader.
@@ -25,23 +24,18 @@
 
 namespace paracfd::gui
 {
-	// A borrowed, read-only view of the live host velocity + solid snapshot (owned by the
-	// SimWorker, valid only under its flow lock). Cell-centred sampling reconstructs velocity
-	// from the MAC faces; `solid` (nx*ny*nz) marks obstacle/bed cells (treated as zero flow).
+	// A borrowed, read-only view of the live host velocity snapshot. Cell-centred
+	// sampling reconstructs velocity from the MAC faces.
 	struct FlowField
 	{
 		const double* u = nullptr;
 		const double* v = nullptr;
 		const double* w = nullptr;
 		const double* p = nullptr;
-		const unsigned char* solid = nullptr;
 		// Zero-thickness fabric has no inside/solid classification. Collision is a segment crossing
 		// against the static placed-mesh BVH, so particles cannot tunnel from one fluid side to the other.
 		const paracfd::core::TriangleBvh* fabric = nullptr;
 		paracfd::core::MacGrid grid;
-		// Current flow direction (ChannelBC::flow_sign): +1 ⇒ inlet at x-min (default), -1 ⇒ inlet at
-		// x-max (reversed tide). The tracers seed from whichever face is the inlet.
-		int flow_sign = 1;
 	};
 
 	// What plane / mode the arrows are advected in, plus the colour scale (so arrow speed maps
@@ -66,7 +60,7 @@ namespace paracfd::gui
 		void reset() { needs_reset_ = true; }
 
 		// Advance all particles by `dt` seconds through `f` under `view`. Fills instance_data().
-		// Seeding needs the field (to reject solid spawn points); a null/empty field is a no-op.
+		// A null/empty field is a no-op.
 		void advance(float dt, const ArrowView& view, const FlowField& f);
 
 		// Interleaved per-particle instance data for the arrow shader, stride 8 floats:
@@ -76,10 +70,8 @@ namespace paracfd::gui
 
 	private:
 		void spawn(int k, const ArrowView& view, const FlowField& f, bool initial);
-		// Cell-centred trilinear velocity at world (x,y,z); solids contribute zero. Returns the
-		// three components; caller projects for 2D.
+		// Cell-centred trilinear velocity at world (x,y,z).
 		void sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const;
-		bool is_solid(const FlowField& f, float x, float y, float z) const;
 		bool crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const;
 
 		int count_ = 0;
