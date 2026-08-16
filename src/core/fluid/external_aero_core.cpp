@@ -31,7 +31,7 @@ namespace paracfd::core
 
 	ExternalAeroStepStats ExternalAeroCore::step()
 	{
-		if(!initialized_)throw std::logic_error("external aerodynamic core must have a converged initialization before stepping");const Real dt=static_cast<Real>(config_.solver.cfl*hierarchy_.finest_cell_size()/std::max(1e-9,config_.freestream.speed));const auto step_begin=std::chrono::steady_clock::now(),advection_begin=step_begin;advection_->advect(*fields_,dt);const auto advection_end=std::chrono::steady_clock::now();advection_->diffuse_smagorinsky(*fields_,static_cast<Real>(config_.freestream.nu),static_cast<Real>(config_.solver.smagorinsky_cs),dt);const auto turbulence_end=std::chrono::steady_clock::now();fields_->apply_external_aero_boundaries(static_cast<Real>(config_.freestream.speed));ExternalAeroStepStats stats=project(true);const auto step_end=std::chrono::steady_clock::now();stats.advection_ms=elapsed_ms(advection_begin,advection_end);stats.turbulence_ms=elapsed_ms(advection_end,turbulence_end);stats.les_applied=true;stats.gpu_step_ms=elapsed_ms(step_begin,step_end);if(stats.pressure.converged)physical_time_+=stats.dt;stats.physical_time=physical_time_;return stats;
+		if(!initialized_)throw std::logic_error("external aerodynamic core must have a converged initialization before stepping");const Real dt=static_cast<Real>(config_.solver.cfl*hierarchy_.finest_cell_size()/std::max(1e-9,config_.freestream.speed));const auto step_begin=std::chrono::steady_clock::now(),advection_begin=step_begin;advection_->advect(*fields_,dt);const auto advection_end=std::chrono::steady_clock::now();advection_->diffuse_smagorinsky(*fields_,static_cast<Real>(config_.freestream.nu),static_cast<Real>(config_.solver.smagorinsky_cs),dt);const auto turbulence_end=std::chrono::steady_clock::now();fields_->apply_external_aero_boundaries(static_cast<Real>(config_.freestream.speed));projection_->transport_embedded_apertures(dt,static_cast<Real>(config_.freestream.nu));const auto embedded_transport_end=std::chrono::steady_clock::now();ExternalAeroStepStats stats=project(true);const auto step_end=std::chrono::steady_clock::now();stats.advection_ms=elapsed_ms(advection_begin,advection_end);stats.turbulence_ms=elapsed_ms(advection_end,turbulence_end);stats.embedded_transport_ms=elapsed_ms(turbulence_end,embedded_transport_end);stats.les_applied=true;stats.embedded_transport_applied=true;stats.gpu_step_ms=elapsed_ms(step_begin,step_end);if(stats.pressure.converged)physical_time_+=stats.dt;stats.physical_time=physical_time_;return stats;
 	}
 
 	AerodynamicLoads ExternalAeroCore::pressure_loads(double reference_pressure) const
@@ -40,6 +40,7 @@ namespace paracfd::core
 	}
 
 	void ExternalAeroCore::download_fields(AmrHostFields& host) const{fields_->download(host);}
+	void ExternalAeroCore::download_special_fluxes(CompositeAmrFluxes& host) const{projection_->download_special_fluxes(host);}
 	double ExternalAeroCore::max_abs_divergence() const{std::vector<Real> divergence;projection_->download_divergence(divergence);double maximum=0;for(Real value:divergence)maximum=std::max(maximum,std::abs(static_cast<double>(value)));return maximum;}
 	std::size_t ExternalAeroCore::gpu_bytes() const{return fields_->bytes()+advection_->bytes()+projection_->bytes();}
 	std::size_t ExternalAeroCore::protected_face_count() const{return advection_->protected_face_count();}

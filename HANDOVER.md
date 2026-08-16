@@ -18,9 +18,10 @@ Implemented:
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
 - bounded MacCormack/RK2 finest-brick GPU advection, a static no-cross-fabric protection band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
-- `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> composite projection without bulk per-step transfers;
+- compact same-side EB aperture transport using structured carrier states, first-order upwinding, and molecular diffusion without a full-domain sparse velocity graph;
+- `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> compact EB transport -> coarse/fine synchronization -> composite projection without bulk per-step transfers;
 - composite surface-patch mappings to global p+/p- pressure states and pressure-only triangle/whole-wing load publication;
-- deterministic dynamic normal/parallel/inclined plate gates, opened/closed cavity pressure connectivity, and an equal-finest AMR-versus-uniform inclined-plate comparison;
+- deterministic dynamic normal/parallel/inclined plate gates, developed opened/closed cavity flux validation, and an equal-finest AMR-versus-uniform inclined-plate comparison;
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors the STEP triangles by live delta-Cp; loading a paraglider releases the unrelated legacy channel GPU core.
@@ -42,15 +43,15 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - an initial +X freestream projection converging in 168 PCG iterations to a 9.37e-5 global relative residual in about 138 ms on the RTX 4090;
 - 348.68 MiB estimated persistent GPU storage for fields, projection, and conservative 2:1 velocity synchronization (CUDA context/driver allocations excluded).
 - 135,577 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
-- about 24.9 ms bounded MacCormack advection, 7.8 ms LES/diffusion, and 126 ms projection (192 iterations) for the first post-initialization step (individual projection timings vary);
-- 490.38 MiB total persistent estimate for fields, projection, two advection states/masks, and locator.
+- about 27.1 ms bounded MacCormack advection, 8.5 ms LES/diffusion, 0.6 ms compact EB transport, and 141 ms projection (169 iterations) for a measured first post-initialization step (individual timings vary);
+- 494.39 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
 
 ## Next engineering work
 
-1. Replace the static fabric protection fallback with a higher-order same-side reconstruction and make general cross-level interpolation consistent with the now-conservative normal 2:1 flux state.
-2. Advect/diffuse compact EB aperture velocity states and tighten the existing normal/parallel/inclined plate and AMR-versus-uniform dynamic validations.
+1. Replace the static fabric protection and first-order compact-aperture fallbacks with higher-order same-side reconstruction, including Smagorinsky treatment on the EB graph.
+2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and tighten force/conservation convergence gates.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
-4. Extend the opened-cavity topology test into a developed internal mass-flow test once compact aperture velocities receive full advection/diffusion updates.
+4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
 5. Complete the Qt controls/slices/scene workflow and only then remove building/channel/ground/seabed/porous code.
 
 ## Important files

@@ -73,7 +73,7 @@ namespace paracfd::core
 						else { parent_fi = 2 * t0 + s0; parent_fj = 2 * t1 + s1; parent_fk = positive ? 0 : 2 * bs - 1; }
 						const int child_x = parent_fi / bs, child_y = parent_fj / bs, child_z = parent_fk / bs; const int child_slot = (child_z * 2 + child_y) * 2 + child_x; const int child = covered.children[child_slot];
 						if (child < 0 || !fine.bricks[child].active()) throw std::runtime_error("2:1 interface has missing or further-covered fine child");
-						system.coarse_fine.push_back({system.dof(level, brick, ci, cj, ck), system.dof(level + 1, child, parent_fi % bs, parent_fj % bs, parent_fk % bs), hf * hf, 0.5 * hc + 0.5 * hf, static_cast<std::int8_t>(axis),static_cast<std::int8_t>(positive?1:-1)});
+						const int fi=parent_fi%bs,fj=parent_fj%bs,fk=parent_fk%bs,face_coordinate=axis==0?fi:(axis==1?fj:fk);Vec3d face_centroid=fine.bricks[child].origin+Vec3d{(fi+0.5)*hf,(fj+0.5)*hf,(fk+0.5)*hf};face_centroid[axis]=fine.bricks[child].origin[axis]+(face_coordinate+(positive?0:1))*hf;system.coarse_fine.push_back({system.dof(level, brick, ci, cj, ck), system.dof(level + 1, child, fi, fj, fk), hf * hf, 0.5 * hc + 0.5 * hf, static_cast<std::int8_t>(axis),static_cast<std::int8_t>(positive?1:-1),face_centroid});
 					}
 				}
 			}
@@ -102,7 +102,7 @@ namespace paracfd::core
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&map_ref(irregular_fragment(fragment))<0)throw std::runtime_error("owned AMR EB fragment maps outside its level atlas");
 			for(const FaceAperture& aperture:eb.apertures)
 			{
-				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(aperture.fragment_a)-eb.fragment_centroid(aperture.fragment_b))));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1});
+				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(aperture.fragment_a)-eb.fragment_centroid(aperture.fragment_b))));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1,aperture.centroid});
 			}
 			for(const SurfacePatch& patch:eb.patches)
 			{

@@ -23,6 +23,7 @@ namespace paracfd::core
 		double centre_distance = 0.0;
 		std::int8_t axis = 0;
 		std::int8_t direction = 1; // +1: first DOF is lower-axis; -1: second DOF is lower-axis
+		Vec3d face_centroid{};
 	};
 	struct CompositePressureGauge { int dof = -1; double coefficient = 0.0; };
 	struct CompositeSurfacePressurePatch
@@ -156,6 +157,9 @@ namespace paracfd::core
 		// Refresh each 2:1 tile velocity from its collocated fine MAC face after
 		// transport. EB aperture velocities remain independent compact states.
 		void sync_coarse_fine_from_fields();
+		// First-order same-side graph transport for split EB aperture states. Only
+		// DOFs incident to EB apertures are represented; there is no full-domain CSR.
+		void transport_embedded_apertures(Real dt, Real molecular_nu);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		void compute_divergence();
@@ -183,9 +187,17 @@ namespace paracfd::core
 		std::uint64_t *cf_fine_index_ = nullptr, *cf_group_index_ = nullptr;
 		std::int8_t* cf_group_axis_ = nullptr;
 		Real *cf_group_area_ = nullptr, *cf_group_sum_ = nullptr;
+		int *eb_node_a_ = nullptr, *eb_node_b_ = nullptr;
+		int *eb_carrier_node_ = nullptr, *eb_carrier_level_ = nullptr;
+		std::uint64_t* eb_carrier_index_ = nullptr;
+		std::int8_t* eb_carrier_axis_ = nullptr;
+		Real *eb_carrier_area_ = nullptr, *eb_node_axis_sum_ = nullptr,
+			*eb_node_axis_weight_ = nullptr, *eb_transport_length_ = nullptr,
+			*eb_transport_scratch_ = nullptr;
 		std::vector<int> brick_counts_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
 		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
+		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};

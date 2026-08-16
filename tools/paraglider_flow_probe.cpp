@@ -1,5 +1,6 @@
 #include "core/fluid/external_aero_core.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -35,9 +36,17 @@ namespace
 		TriangleBvh bvh(mesh);const ParagliderConfig config=flow_config();const AmrHierarchy hierarchy=AmrHierarchy::build_static(automatic_flow_domain(mesh,config.domain),mesh,bvh,config.amr);EmbeddedBoundaryBuildOptions options;options.complex_subdivisions=config.amr.complex_subdivisions;options.min_volume_fraction=config.amr.min_volume_fraction;const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(hierarchy,mesh,bvh,options);if(!atlas.ready_for_flow())return static_cast<std::size_t>(-1);return build_composite_amr_pressure_system(hierarchy,atlas,true).gauges.size();
 	}
 	struct CaseResult{bool converged=false;AerodynamicLoads loads;double max_divergence=0,last_step_ms=0;int iterations=0;};
+	struct OpeningFluxResult{bool converged=false;double positive_flux=0,absolute_flux=0;};
 	CaseResult run_case(const char* name,const TriMesh& mesh,int steps=8,ParagliderConfig config=flow_config())
 	{
 		TriangleBvh bvh(mesh);ExternalAeroCore core(mesh,bvh,config);ExternalAeroStepStats stats=core.initialize();bool converged=stats.pressure.converged;for(int step=0;step<steps&&converged;++step){stats=core.step();converged=stats.pressure.converged;}CaseResult result{converged,core.pressure_loads(),core.max_abs_divergence(),stats.gpu_step_ms,stats.pressure.iterations};std::printf("[paraglider-flow] %s: converged=%d F=[%.6g %.6g %.6g] Cd_p=%.6g Cl_p=%.6g maxDiv=%.3e step=%.3f ms it=%d\n",name,converged?1:0,result.loads.pressure_force.x,result.loads.pressure_force.y,result.loads.pressure_force.z,result.loads.cd_pressure,result.loads.cl_pressure,result.max_divergence,result.last_step_ms,result.iterations);return result;
+	}
+	OpeningFluxResult run_opening_flux_case(bool upstream_open,int steps=12)
+	{
+		const TriMesh mesh=cavity_box(upstream_open);TriangleBvh bvh(mesh);const ParagliderConfig config=flow_config();ExternalAeroCore core(mesh,bvh,config);ExternalAeroStepStats stats=core.initialize();bool converged=stats.pressure.converged;for(int step=0;step<steps&&converged;++step){stats=core.step();converged=stats.pressure.converged;}AmrHostFields fields(core.hierarchy());core.download_fields(fields);CompositeAmrFluxes special;core.download_special_fluxes(special);const CompositeAmrPressureSystem& system=core.pressure_system();const AmrHierarchy& hierarchy=core.hierarchy();const int bs=hierarchy.brick_size();OpeningFluxResult result;result.converged=converged;
+		for(int level=0;level<(int)hierarchy.levels().size();++level){const AmrLevel& metadata=hierarchy.levels()[level];const auto& values=fields.levels()[level];for(int brick=0;brick<(int)metadata.bricks.size();++brick){const BrickMetadata& record=metadata.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const double x=record.origin.x+(i+1)*metadata.h,y=record.origin.y+(j+0.5)*metadata.h,z=record.origin.z+(k+0.5)*metadata.h;if(std::abs(x+0.5)>1e-8||y<=-0.5||y>=0.5||z<=-0.5||z>=0.5)continue;const int a=system.dof(level,brick,i,j,k);if(!system.active[a]||(system.cut_face_mask[a]&1u))continue;int b=-1;if(i+1<bs)b=system.dof(level,brick,i+1,j,k);else{const int neighbour=record.same_level_neighbor[1];if(neighbour>=0&&metadata.bricks[neighbour].active())b=system.dof(level,neighbour,0,j,k);}if(b<0||!system.active[b])continue;const double velocity=values.u[values.layout.u_index(brick,i+1,j,k)],area=metadata.h*metadata.h;result.positive_flux+=std::max(0.0,velocity)*area;result.absolute_flux+=std::abs(velocity)*area;}}}
+		for(std::size_t edge=0;edge<system.embedded.size();++edge){const auto& connection=system.embedded[edge];if(connection.axis!=0||std::abs(connection.face_centroid.x+0.5)>1e-8||connection.face_centroid.y<=-0.5||connection.face_centroid.y>=0.5||connection.face_centroid.z<=-0.5||connection.face_centroid.z>=0.5)continue;const double velocity=special.embedded_velocity[edge];result.positive_flux+=std::max(0.0,velocity)*connection.open_area;result.absolute_flux+=std::abs(velocity)*connection.open_area;}
+		std::printf("[paraglider-flow] %s cavity opening: converged=%d positive-flux=%.6g abs-flux=%.6g\n",upstream_open?"open":"closed",converged?1:0,result.positive_flux,result.absolute_flux);return result;
 	}
 }
 
@@ -57,5 +66,6 @@ int main()
 	check(inclined_result.loads.pressure_force.x>=0&&inclined_result.loads.pressure_force.z>0,"positive-angle plate has expected pressure-drag/lift signs");
 	const double lift_scale=std::max(1e-12,std::abs(uniform_fine_result.loads.pressure_force.z));check(uniform_fine_result.converged&&refined_result.converged&&std::abs(refined_result.loads.pressure_force.z-uniform_fine_result.loads.pressure_force.z)/lift_scale<0.25,"AMR inclined-plate lift agrees with equal-finest uniform grid");
 	const std::size_t closed_gauges=pressure_gauges(cavity_box(false)),open_gauges=pressure_gauges(cavity_box(true));check(closed_gauges>=1&&open_gauges==0,"removing cavity inlet fabric reconnects internal and external air");
+	const OpeningFluxResult closed_flux=run_opening_flux_case(false),open_flux=run_opening_flux_case(true);check(closed_flux.converged&&open_flux.converged&&closed_flux.absolute_flux<1e-10&&open_flux.positive_flux>1e-3,"developed flow enters the cavity only through the real opening");
 	std::printf("[paraglider-flow] dynamic flow probe: %s (%d failures)\n",failures?"FAIL":"PASS",failures);return failures?1:0;
 }

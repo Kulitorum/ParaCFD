@@ -17,11 +17,13 @@ namespace paracfd::core
 		double physical_time = 0.0;
 		double advection_ms = 0.0;
 		double turbulence_ms = 0.0;
+		double embedded_transport_ms = 0.0;
 		double projection_ms = 0.0;
 		double gpu_step_ms = 0.0;
 		AmrGpuSolveResult pressure;
 		bool first_order_fabric_protection = true;
 		bool les_applied = false;
+		bool embedded_transport_applied = false;
 	};
 
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
@@ -40,6 +42,7 @@ namespace paracfd::core
 		ExternalAeroStepStats step();
 		AerodynamicLoads pressure_loads(double pressure_reference = 0.0) const;
 		void download_fields(AmrHostFields& host) const;
+		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		double max_abs_divergence() const; // throttled validation/statistics download
 
 		const AmrHierarchy& hierarchy() const { return hierarchy_; }

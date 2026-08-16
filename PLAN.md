@@ -54,7 +54,7 @@ Pending:
 
 - aperture-aware cross-level EB topology when fabric reaches a 2:1 interface;
 - recursive multigrid/V-cycle acceleration beyond the present two-level preconditioner;
-- tighter AMR-versus-uniform force convergence beyond the current 15% inclined-plate difference.
+- longer-run force/conservation convergence beyond the current short-case comparison.
 
 ## F. FP32 production — storage/operator foundation implemented
 
@@ -62,7 +62,7 @@ Pending:
 - Geometry preprocessing and force/reference calculations retain FP64 where valuable.
 - CUDA pressure operator has measured FP32/FP64 parity and timing probes.
 
-The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composite-projection path is GPU resident. Same-level interpolation, Smagorinsky gradients, eddy-viscosity access, and diffusion cross brick boundaries without stencil clamping; all levels build consistent forward states before correction and commit. Normal 2:1 flux tiles gather from transported fine MAC faces, then scatter projected values to the fine faces and their aperture-weighted coarse mean. The static fabric-protection band retains a first-order local state. Pending: higher-order same-side reconstruction inside that band, consistent general cross-level interpolation, compact EB aperture transport, and full-case convergence validation.
+The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composite-projection path is GPU resident. Same-level interpolation, Smagorinsky gradients, eddy-viscosity access, and diffusion cross brick boundaries without stencil clamping; all levels build consistent forward states before correction and commit. Normal 2:1 flux tiles gather from transported fine MAC faces, then scatter projected values to the fine faces and their aperture-weighted coarse mean. Compact EB aperture velocities advance on their own same-side graph using structured carrier states, first-order upwinding, and molecular diffusion. The static fabric-protection band retains a first-order local state. Pending: higher-order same-side reconstruction in both fallback paths, EB Smagorinsky treatment, consistent general cross-level interpolation, and full-case convergence validation.
 
 ## G. Aerodynamics — manufactured load path implemented
 
@@ -88,7 +88,7 @@ Remove the building, centerline, roof/wall, solid-voxel-load, channel/ground/sea
 - Composite AMR flux is conservative through EB and coarse/fine interfaces.
 - GPU projection reaches the declared residual tolerance with a documented norm.
 - FP32 agrees with CPU/FP64 reference cases at a justified tolerance.
-- Normal, parallel, and inclined dynamic plates pass; the current equal-finest AMR inclined-plate lift differs from uniform-fine by about 15% (25% initial gate).
-- A missing cavity inlet reconnects the internal pressure graph to external air; developed internal mass-flow validation remains pending.
+- Normal, parallel, and inclined dynamic plates pass; the current short equal-finest AMR inclined-plate lift differs from uniform-fine by about 0.4%.
+- A missing cavity inlet admits developed bidirectional flow while its closed control has zero represented opening flux.
 - End-to-end timestep contains no per-step CPU geometry work or bulk field transfers.
 - GUI and logs clearly distinguish pressure drag from total drag and expose unresolved geometry.
