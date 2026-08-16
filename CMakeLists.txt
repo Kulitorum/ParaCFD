@@ -259,17 +259,13 @@ if(PARACFD_ENABLE_QT)
 	find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
 	message(STATUS "paracfd-gui: Qt6 from ${_qt_found}")
 	target_sources(paracfd-gui PRIVATE
-		src/gui/main.cpp
-		src/gui/main_window.cpp
+		src/gui/paraglider_main.cpp
+		src/gui/paraglider_window.cpp
 		src/gui/slice_viewer.cpp
 		src/gui/sim_worker.cpp
 		src/gui/paraglider_sim_worker.cpp
-		src/gui/sim_setup.cpp
-		src/gui/scene_io.cpp
 		src/gui/flow_particles.cpp
 		src/gui/flow_tracers.cpp
-		src/gui/video_recorder.cpp
-		src/gui/video_settings_dialog.cpp
 	)
 	set_target_properties(paracfd-gui PROPERTIES AUTOMOC ON)
 	target_link_libraries(paracfd-gui PRIVATE

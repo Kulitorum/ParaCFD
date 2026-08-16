@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <queue>
 #include <string>
 #include <vector>
@@ -62,6 +63,7 @@ namespace
 
 int main()
 {
+	ParagliderConfig saved_config;saved_config.step_path="wing.step";saved_config.placement.tx=1.25;saved_config.placement.m[1]=-1;saved_config.placement.m[3]=1;saved_config.freestream.speed=12.5;saved_config.amr.brick_size=16;saved_config.reference.area=24.0;const std::filesystem::path config_path=std::filesystem::temp_directory_path()/(sizeof(Real)==4?"paracfd-config-fp32.json":"paracfd-config-fp64.json");std::string config_error;ParagliderConfig loaded_config;const bool config_saved=save_paraglider_config(config_path.string(),saved_config,&config_error),config_loaded=config_saved&&load_paraglider_config(config_path.string(),loaded_config,&config_error);std::error_code remove_error;std::filesystem::remove(config_path,remove_error);check(config_loaded&&loaded_config.step_path==saved_config.step_path&&near(loaded_config.placement.tx,1.25)&&near(loaded_config.placement.m[1],-1)&&near(loaded_config.freestream.speed,12.5)&&loaded_config.amr.brick_size==16&&near(loaded_config.reference.area,24.0),"paraglider JSON configuration round-trip");
 	// BVH: exact cell query, two-sided segment crossing, and nearest-distance result.
 	TriMesh flat=flat_x();TriangleBvh bvh(flat);Aabb3d hitbox{{0.49,0.2,0.2},{0.51,0.8,0.8}},missbox{{0.0,0.2,0.2},{0.4,0.8,0.8}};
 	check(bvh.query_aabb(hitbox).size()==2&&bvh.query_aabb(missbox).empty(),"BVH exact AABB query");

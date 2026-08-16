@@ -78,6 +78,24 @@ namespace paracfd::core
 		catch (const std::exception& e) { if (error) *error = std::string("paraglider config parse failed: ") + e.what(); return false; }
 	}
 
+	bool save_paraglider_config(const std::string& path,const ParagliderConfig& c,std::string* error)
+	{
+		try
+		{
+			nlohmann::json root;
+			root["step"]={{"path",c.step_path},{"tessellation_deflection_mm",c.tessellation_deflection_mm}};
+			root["placement"]={{"tx",c.placement.tx},{"ty",c.placement.ty},{"tz",c.placement.tz},
+				{"matrix",{c.placement.m[0],c.placement.m[1],c.placement.m[2],c.placement.m[3],c.placement.m[4],c.placement.m[5],c.placement.m[6],c.placement.m[7],c.placement.m[8]}}};
+			root["freestream"]={{"speed",c.freestream.speed},{"rho",c.freestream.rho},{"nu",c.freestream.nu}};
+			root["domain"]={{"upstream_margin",c.domain.upstream_margin},{"downstream_margin",c.domain.downstream_margin},{"lateral_margin",c.domain.lateral_margin},{"vertical_margin",c.domain.vertical_margin}};
+			root["amr"]={{"base_cell_size",c.amr.base_cell_size},{"max_levels",c.amr.max_levels},{"brick_size",c.amr.brick_size},{"ghost_cells",c.amr.ghost_cells},{"wing_refinement_distance",c.amr.wing_refinement_distance},{"surface_refinement_distance",c.amr.surface_refinement_distance},{"wake_length",c.amr.wake_length},{"wake_radius",c.amr.wake_radius},{"complex_subdivisions",c.amr.complex_subdivisions},{"min_volume_fraction",c.amr.min_volume_fraction}};
+			root["solver"]={{"cfl",c.solver.cfl},{"smagorinsky_cs",c.solver.smagorinsky_cs},{"projection_tolerance",c.solver.projection_tolerance},{"projection_max_iterations",c.solver.projection_max_iterations}};
+			root["reference"]={{"area",c.reference.area},{"length",c.reference.length},{"moment_origin",{c.reference.moment_origin.x,c.reference.moment_origin.y,c.reference.moment_origin.z}}};
+			std::ofstream out(path);if(!out){if(error)*error="cannot open paraglider config '"+path+"' for writing";return false;}out<<root.dump(2)<<'\n';if(!out){if(error)*error="failed while writing paraglider config '"+path+"'";return false;}if(error)error->clear();return true;
+		}
+		catch(const std::exception& e){if(error)*error=std::string("paraglider config write failed: ")+e.what();return false;}
+	}
+
 	Aabb3d automatic_flow_domain(const TriMesh& m, const DomainConfig& d)
 	{
 		Aabb3d b;

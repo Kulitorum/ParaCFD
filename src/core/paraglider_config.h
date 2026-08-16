@@ -64,5 +64,6 @@ namespace paracfd::core
 	};
 
 	bool load_paraglider_config(const std::string& path, ParagliderConfig& out, std::string* error = nullptr);
+	bool save_paraglider_config(const std::string& path, const ParagliderConfig& config, std::string* error = nullptr);
 	Aabb3d automatic_flow_domain(const TriMesh& placed_mesh, const DomainConfig& margins);
 }
