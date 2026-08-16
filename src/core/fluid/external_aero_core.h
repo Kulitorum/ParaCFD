@@ -40,7 +40,6 @@ namespace paracfd::core
 		double absolute_integrated_flux_error = 0.0; // sum |divergence * volume|, m^3/s
 		double net_integrated_flux_error = 0.0;     // sum divergence * volume, m^3/s
 	};
-
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
 	// the constructor. initialize() and step() retain all fields and pressure topology on
 	// the device; only scalar PCG reductions return to the host during a timestep.
@@ -65,6 +64,7 @@ namespace paracfd::core
 		const AmrHierarchy& hierarchy() const { return hierarchy_; }
 		const AmrEmbeddedBoundaryAtlas& embedded_boundary() const { return embedded_boundary_; }
 		const CompositeAmrPressureSystem& pressure_system() const { return pressure_system_; }
+		const ParagliderConfig& config() const { return config_; }
 		double physical_time() const { return physical_time_; }
 		bool initialized() const { return initialized_; }
 		std::size_t gpu_bytes() const;

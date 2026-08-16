@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 
 namespace paracfd::gui
 {
@@ -291,6 +293,16 @@ namespace paracfd::gui
 			paracfd::core::ExternalAeroStepStats stats = core_->initialize();
 			publishFlowField();
 			publish(stats, true);
+			if (!stats.pressure.converged)
+			{
+				char message[192];
+				std::snprintf(message, sizeof(message),
+					"initial pressure projection did not converge after %d iterations "
+					"(relative residual %.6g; requested tolerance %.6g)",
+					stats.pressure.iterations, stats.pressure.relative_residual,
+					core_->config().solver.projection_tolerance);
+				throw std::runtime_error(message);
+			}
 			while (!stop_.load())
 			{
 				bool advance = playing_.load();

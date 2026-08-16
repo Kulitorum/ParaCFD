@@ -98,7 +98,7 @@ namespace paracfd::core
 						else { parent_fi = 2 * t0 + s0; parent_fj = 2 * t1 + s1; parent_fk = positive ? 0 : 2 * bs - 1; }
 						const int child_x = parent_fi / bs, child_y = parent_fj / bs, child_z = parent_fk / bs; const int child_slot = (child_z * 2 + child_y) * 2 + child_x; const int child = covered.children[child_slot];
 						if (child < 0 || !fine.bricks[child].active()) throw std::runtime_error("2:1 interface has missing or further-covered fine child");
-						const int fi=parent_fi%bs,fj=parent_fj%bs,fk=parent_fk%bs,face_coordinate=axis==0?fi:(axis==1?fj:fk);Vec3d face_centroid=fine.bricks[child].origin+Vec3d{(fi+0.5)*hf,(fj+0.5)*hf,(fk+0.5)*hf};face_centroid[axis]=fine.bricks[child].origin[axis]+(face_coordinate+(positive?0:1))*hf;system.coarse_fine.push_back({system.dof(level, brick, ci, cj, ck), system.dof(level + 1, child, fi, fj, fk), hf * hf, 0.5 * hc + 0.5 * hf, static_cast<std::int8_t>(axis),static_cast<std::int8_t>(positive?1:-1),face_centroid});
+						const int fi=parent_fi%bs,fj=parent_fj%bs,fk=parent_fk%bs,face_coordinate=axis==0?fi:(axis==1?fj:fk);Vec3d face_centroid=fine.bricks[child].origin+Vec3d{(fi+0.5)*hf,(fj+0.5)*hf,(fk+0.5)*hf};face_centroid[axis]=fine.bricks[child].origin[axis]+(face_coordinate+(positive?0:1))*hf;const double centre_distance=0.5*hc+0.5*hf;system.coarse_fine.push_back({system.dof(level, brick, ci, cj, ck), system.dof(level + 1, child, fi, fj, fk), hf * hf, centre_distance, centre_distance, static_cast<std::int8_t>(axis),static_cast<std::int8_t>(positive?1:-1),face_centroid});
 					}
 				}
 			}
@@ -143,7 +143,7 @@ namespace paracfd::core
 			}
 			for(const FaceAperture& aperture:eb.apertures)
 			{
-				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(system.centroid[a]-system.centroid[b])));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1,aperture.centroid});
+				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(system.centroid[a]-system.centroid[b])));const double normal_distance=std::max(1e-12,std::abs(system.centroid[a][aperture.axis]-system.centroid[b][aperture.axis]));system.embedded.push_back({a,b,aperture.area,distance,normal_distance,aperture.axis,1,aperture.centroid});
 			}
 			for(const SurfacePatch& patch:eb.patches)
 			{
@@ -188,7 +188,7 @@ namespace paracfd::core
 	{
 		if(pressure.size()!=static_cast<std::size_t>(system.storage_size))throw std::invalid_argument("composite AMR correction pressure size");const int bs=system.brick_size;
 		for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level){const AmrLevel& metadata=system.hierarchy->levels()[level];AmrHostLevelFields& values=fields.levels()[level];for(int brick=0;brick<static_cast<int>(metadata.bricks.size());++brick){const BrickMetadata& meta=metadata.bricks[brick];if(!meta.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=system.dof(level,brick,i,j,k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if(system.cut_face_mask[a]&(1u<<axis))continue;int coordinate[3]={i,j,k},b=-1,neighbour=-1;if(coordinate[axis]+1<bs){++coordinate[axis];b=system.dof(level,brick,coordinate[0],coordinate[1],coordinate[2]);}else{neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&metadata.bricks[neighbour].active()){coordinate[axis]=0;b=system.dof(level,neighbour,coordinate[0],coordinate[1],coordinate[2]);}}if(b>=0&&system.active[b]){double velocity=regular_face_value(values,brick,axis,i,j,k)-(dt/rho)*(pressure[b]-pressure[a])/metadata.h;set_regular_face(values,brick,axis,i,j,k,velocity);if(neighbour>=0){int opposite[3]={i,j,k};opposite[axis]=-1;set_regular_face(values,neighbour,axis,opposite[0],opposite[1],opposite[2],velocity);}}}if((meta.flags&BRICK_XMAX)&&i==bs-1&&system.pressure_outlet_xmax){double velocity=values.u[values.layout.u_index(brick,bs,j,k)]+(dt/rho)*pressure[a]/(0.5*metadata.h);values.u[values.layout.u_index(brick,bs,j,k)]=static_cast<Real>(velocity);}}}}
-		auto correct_special=[&](const std::vector<CoarseFinePressureConnection>& connections,std::vector<double>& velocity){for(std::size_t edge=0;edge<connections.size();++edge){const auto& connection=connections[edge];const int lower=connection.direction>0?connection.coarse_dof:connection.fine_dof,upper=connection.direction>0?connection.fine_dof:connection.coarse_dof;if(system.active[lower]&&system.active[upper])velocity[edge]-=(dt/rho)*(pressure[upper]-pressure[lower])/connection.centre_distance;}};correct_special(system.coarse_fine,special.coarse_fine_velocity);correct_special(system.embedded,special.embedded_velocity);
+		auto correct_special=[&](const std::vector<CoarseFinePressureConnection>& connections,std::vector<double>& velocity){for(std::size_t edge=0;edge<connections.size();++edge){const auto& connection=connections[edge];const int lower=connection.direction>0?connection.coarse_dof:connection.fine_dof,upper=connection.direction>0?connection.fine_dof:connection.coarse_dof;if(system.active[lower]&&system.active[upper])velocity[edge]-=(dt/rho)*(pressure[upper]-pressure[lower])*pressure_gradient_factor(connection);}};correct_special(system.coarse_fine,special.coarse_fine_velocity);correct_special(system.embedded,special.embedded_velocity);
 	}
 
 	void CompositeAmrPressureSystem::apply_cpu(const std::vector<double>& pressure, std::vector<double>& output) const
@@ -212,8 +212,8 @@ namespace paracfd::core
 				}
 			}
 		}
-		for (const CoarseFinePressureConnection& edge : coarse_fine)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area / edge.centre_distance);
-		for (const CoarseFinePressureConnection& edge : embedded)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area / edge.centre_distance);
+		for (const CoarseFinePressureConnection& edge : coarse_fine)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area * pressure_gradient_factor(edge));
+		for (const CoarseFinePressureConnection& edge : embedded)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area * pressure_gradient_factor(edge));
 		for(const CompositePressureGauge& gauge:gauges)if(gauge.dof>=0&&active[gauge.dof])output[gauge.dof]+=gauge.coefficient*pressure[gauge.dof];
 	}
 
@@ -225,7 +225,7 @@ namespace paracfd::core
 			const AmrLevel& source = hierarchy->levels()[level]; const double coefficient = source.h;
 			for (int brick = 0; brick < static_cast<int>(source.bricks.size()); ++brick) { const BrickMetadata& meta = source.bricks[brick]; if (!meta.active()) continue; for (int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i) { const int a=dof(level,brick,i,j,k);if(!active[a])continue;for(int axis=0;axis<3;++axis){if(cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k};++c[axis];if(c[axis]<bs)add_diagonal(a,dof(level,brick,c[0],c[1],c[2]),coefficient);else{int neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&source.bricks[neighbour].active()){c[axis]=0;add_diagonal(a,dof(level,neighbour,c[0],c[1],c[2]),coefficient);}}}if(pressure_outlet_xmax&&(meta.flags&BRICK_XMAX)&&i==bs-1)diagonal[a]+=2.0*source.h;} }
 		}
-		for(const CoarseFinePressureConnection& edge:coarse_fine)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area/edge.centre_distance);for(const CoarseFinePressureConnection& edge:embedded)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area/edge.centre_distance);
+		for(const CoarseFinePressureConnection& edge:coarse_fine)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));for(const CoarseFinePressureConnection& edge:embedded)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));
 		for(const CompositePressureGauge& gauge:gauges)if(gauge.dof>=0&&active[gauge.dof])diagonal[gauge.dof]+=gauge.coefficient;
 	}
 }

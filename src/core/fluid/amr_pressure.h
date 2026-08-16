@@ -75,6 +75,11 @@ namespace paracfd::core
 			const Real stencil_max = compact_max(normal_update, compact_max(current, compact_max(lower_node,upper_node)));
 			return compact_max(stencil_min,compact_min(stencil_max,candidate));
 		}
+		PARACFD_AMR_HD inline Real compact_diffusive_momentum_transfer(
+			Real mass_a, Real mass_b, Real velocity_a, Real velocity_b, Real fraction)
+		{
+			return fraction*(mass_a*mass_b/(mass_a+mass_b))*(velocity_b-velocity_a);
+		}
 	}
 
 	struct DeviceCompositeAmrLevelView;
@@ -85,10 +90,16 @@ namespace paracfd::core
 		int fine_dof = -1;
 		double open_area = 0.0;
 		double centre_distance = 0.0;
+		double normal_distance = 0.0; // centroid separation projected onto the aperture normal
 		std::int8_t axis = 0;
 		std::int8_t direction = 1; // +1: first DOF is lower-axis; -1: second DOF is lower-axis
 		Vec3d face_centroid{};
 	};
+	inline double pressure_gradient_factor(const CoarseFinePressureConnection& connection)
+	{
+		return connection.normal_distance /
+			(connection.centre_distance * connection.centre_distance);
+	}
 	struct CompositePressureGauge { int dof = -1; double coefficient = 0.0; };
 	struct CompositeSurfacePressurePatch
 	{
@@ -271,7 +282,8 @@ namespace paracfd::core
 		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr, *pressure_ = nullptr;
 		int *first_dof_ = nullptr, *second_dof_ = nullptr;
 		std::int8_t *direction_ = nullptr, *axis_ = nullptr;
-		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *special_velocity_ = nullptr, *max_abs_scratch_ = nullptr;
+		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *pressure_gradient_factor_ = nullptr,
+			*special_velocity_ = nullptr, *max_abs_scratch_ = nullptr;
 		int *cf_fine_level_ = nullptr, *cf_group_ = nullptr, *cf_group_level_ = nullptr;
 		std::uint64_t *cf_fine_index_ = nullptr, *cf_group_index_ = nullptr;
 		std::int8_t* cf_group_axis_ = nullptr;
@@ -281,10 +293,12 @@ namespace paracfd::core
 		int *eb_carrier_node_ = nullptr, *eb_carrier_level_ = nullptr;
 		std::uint64_t* eb_carrier_index_ = nullptr;
 		std::int8_t* eb_carrier_axis_ = nullptr;
-		Real *eb_carrier_area_ = nullptr, *eb_node_axis_sum_ = nullptr,
+		Real *eb_carrier_area_ = nullptr, *eb_carrier_mass_ = nullptr, *eb_node_axis_sum_ = nullptr,
 			*eb_node_axis_weight_ = nullptr, *eb_node_gradient_sum_ = nullptr,
 			*eb_node_gradient_weight_ = nullptr, *eb_transport_length_ = nullptr,
-			*eb_transport_scratch_ = nullptr;
+			*eb_transport_scratch_ = nullptr, *eb_diffusion_rate_ = nullptr,
+			*eb_node_diffusion_sum_ = nullptr, *eb_node_neighbor_count_ = nullptr,
+			*eb_diffusion_scratch_ = nullptr;
 		std::vector<int> brick_counts_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
 		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;

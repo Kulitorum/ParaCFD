@@ -271,19 +271,23 @@ namespace paracfd::core
 			std::erase_if(eb.connections,[&](const FragmentConnection& connection){return connection.open_area<minimum_aperture_area;});
 		}
 
-		// Conservative small-fragment stabilization. First union adjacent tiny fragments
-		// through actual open apertures, then merge the group into its best adjacent large
-		// control volume. If none exists, aggregate into the group's largest member. Thus
-		// equal-sized fragments across cells do not dead-end, and no union can cross fabric.
-		const double minimum_volume=opt.min_volume_fraction*cell_volume;const int fragment_count=static_cast<int>(eb.fragments.size());std::vector<int> small_parent(fragment_count);std::iota(small_parent.begin(),small_parent.end(),0);auto small_root=[&](int q){while(small_parent[q]!=q){small_parent[q]=small_parent[small_parent[q]];q=small_parent[q];}return q;};auto join_small=[&](int a,int b){a=small_root(a);b=small_root(b);if(a!=b)small_parent[std::max(a,b)]=std::min(a,b);};auto is_small=[&](int fragment){return eb.fragments[fragment].volume<minimum_volume;};
+		// Conservative small-fragment stabilization. Aggregate only local neighbours and
+		// stop as soon as the aggregate reaches the requested minimum volume. Uniting an
+		// entire connected component of tiny fragments lets a sliver chain percolate along
+		// a fabric sheet, creating one non-local control volume spanning many cells.
+		const double minimum_volume=opt.min_volume_fraction*cell_volume,maximum_merge_span=2*grid.h;const int fragment_count=static_cast<int>(eb.fragments.size());std::vector<int> small_parent(fragment_count);std::vector<double> aggregate_volume(fragment_count);std::vector<Vec3d> aggregate_lo(fragment_count),aggregate_hi(fragment_count);std::iota(small_parent.begin(),small_parent.end(),0);for(int fragment=0;fragment<fragment_count;++fragment){aggregate_volume[fragment]=eb.fragments[fragment].volume;aggregate_lo[fragment]=aggregate_hi[fragment]=eb.fragments[fragment].centroid;}auto small_root=[&](int q){while(small_parent[q]!=q){small_parent[q]=small_parent[small_parent[q]];q=small_parent[q];}return q;};auto is_small=[&](int fragment){return eb.fragments[fragment].volume<minimum_volume;};auto join_small=[&](int a,int b)
+		{
+			a=small_root(a);b=small_root(b);if(a==b||aggregate_volume[a]>=minimum_volume||aggregate_volume[b]>=minimum_volume)return;const Vec3d lo{std::min(aggregate_lo[a].x,aggregate_lo[b].x),std::min(aggregate_lo[a].y,aggregate_lo[b].y),std::min(aggregate_lo[a].z,aggregate_lo[b].z)},hi{std::max(aggregate_hi[a].x,aggregate_hi[b].x),std::max(aggregate_hi[a].y,aggregate_hi[b].y),std::max(aggregate_hi[a].z,aggregate_hi[b].z)};if(std::max({hi.x-lo.x,hi.y-lo.y,hi.z-lo.z})>maximum_merge_span+1e-12*grid.h)return;const int keep=std::min(a,b),drop=std::max(a,b);small_parent[drop]=keep;aggregate_volume[keep]+=aggregate_volume[drop];aggregate_lo[keep]=lo;aggregate_hi[keep]=hi;
+		};
 		for(const FaceAperture& aperture:eb.apertures)if(!fragment_is_regular(aperture.fragment_a)&&!fragment_is_regular(aperture.fragment_b)){const int a=irregular_fragment_index(aperture.fragment_a),b=irregular_fragment_index(aperture.fragment_b);if(is_small(a)&&is_small(b))join_small(a,b);}
 		std::map<int,std::vector<int>> small_groups;for(int fragment=0;fragment<fragment_count;++fragment)if(is_small(fragment))small_groups[small_root(fragment)].push_back(fragment);
 		for(const auto& item:small_groups)
 		{
 			const std::vector<int>& members=item.second;double total_volume=0;int aggregate=members.front();for(int fragment:members){total_volume+=eb.fragments[fragment].volume;if(eb.fragments[fragment].volume>eb.fragments[aggregate].volume)aggregate=fragment;}
+			if(total_volume>=minimum_volume){for(int fragment:members)if(fragment!=aggregate){eb.fragments[fragment].merge_target=irregular_fragment(aggregate);eb.fragments[fragment].pressure_dof=eb.fragments[aggregate].pressure_dof;}continue;}
 			FragmentRef external=invalid_fragment;double external_volume=-1,external_area=-1;for(const FaceAperture& aperture:eb.apertures)
 			{
-				auto consider=[&](FragmentRef member_ref,FragmentRef other){if(fragment_is_regular(member_ref)||small_root(irregular_fragment_index(member_ref))!=item.first)return;if(!fragment_is_regular(other)&&is_small(irregular_fragment_index(other))&&small_root(irregular_fragment_index(other))==item.first)return;const double volume=eb.fragment_volume(other);if(volume>external_volume||((std::abs(volume-external_volume)<=1e-14)&&aperture.area>external_area)){external=other;external_volume=volume;external_area=aperture.area;}};consider(aperture.fragment_a,aperture.fragment_b);consider(aperture.fragment_b,aperture.fragment_a);
+				auto consider=[&](FragmentRef member_ref,FragmentRef other){if(fragment_is_regular(member_ref)||small_root(irregular_fragment_index(member_ref))!=item.first)return;double volume=eb.fragment_volume(other);if(!fragment_is_regular(other)){const int other_fragment=irregular_fragment_index(other),other_root=small_root(other_fragment);if(is_small(other_fragment)&&(other_root==item.first||aggregate_volume[other_root]<minimum_volume))return;if(is_small(other_fragment))volume=aggregate_volume[other_root];}if(volume>external_volume||((std::abs(volume-external_volume)<=1e-14)&&aperture.area>external_area)){external=other;external_volume=volume;external_area=aperture.area;}};consider(aperture.fragment_a,aperture.fragment_b);consider(aperture.fragment_b,aperture.fragment_a);
 			}
 			const FragmentRef target=external!=invalid_fragment?external:irregular_fragment(aggregate);for(int fragment:members)if(fragment!=aggregate||external!=invalid_fragment){eb.fragments[fragment].merge_target=target;eb.fragments[fragment].pressure_dof=fragment_is_regular(target)?regular_fragment_cell(target):eb.fragments[irregular_fragment_index(target)].pressure_dof;}
 			if(external==invalid_fragment)eb.fragments[aggregate].pressure_static=true;
