@@ -26,6 +26,7 @@ Implemented:
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors the STEP triangles by live delta-Cp; loading a paraglider releases the unrelated legacy channel GPU core.
+- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with explicit exporter-axis rotation controls and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
 
 The old solver remains buildable only as a reference. It is not a paraglider result path.
 
@@ -55,7 +56,7 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and tighten force/conservation convergence gates.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
-5. Complete the Qt controls/slices/scene workflow and only then remove building/channel/ground/seabed/porous code.
+5. Complete AMR velocity/pressure slices, per-side Cp selection, and paraglider scene persistence, then remove building/channel/ground/seabed/porous code.
 
 ## Important files
 

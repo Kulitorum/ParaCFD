@@ -60,7 +60,9 @@ Every owned composite surface patch retains its global plus/minus pressure DOFs 
 
 ## Visualization collision
 
-The Qt/OpenGL viewer still displays the STEP surface. Flow particles and tracers can use the placed triangle BVH for segment-crossing tests and cannot pass through fabric. This does not use an inside-solid or parity classification. The mesh renderer accepts per-source-triangle delta-Cp through an OpenGL shader-storage buffer indexed by primitive ID, so shared CAD vertices do not smear results across fabric panels. A dedicated worker now advances `ExternalAeroCore`, throttles surface downloads, publishes delta-Cp automatically, and reports instantaneous pressure-only loads and pressure-solver timing/residuals.
+The Qt/OpenGL viewer still displays the STEP surface. Flow particles and tracers can use the placed triangle BVH for segment-crossing tests and cannot pass through fabric. This does not use an inside-solid or parity classification. The mesh renderer accepts per-source-triangle delta-Cp through an OpenGL shader-storage buffer indexed by primitive ID, so shared CAD vertices do not smear results across fabric panels. A dedicated worker now advances `ExternalAeroCore`, throttles surface/conservation downloads, publishes delta-Cp automatically, and reports instantaneous pressure-only loads, CFL, regular/compact-EB velocity maxima, projection convergence, divergence/flux diagnostics, and persistent GPU memory.
+
+The visible paraglider grid panel controls density/viscosity, face-bbox domain margins, base spacing/level count, surface/wing/wake refinement, CFL, Smagorinsky coefficient, projection tolerance/iterations, and optional aerodynamic reference values. `Build CFD Grid` reconstructs the static hierarchy and resets the flow. The internal freestream axis remains +X; explicit +/-90-degree Z placement buttons handle known exporter conventions without inferring forward from bbox dimensions.
 
 ## Build and test
 
@@ -95,7 +97,7 @@ The repository is in an incremental migration state and must not yet be describe
 - The new external-aero timestep is wired end to end with bounded MacCormack/RK2 advection. Fabric-near faces still use a conservative static protection fallback. Same-level brick crossings and normal 2:1 interface fluxes are synchronized conservatively; general cross-level interpolation remains nonconservative.
 - Compact EB aperture velocities use a first-order same-side graph transport with molecular diffusion. It still needs a higher-order reconstruction and consistent Smagorinsky treatment before force convergence can be considered complete.
 - Long PlanB diagnostics retain bounded regular velocity and local divergence, but some micro-aperture velocity states grow above the incompressible model's credible range. Their compact transport/stabilization must be improved before internal pressure or aerodynamic loads are trusted.
-- The Qt viewer can inspect AMR bricks and owned EB cells, run the new GPU timestep, color the mesh by delta-Cp, and show pressure-only force/convergence readouts. Its controls, flow slices, scene format, and averaging UI remain substantially inherited from the building/channel product; plus/minus side selection is not yet exposed.
+- The Qt viewer can inspect AMR bricks and owned EB cells, configure/rebuild the paraglider hierarchy, run the new GPU timestep, color the mesh by delta-Cp, and show pressure-only force plus numerical-health readouts. Its flow slices, scene format, and averaging UI remain substantially inherited from the building/channel product; plus/minus side selection is not yet exposed.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
 - The opened-cavity gate measures developed bidirectional flow through a deliberately missing fabric face while the closed control has zero represented opening flux. Longer internal-pressure and force-convergence studies on resolved paraglider geometry remain outstanding.
 

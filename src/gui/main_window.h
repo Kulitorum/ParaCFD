@@ -25,10 +25,11 @@ class QGroupBox;
 class QLabel;
 class QMenu;
 class QPushButton;
+class QSpinBox;
 class QThread;
 class QTimer;
 
-namespace paracfd::core { class ChannelFluidCore; class ExternalAeroCore; }
+namespace paracfd::core { class ChannelFluidCore; class ExternalAeroCore; struct ParagliderConfig; }
 
 namespace paracfd::gui
 {
@@ -148,6 +149,8 @@ namespace paracfd::gui
 		// Internal: driven by loadStepFile (on), "Close model" (off) and the grid-Apply re-inject.
 		bool setModelAsObstacle(bool on, bool noslip = false);
 		void buildParagliderPreviewGrid(); // face-only bbox -> static AMR + local EB debug overlay
+		paracfd::core::ParagliderConfig paragliderConfigFromUi() const;
+		void updateParagliderGridReadout();
 
 		// (Re)generate the solid building from the stored centerline and inject it as the obstacle. Sizes
 		// the domain around the sectioned footprint (with wind clearance) and rebuilds the core at that
@@ -243,6 +246,18 @@ namespace paracfd::gui
 		QDoubleSpinBox* lz_spin_ = nullptr;
 		QDoubleSpinBox* h_spin_ = nullptr;
 		QDoubleSpinBox* u_spin_ = nullptr; // inlet current speed U — live (no reset) + honoured by Apply
+		QGroupBox* paraglider_group_ = nullptr;
+		QDoubleSpinBox *pg_rho_spin_ = nullptr, *pg_nu_spin_ = nullptr;
+		QDoubleSpinBox *pg_upstream_spin_ = nullptr, *pg_downstream_spin_ = nullptr,
+			*pg_lateral_spin_ = nullptr, *pg_vertical_spin_ = nullptr;
+		QDoubleSpinBox *pg_base_h_spin_ = nullptr, *pg_wing_refine_spin_ = nullptr,
+			*pg_surface_refine_spin_ = nullptr, *pg_wake_length_spin_ = nullptr,
+			*pg_wake_radius_spin_ = nullptr;
+		QSpinBox *pg_levels_spin_ = nullptr, *pg_pressure_iterations_spin_ = nullptr;
+		QDoubleSpinBox *pg_cfl_spin_ = nullptr, *pg_cs_spin_ = nullptr,
+			*pg_pressure_tolerance_spin_ = nullptr, *pg_reference_area_spin_ = nullptr,
+			*pg_reference_length_spin_ = nullptr;
+		QLabel* pg_grid_readout_ = nullptr;
 		QComboBox* inlet_profile_box_ = nullptr; // inlet profile: uniform (top-hat) ↔ boundary-layer (log-law)
 		QComboBox* fast_sim_box_ = nullptr;      // "Fast sim": graphics-update throttle (Off / 0.5 / 1 / 3 s / paused)
 		// Tidal reversal (live): enable + peak current / plateau-hold / slack-ramp durations. `syncTidal`

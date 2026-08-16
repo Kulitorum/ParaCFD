@@ -311,6 +311,49 @@ namespace paracfd::gui
 
 		col->addWidget(simGroup);
 
+		// --- Purpose-built paraglider controls -------------------------------------------------
+		// These values rebuild the static block-AMR/EB hierarchy. They are kept separate from the
+		// inherited channel controls while the legacy reference path still exists in this window.
+		const paracfd::core::ParagliderConfig pgDefaults;
+		QGroupBox* pgGroup = new QGroupBox("Paraglider CFD grid (Build resets)");
+		paraglider_group_ = pgGroup;
+		pgGroup->setVisible(false);
+		QVBoxLayout* pgCol = new QVBoxLayout(pgGroup);
+		QFormLayout* pgForm = new QFormLayout;
+		pgForm->setLabelAlignment(Qt::AlignLeft);
+		auto pgDistance = [this](double value,double maximum,const char* tip)
+		{
+			QDoubleSpinBox* spin=new QDoubleSpinBox;spin->setRange(0.0,maximum);spin->setDecimals(3);spin->setSingleStep(0.25);spin->setSuffix(" m");spin->setValue(value);spin->setToolTip(tip);connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this](double){updateParagliderGridReadout();});return spin;
+		};
+		pg_rho_spin_=new QDoubleSpinBox;pg_rho_spin_->setRange(0.1,10.0);pg_rho_spin_->setDecimals(4);pg_rho_spin_->setSingleStep(0.01);pg_rho_spin_->setValue(pgDefaults.freestream.rho);pg_rho_spin_->setSuffix(" kg/m³");
+		pg_nu_spin_=new QDoubleSpinBox;pg_nu_spin_->setRange(1e-8,1e-2);pg_nu_spin_->setDecimals(8);pg_nu_spin_->setSingleStep(1e-6);pg_nu_spin_->setValue(pgDefaults.freestream.nu);pg_nu_spin_->setSuffix(" m²/s");
+		pg_upstream_spin_=pgDistance(pgDefaults.domain.upstream_margin,50,"Distance from wing bbox to X-min freestream boundary.");
+		pg_downstream_spin_=pgDistance(pgDefaults.domain.downstream_margin,100,"Distance from wing bbox to X-max pressure outlet.");
+		pg_lateral_spin_=pgDistance(pgDefaults.domain.lateral_margin,50,"Far-field margin on both spanwise sides.");
+		pg_vertical_spin_=pgDistance(pgDefaults.domain.vertical_margin,50,"Far-field margin above and below; there is no ground.");
+		pg_base_h_spin_=pgDistance(pgDefaults.amr.base_cell_size,5,"Coarsest Cartesian cell size; every finer level is exactly 2:1.");pg_base_h_spin_->setRange(0.03125,5.0);pg_base_h_spin_->setSingleStep(0.03125);
+		pg_levels_spin_=new QSpinBox;pg_levels_spin_->setRange(1,5);pg_levels_spin_->setValue(pgDefaults.amr.max_levels);connect(pg_levels_spin_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this](int){updateParagliderGridReadout();});
+		pg_wing_refine_spin_=pgDistance(pgDefaults.amr.wing_refinement_distance,20,"Refined volume surrounding the whole canopy.");
+		pg_surface_refine_spin_=pgDistance(pgDefaults.amr.surface_refinement_distance,10,"Finest-brick distance from actual fabric triangles.");
+		pg_wake_length_spin_=pgDistance(pgDefaults.amr.wake_length,100,"Static +X near-wake refinement length.");
+		pg_wake_radius_spin_=pgDistance(pgDefaults.amr.wake_radius,50,"Static wake refinement radius around the wing bbox centre.");
+		pg_cfl_spin_=new QDoubleSpinBox;pg_cfl_spin_->setRange(0.05,0.95);pg_cfl_spin_->setDecimals(2);pg_cfl_spin_->setSingleStep(0.05);pg_cfl_spin_->setValue(pgDefaults.solver.cfl);
+		pg_cs_spin_=new QDoubleSpinBox;pg_cs_spin_->setRange(0.0,0.3);pg_cs_spin_->setDecimals(3);pg_cs_spin_->setSingleStep(0.01);pg_cs_spin_->setValue(pgDefaults.solver.smagorinsky_cs);
+		pg_pressure_tolerance_spin_=new QDoubleSpinBox;pg_pressure_tolerance_spin_->setRange(1e-8,1e-2);pg_pressure_tolerance_spin_->setDecimals(8);pg_pressure_tolerance_spin_->setSingleStep(1e-5);pg_pressure_tolerance_spin_->setValue(pgDefaults.solver.projection_tolerance);
+		pg_pressure_iterations_spin_=new QSpinBox;pg_pressure_iterations_spin_->setRange(20,5000);pg_pressure_iterations_spin_->setSingleStep(50);pg_pressure_iterations_spin_->setValue(pgDefaults.solver.projection_max_iterations);
+		pg_reference_area_spin_=new QDoubleSpinBox;pg_reference_area_spin_->setRange(0,10000);pg_reference_area_spin_->setDecimals(3);pg_reference_area_spin_->setSingleStep(0.5);pg_reference_area_spin_->setSuffix(" m²");pg_reference_area_spin_->setToolTip("Set zero to withhold CL/CD/CS; ParaCFD does not invent a paraglider reference area.");
+		pg_reference_length_spin_=new QDoubleSpinBox;pg_reference_length_spin_->setRange(0,1000);pg_reference_length_spin_->setDecimals(3);pg_reference_length_spin_->setSingleStep(0.1);pg_reference_length_spin_->setSuffix(" m");
+		pgForm->addRow("Air density rho",pg_rho_spin_);pgForm->addRow("Kinematic nu",pg_nu_spin_);
+		pgForm->addRow("Upstream margin",pg_upstream_spin_);pgForm->addRow("Downstream margin",pg_downstream_spin_);pgForm->addRow("Lateral margin",pg_lateral_spin_);pgForm->addRow("Vertical margin",pg_vertical_spin_);
+		pgForm->addRow("Base cell size",pg_base_h_spin_);pgForm->addRow("AMR levels",pg_levels_spin_);pgForm->addRow("Wing refine distance",pg_wing_refine_spin_);pgForm->addRow("Surface finest distance",pg_surface_refine_spin_);pgForm->addRow("Wake length",pg_wake_length_spin_);pgForm->addRow("Wake radius",pg_wake_radius_spin_);
+		pgForm->addRow("CFL",pg_cfl_spin_);pgForm->addRow("Smagorinsky Cs",pg_cs_spin_);pgForm->addRow("Projection tolerance",pg_pressure_tolerance_spin_);pgForm->addRow("Pressure max iterations",pg_pressure_iterations_spin_);pgForm->addRow("Reference area",pg_reference_area_spin_);pgForm->addRow("Reference length",pg_reference_length_spin_);
+		pgCol->addLayout(pgForm);
+		pg_grid_readout_=new QLabel;pg_grid_readout_->setWordWrap(true);pg_grid_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");pgCol->addWidget(pg_grid_readout_);
+		QHBoxLayout* pgRotateRow=new QHBoxLayout;QPushButton* pgRotatePlus=new QPushButton("Rotate +90° Z");QPushButton* pgRotateMinus=new QPushButton("Rotate -90° Z");pgRotatePlus->setToolTip("Useful when the exporter stores forward as -Y (PlanB): one +90° rotation maps it to internal +X.");pgRotateMinus->setToolTip("Rotate the imported wing -90° about global Z. Use the placement readout to verify forward.");connect(pgRotatePlus,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,90,1);});connect(pgRotateMinus,&QPushButton::clicked,this,[this]{nudgeModelPlacement(0,0,0,-90,1);});pgRotateRow->addWidget(pgRotatePlus);pgRotateRow->addWidget(pgRotateMinus);pgCol->addLayout(pgRotateRow);
+		QPushButton* pgBuild=new QPushButton("Build CFD Grid");pgBuild->setToolTip("Rebuild static AMR and zero-thickness embedded-boundary topology from the current STEP placement, then initialize a fresh GPU solver.");connect(pgBuild,&QPushButton::clicked,this,[this]{sim_started_=false;if(play_btn_)play_btn_->setChecked(false);buildParagliderPreviewGrid();});pgCol->addWidget(pgBuild);
+		col->addWidget(pgGroup);
+		updateParagliderGridReadout();
+
 		// --- Domain & resolution group — the ONLY control that REBUILDS + RESETS the sim to t=0 --------
 		// Editable domain + voxel/cell size. Apply rebuilds at the new grid (fresh t=0), preserving the
 		// scenario + all physics — only nx,ny,nz change. Coarser (bigger h) = faster to iterate. h IS the
@@ -1629,6 +1672,46 @@ namespace paracfd::gui
 		shutdownWorker();
 	}
 
+	paracfd::core::ParagliderConfig MainWindow::paragliderConfigFromUi() const
+	{
+		paracfd::core::ParagliderConfig config;
+		if (u_spin_) config.freestream.speed = u_spin_->value();
+		if (pg_rho_spin_) config.freestream.rho = pg_rho_spin_->value();
+		if (pg_nu_spin_) config.freestream.nu = pg_nu_spin_->value();
+		if (pg_upstream_spin_) config.domain.upstream_margin = pg_upstream_spin_->value();
+		if (pg_downstream_spin_) config.domain.downstream_margin = pg_downstream_spin_->value();
+		if (pg_lateral_spin_) config.domain.lateral_margin = pg_lateral_spin_->value();
+		if (pg_vertical_spin_) config.domain.vertical_margin = pg_vertical_spin_->value();
+		if (pg_base_h_spin_) config.amr.base_cell_size = pg_base_h_spin_->value();
+		if (pg_levels_spin_) config.amr.max_levels = pg_levels_spin_->value();
+		if (pg_wing_refine_spin_) config.amr.wing_refinement_distance = pg_wing_refine_spin_->value();
+		if (pg_surface_refine_spin_) config.amr.surface_refinement_distance = pg_surface_refine_spin_->value();
+		if (pg_wake_length_spin_) config.amr.wake_length = pg_wake_length_spin_->value();
+		if (pg_wake_radius_spin_) config.amr.wake_radius = pg_wake_radius_spin_->value();
+		if (pg_cfl_spin_) config.solver.cfl = pg_cfl_spin_->value();
+		if (pg_cs_spin_) config.solver.smagorinsky_cs = pg_cs_spin_->value();
+		if (pg_pressure_tolerance_spin_) config.solver.projection_tolerance = pg_pressure_tolerance_spin_->value();
+		if (pg_pressure_iterations_spin_) config.solver.projection_max_iterations = pg_pressure_iterations_spin_->value();
+		if (pg_reference_area_spin_) config.reference.area = pg_reference_area_spin_->value();
+		if (pg_reference_length_spin_) config.reference.length = pg_reference_length_spin_->value();
+		return config;
+	}
+
+	void MainWindow::updateParagliderGridReadout()
+	{
+		if (!pg_grid_readout_) return;
+		const paracfd::core::ParagliderConfig config = paragliderConfigFromUi();
+		const int refinement = 1 << std::max(0, config.amr.max_levels - 1);
+		const double finest = config.amr.base_cell_size / refinement;
+		const double brick_width = config.amr.base_cell_size * config.amr.brick_size;
+		pg_grid_readout_->setText(QString(
+			"finest h = %1 m  (2:1 x%2)\n"
+			"brick = %3³ cells, coarse width %4 m\n"
+			"internal freestream axis = +X")
+			.arg(finest, 0, 'g', 5).arg(refinement).arg(config.amr.brick_size)
+			.arg(brick_width, 0, 'g', 5));
+	}
+
 	bool MainWindow::loadStepFile(const QString& path, bool noslip)
 	{
 		shutdownParagliderWorker();
@@ -1661,6 +1744,15 @@ namespace paracfd::gui
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
 		if (building_group_) building_group_->setVisible(false);
+		if (paraglider_group_) paraglider_group_->setVisible(true);
+		// A paraglider session starts at the external-aero default, not the inherited
+		// low-speed channel recipe. The user can still change it before rebuilding.
+		if (u_spin_)
+		{
+			const QSignalBlocker blocker(u_spin_);
+			u_spin_->setValue(paracfd::core::ParagliderConfig{}.freestream.speed);
+		}
+		if (viewer_ && u_spin_) viewer_->setReferenceU(u_spin_->value());
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
 		centerline_mesh_ = paracfd::core::TriMesh{}; // a plain STEP is the mesh obstacle, not a centerline
 		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the mesh on load)
@@ -1672,8 +1764,9 @@ namespace paracfd::gui
 		// this domain. Keep the gizmo transform editable rather than installing an override.
 		if (viewer_ && viewer_->hasModelPlacement())
 		{
-			const paracfd::core::DomainConfig margins;
-			const paracfd::core::AmrConfig amr_defaults;
+			const paracfd::core::ParagliderConfig initial_config = paragliderConfigFromUi();
+			const paracfd::core::DomainConfig& margins = initial_config.domain;
+			const paracfd::core::AmrConfig& amr_defaults = initial_config.amr;
 			const paracfd::core::TriMesh initially_placed=paracfd::core::placed_mesh(model_mesh_,viewer_->modelPlacement());
 			const double base_brick_width=amr_defaults.base_cell_size*amr_defaults.brick_size;
 			const double requested_y=(initially_placed.bbox_max[1]-initially_placed.bbox_min[1])+2.0*margins.lateral_margin;
@@ -1712,8 +1805,19 @@ namespace paracfd::gui
 
 	void MainWindow::buildParagliderPreviewGrid()
 	{
-		using namespace paracfd::core;if(model_mesh_.empty()||!viewer_)return;
-		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());TriangleBvh bvh(wing);ParagliderConfig cfg;if(u_spin_)cfg.freestream.speed=u_spin_->value();const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);std::unique_ptr<ExternalAeroCore> external_core;try{external_core=std::make_unique<ExternalAeroCore>(wing,bvh,cfg);}catch(const std::exception& e){statusBar()->showMessage(QString("paraglider CFD grid failed: %1").arg(e.what()),12000);std::fprintf(stderr,"[paraglider-preview] external core failed: %s\n",e.what());if(start_btn_){start_btn_->setEnabled(false);start_btn_->setText("CFD grid failed");}return;}const AmrHierarchy& amr=external_core->hierarchy();
+		using namespace paracfd::core;
+		if(model_mesh_.empty()||!viewer_)return;
+		shutdownParagliderWorker();
+		sim_started_ = false;
+		if (play_btn_) { play_btn_->setChecked(false); play_btn_->setEnabled(false); }
+		if (step_btn_) step_btn_->setEnabled(false);
+		if (start_btn_) { start_btn_->setEnabled(false); start_btn_->setText("Building CFD grid..."); }
+		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());
+		TriangleBvh bvh(wing);
+		const ParagliderConfig cfg=paragliderConfigFromUi();
+		const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);
+		std::unique_ptr<ExternalAeroCore> external_core;
+		try{external_core=std::make_unique<ExternalAeroCore>(wing,bvh,cfg);}catch(const std::exception& e){statusBar()->showMessage(QString("paraglider CFD grid failed: %1").arg(e.what()),12000);std::fprintf(stderr,"[paraglider-preview] external core failed: %s\n",e.what());if(start_btn_){start_btn_->setEnabled(false);start_btn_->setText("CFD grid failed");}return;}const AmrHierarchy& amr=external_core->hierarchy();
 		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0,pressure_static=0;
 		for(const AmrLevel& level:amr.levels())for(int brick_id=0;brick_id<(int)level.bricks.size();++brick_id)
 		{
@@ -1739,6 +1843,7 @@ namespace paracfd::gui
 	{
 		shutdownParagliderWorker();
 		if (building_group_) building_group_->setVisible(true);
+		if (paraglider_group_) paraglider_group_->setVisible(false);
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
 		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
@@ -2230,11 +2335,11 @@ namespace paracfd::gui
 			viewer_->setTriangleDeltaCp(snapshot.delta_cp, snapshot.cp_min, snapshot.cp_max);
 		if (status_)
 		{
-			status_->setText(QString("step %1   t = %2 s   dt = %3 ms   GPU %4 ms   pressure %5 ms / %6 it / r=%7%8")
+			status_->setText(QString("step %1   t = %2 s   dt = %3 ms   CFL %4   GPU %5 ms   pressure %6 ms / %7 it / r=%8%9")
 				.arg(snapshot.steps).arg(snapshot.physical_time, 0, 'f', 3)
-				.arg(snapshot.dt * 1e3, 0, 'f', 2).arg(snapshot.step_ms, 0, 'f', 1)
-				.arg(snapshot.projection_ms, 0, 'f', 1).arg(snapshot.pressure_iterations)
-				.arg(snapshot.residual, 0, 'g', 3)
+				.arg(snapshot.dt * 1e3, 0, 'f', 2).arg(snapshot.effective_cfl, 0, 'f', 2)
+				.arg(snapshot.step_ms, 0, 'f', 1).arg(snapshot.projection_ms, 0, 'f', 1)
+				.arg(snapshot.pressure_iterations).arg(snapshot.residual, 0, 'g', 3)
 				.arg(snapshot.converged ? "" : "  NOT CONVERGED"));
 		}
 		last_steps_ = snapshot.steps;
@@ -2258,6 +2363,21 @@ namespace paracfd::gui
 					.arg(snapshot.cl_pressure, 0, 'f', 4);
 			else
 				text += "\n  coefficients withheld: reference area not set";
+			text += QString("\n  max velocity: regular %1 / compact EB %2 m/s"
+				"\n  persistent GPU estimate: %3 MiB")
+				.arg(snapshot.max_abs_regular_velocity, 0, 'g', 5)
+				.arg(snapshot.max_abs_special_velocity, 0, 'g', 5)
+				.arg(snapshot.gpu_bytes / (1024.0 * 1024.0), 0, 'f', 1);
+			if (snapshot.conservation_valid)
+				text += QString("\n  divergence max/RMSV: %1 / %2 1/s"
+					"\n  flux error max/sum/net: %3 / %4 / %5 m³/s")
+					.arg(snapshot.max_abs_divergence, 0, 'g', 3)
+					.arg(snapshot.volume_weighted_rms_divergence, 0, 'g', 3)
+					.arg(snapshot.max_integrated_flux_error, 0, 'g', 3)
+					.arg(snapshot.absolute_integrated_flux_error, 0, 'g', 3)
+					.arg(snapshot.net_integrated_flux_error, 0, 'g', 3);
+			if (snapshot.max_abs_special_velocity > std::max(50.0, 3.0 * snapshot.max_abs_regular_velocity))
+				text += "\n  WARNING: compact EB velocity hotspot; loads are not trustworthy";
 			text += "\n  pressure-only: skin friction is not implemented";
 			load_readout_->setText(text);
 		}

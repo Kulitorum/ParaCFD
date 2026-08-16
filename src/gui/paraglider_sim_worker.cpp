@@ -27,9 +27,19 @@ namespace paracfd::gui
 		out.step_ms = snapshot_.step_ms;
 		out.projection_ms = snapshot_.projection_ms;
 		out.residual = snapshot_.residual;
+		out.max_abs_regular_velocity = snapshot_.max_abs_regular_velocity;
+		out.max_abs_special_velocity = snapshot_.max_abs_special_velocity;
+		out.effective_cfl = snapshot_.effective_cfl;
 		out.pressure_iterations = snapshot_.pressure_iterations;
 		out.initialized = snapshot_.initialized;
 		out.converged = snapshot_.converged;
+		out.conservation_valid = snapshot_.conservation_valid;
+		out.max_abs_divergence = snapshot_.max_abs_divergence;
+		out.volume_weighted_rms_divergence = snapshot_.volume_weighted_rms_divergence;
+		out.max_integrated_flux_error = snapshot_.max_integrated_flux_error;
+		out.absolute_integrated_flux_error = snapshot_.absolute_integrated_flux_error;
+		out.net_integrated_flux_error = snapshot_.net_integrated_flux_error;
+		out.gpu_bytes = snapshot_.gpu_bytes;
 		out.error = snapshot_.error;
 		out.cp_min = snapshot_.cp_min;
 		out.cp_max = snapshot_.cp_max;
@@ -52,10 +62,12 @@ namespace paracfd::gui
 		std::vector<float> delta_cp;
 		float cp_min = 0.0f, cp_max = 0.0f;
 		paracfd::core::AerodynamicLoads loads;
+		paracfd::core::ExternalAeroConservationStats conservation;
 		const bool have_surface = include_surface && stats.pressure.converged;
 		if (have_surface)
 		{
 			loads = core_->pressure_loads();
+			conservation = core_->conservation_stats();
 			delta_cp.resize(loads.triangles.size());
 			float maximum = 0.0f;
 			for (std::size_t triangle = 0; triangle < loads.triangles.size(); ++triangle)
@@ -77,6 +89,10 @@ namespace paracfd::gui
 		snapshot_.projection_ms = stats.projection_ms;
 		snapshot_.pressure_iterations = stats.pressure.iterations;
 		snapshot_.residual = stats.pressure.relative_residual;
+		snapshot_.max_abs_regular_velocity = stats.max_abs_regular_velocity;
+		snapshot_.max_abs_special_velocity = stats.max_abs_special_velocity;
+		snapshot_.effective_cfl = stats.effective_cfl;
+		snapshot_.gpu_bytes = core_->gpu_bytes();
 		snapshot_.initialized = core_->initialized();
 		snapshot_.converged = stats.pressure.converged;
 		snapshot_.error.clear();
@@ -90,6 +106,12 @@ namespace paracfd::gui
 			snapshot_.cd_pressure = loads.cd_pressure;
 			snapshot_.cs_pressure = loads.cs_pressure;
 			snapshot_.cl_pressure = loads.cl_pressure;
+			snapshot_.conservation_valid = true;
+			snapshot_.max_abs_divergence = conservation.max_abs_divergence;
+			snapshot_.volume_weighted_rms_divergence = conservation.volume_weighted_rms_divergence;
+			snapshot_.max_integrated_flux_error = conservation.max_integrated_flux_error;
+			snapshot_.absolute_integrated_flux_error = conservation.absolute_integrated_flux_error;
+			snapshot_.net_integrated_flux_error = conservation.net_integrated_flux_error;
 			++snapshot_.surface_generation;
 		}
 		++snapshot_.generation;

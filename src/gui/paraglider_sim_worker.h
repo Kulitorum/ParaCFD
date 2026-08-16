@@ -19,8 +19,14 @@ namespace paracfd::gui
 		std::uint64_t surface_generation = 0;
 		long long steps = 0;
 		double physical_time = 0,dt = 0,step_ms = 0,projection_ms = 0,residual = 0;
+		double max_abs_regular_velocity = 0,max_abs_special_velocity = 0,effective_cfl = 0;
 		int pressure_iterations = 0;
 		bool initialized = false,converged = false;
+		bool conservation_valid = false;
+		double max_abs_divergence = 0,volume_weighted_rms_divergence = 0;
+		double max_integrated_flux_error = 0,absolute_integrated_flux_error = 0;
+		double net_integrated_flux_error = 0;
+		std::size_t gpu_bytes = 0;
 		std::string error;
 		std::vector<float> delta_cp;
 		float cp_min = -1,cp_max = 1;
