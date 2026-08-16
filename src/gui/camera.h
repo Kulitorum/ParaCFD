@@ -18,7 +18,7 @@ namespace paracfd::gui
 		void setTarget(const QVector3D& t) { target_ = t; }
 		void setDistance(float d) { distance_ = std::max(1e-3f, d); }
 		void setViewport(int w, int h) { width_ = std::max(1, w); height_ = std::max(1, h); }
-		void setOrientation(float azimuth_degrees,float elevation_degrees){azimuth_=azimuth_degrees;elevation_=std::clamp(elevation_degrees,-89.0f,89.0f);panx_=pany_=0.0f;}
+		void setOrientation(float azimuth_degrees,float elevation_degrees){azimuth_=azimuth_degrees;elevation_=std::clamp(elevation_degrees,-90.0f,90.0f);panx_=pany_=0.0f;}
 
 		// Frame a domain [0,Lx]x[0,Ly]x[0,Lz]: target its centre, back off to fit.
 		void frameDomain(float Lx, float Ly, float Lz)
@@ -84,7 +84,10 @@ namespace paracfd::gui
 		QMatrix4x4 view() const
 		{
 			QMatrix4x4 m;
-			m.lookAt(eye(), effectiveTarget(), QVector3D(0, 0, 1));
+			const QVector3D fwd=forward();
+			const QVector3D up=std::abs(QVector3D::dotProduct(fwd,QVector3D(0,0,1)))>0.999f
+				?QVector3D(0,1,0):QVector3D(0,0,1);
+			m.lookAt(eye(), effectiveTarget(), up);
 			return m;
 		}
 

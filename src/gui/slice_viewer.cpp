@@ -271,8 +271,12 @@ void main()
 
 	void SliceViewer::setArrowMode3D(bool three_d)
 	{
-		if (arrow_3d_ == three_d) return;
-		arrow_3d_ = three_d;
+		setArrowMode(three_d?0:1);
+	}
+
+	void SliceViewer::setArrowMode(int mode)
+	{
+		mode=std::clamp(mode,0,2);if(arrow_mode_==mode)return;arrow_mode_=mode;arrow_3d_=mode==0;
 		arrows_.reset(); // 2D<->3D changes the seeding domain, respawn all
 		update();
 	}
@@ -357,6 +361,18 @@ void main()
 		if(!have_info_)return;camera_.frameDomain((float)info_.Lx,(float)info_.Ly,(float)info_.Lz);camera_.setOrientation(90.0f,0.0f);update();
 	}
 
+	void SliceViewer::frameSliceView()
+	{
+		if(!have_info_)return;
+		QVector3D lo(0,0,0),hi((float)info_.Lx,(float)info_.Ly,(float)info_.Lz);
+		const int a=(int)axis_;const float L=a==0?(float)info_.Lx:a==1?(float)info_.Ly:(float)info_.Lz;
+		lo[a]=hi[a]=plane_frac_*L;camera_.frameBounds(lo,hi,1.15f);
+		if(axis_==Axis::X)camera_.setOrientation(0,0);
+		else if(axis_==Axis::Y)camera_.setOrientation(90,0);
+		else camera_.setOrientation(0,90);
+		update();
+	}
+
 	bool SliceViewer::frameWingView()
 	{
 		if(!gz_valid_)return false;
@@ -418,11 +434,13 @@ void main()
 	void SliceViewer::setDefaultPlane()
 	{
 		plane_frac_ = 0.5f;
+		if(clip_follows_slice_){clip_mode_=(int)axis_;clip_frac_=plane_frac_;}
 	}
 
 	void SliceViewer::setPlaneFraction(float frac)
 	{
 		plane_frac_ = std::min(1.0f, std::max(0.0f, frac));
+		if(clip_follows_slice_)clip_frac_=plane_frac_;
 		geometry_dirty_ = true;
 		grid_dirty_ = true; // the grid overlay lives on the plane → moves with it
 		update();
@@ -1183,7 +1201,8 @@ void main()
 		else dt = (float)(arrow_clock_.restart() / 1000.0);
 
 		ArrowView view;
-		view.three_d = arrow_3d_;
+		view.three_d = arrow_mode_==0;
+		view.static_grid = arrow_mode_==2;
 		view.axis = (int)axis_;
 		{
 			float L = (axis_ == Axis::X) ? (float)info_.Lx : (axis_ == Axis::Y) ? (float)info_.Ly : (float)info_.Lz;
@@ -1211,7 +1230,8 @@ void main()
 		if (!arrows_logged_)
 		{
 			arrows_logged_ = true;
-			std::fprintf(stderr, "[viewer] flow arrows live: %d particles, %s mode\n", n, arrow_3d_ ? "3D" : "2D");
+			const char* mode=arrow_mode_==0?"3D":arrow_mode_==1?"2D":"static-grid";
+			std::fprintf(stderr, "[viewer] flow arrows live: %d particles, %s mode\n", n, mode);
 		}
 
 		glBindVertexArray(arrow_vao_);
@@ -1236,7 +1256,7 @@ void main()
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		// Slice-plane arrows are an annotation overlay. With depth testing enabled, the plane/model
 		// can cut a billboarded glyph in half. Volume arrows retain ordinary 3D occlusion.
-		const bool slice_overlay = !arrow_3d_;
+		const bool slice_overlay = arrow_mode_!=0;
 		if (slice_overlay) glDisable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE); // blend arrows without writing into the depth buffer
 		arrow_prog_.bind();
@@ -1248,7 +1268,7 @@ void main()
 		// solid WHITE for contrast (reads over any colormap stop); when the slice is hidden, colour
 		// them by speed (matches the legend) so they stay informative against the dark background.
 		arrow_prog_.setUniformValue("uColorMode", show_slice_ ? 1 : 0);
-		arrow_prog_.setUniformValue("uSolidColor", QVector3D(1.0f, 1.0f, 1.0f));
+		arrow_prog_.setUniformValue("uSolidColor", arrow_mode_==2?QVector3D(0.03f,0.04f,0.05f):QVector3D(1.0f,1.0f,1.0f));
 		glBindVertexArray(arrow_vao_);
 		glDrawArraysInstanced(GL_TRIANGLES, 0, arrow_glyph_verts_, arrow_draw_count_);
 		glBindVertexArray(0);
@@ -2066,7 +2086,7 @@ void main()
 
 		// Clip-plane visualisation (translucent quad + outline showing where the cut is). Drawn with the
 		// clip test OFF so the plane itself is not clipped; only shown while the feature is enabled.
-		if (clip_enabled_) drawClipPlaneViz(mvp, clipPlane);
+		if (clip_enabled_&&!clip_follows_slice_) drawClipPlaneViz(mvp, clipPlane);
 
 		// Animated flow arrows (drawn last: blended, no depth write). Never clipped (flow stays visible).
 		drawArrows(mvp);

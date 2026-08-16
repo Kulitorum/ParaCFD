@@ -104,6 +104,39 @@ namespace paracfd::gui
 		float Lx = (float)g.Lx(), Ly = (float)g.Ly(), Lz = (float)g.Lz();
 		const float eps = 1e-6f;
 
+		if(view.static_grid)
+		{
+			const float extent_u=view.axis==0?Ly:Lx;
+			const float extent_v=view.axis==2?Ly:Lz;
+			const float aspect=extent_v>eps?extent_u/extent_v:1.0f;
+			const int columns=std::max(1,(int)std::lround(std::sqrt(count_*std::max(aspect,eps))));
+			const int rows=std::max(1,count_/columns);
+			const int visible=std::min(count_,columns*rows);
+			const float inv_scale=view.speed_scale>eps?1.0f/view.speed_scale:1.0f;
+			for(int k=0;k<count_;++k)
+			{
+				float x=0,y=0,z=0;
+				if(k<visible)
+				{
+					const int a=k%columns,b=k/columns;
+					const float u=(a+0.5f)*extent_u/columns,v=(b+0.5f)*extent_v/rows;
+					if(view.axis==0){x=view.plane_pos;y=u;z=v;}
+					else if(view.axis==1){x=u;y=view.plane_pos;z=v;}
+					else{x=u;y=v;z=view.plane_pos;}
+				}
+				double vx=0,vy=0,vz=0;
+				if(k<visible)sample(f,x,y,z,vx,vy,vz);
+				if(view.axis==0)vx=0;else if(view.axis==1)vy=0;else vz=0;
+				const double speed=std::sqrt(vx*vx+vy*vy+vz*vz);
+				float* o=&inst_[(size_t)k*8];o[0]=x;o[1]=y;o[2]=z;
+				if(speed>1e-5){o[3]=(float)(vx/speed);o[4]=(float)(vy/speed);o[5]=(float)(vz/speed);}
+				else{o[3]=o[4]=o[5]=0;}
+				o[6]=std::clamp((float)speed*inv_scale,0.0f,1.0f);o[7]=k<visible?1.0f:0.0f;
+			}
+			needs_reset_=false;
+			return;
+		}
+
 		if (needs_reset_)
 		{
 			for (int k = 0; k < count_; ++k) spawn(k, view, f, true);

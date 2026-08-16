@@ -44,6 +44,7 @@ namespace paracfd::gui
 	struct ArrowView
 	{
 		bool three_d = true;     // false ⇒ constrain to the slice plane (2D)
+		bool static_grid = false; // true ⇒ deterministic vector glyph lattice; no visual advection
 		int axis = 2;            // slice normal (Axis: 0=X,1=Y,2=Z) — used only in 2D
 		float plane_pos = 0.0f;  // world coord [m] of the plane along `axis` (2D)
 		float speed_scale = 1.0f; // |vel| that maps to the hot end of the ramp [m/s]

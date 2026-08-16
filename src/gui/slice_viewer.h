@@ -49,6 +49,7 @@ namespace paracfd::gui
 		// a correctly placed wing look small and off-centre.
 		void frameDomainView();
 		void frameThinYDebugView();
+		void frameSliceView();
 		bool frameWingView();
 		void setThinDebugState(bool enabled,int layers){thin_debug_=enabled;thin_debug_layers_=layers;update();}
 		void setSimulationStep(long long step){simulation_step_=step;update();}
@@ -62,7 +63,7 @@ namespace paracfd::gui
 
 		// Live view controls (main thread).
 		void setField(Field f) { field_ = f; updateRange(); range_valid_ = false; update(); }
-		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); updateSliceResolution(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
+		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); if(clip_follows_slice_){clip_mode_=(int)axis_;clip_frac_=plane_frac_;} updateSliceResolution(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
 		void setPlaneFraction(float frac); // 0..1 along the current axis
 
 		// Auto colour-range: when ON (default) the slice colormap, legend and arrow speed scale follow
@@ -94,12 +95,14 @@ namespace paracfd::gui
 		void setClipMode(int m) { clip_mode_ = (m < 0) ? 0 : (m > 3 ? 3 : m); update(); } // 0=X 1=Y 2=Z 3=Camera
 		void setClipFraction(float f) { clip_frac_ = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); update(); }
 		void setClipFlip(bool on) { clip_flip_ = on; update(); }
+		void setClipAtSlice(bool on){clip_follows_slice_=on;clip_enabled_=on;if(on){clip_mode_=(int)axis_;clip_frac_=plane_frac_;clip_flip_=false;}update();}
 		bool clipEnabled() const { return clip_enabled_; }
 		int clipMode() const { return clip_mode_; }
 
 		// --- Flow arrows (features 4 + 5) ----------------------------------------
 		void setShowArrows(bool on);
 		void setArrowMode3D(bool three_d); // false ⇒ arrows live on the current slice plane
+		void setArrowMode(int mode);       // 0=animated 3D, 1=animated 2D, 2=static 2D vector grid
 		void setArrowDensity(int n);       // particle count (applied live)
 		// Visual advection-speed multiplier in [0,1] (1 = the default lively motion, 0 = frozen). Scales
 		// ONLY the tracer animation so fast currents (e.g. 8 m/s) don't whip the arrows about — physics
@@ -109,6 +112,7 @@ namespace paracfd::gui
 		void setArrowSizeMult(float m) { arrow_size_ = m < 0.05f ? 0.05f : (m > 3.0f ? 3.0f : m); update(); }
 		bool showArrows() const { return show_arrows_; }
 		bool arrowMode3D() const { return arrow_3d_; }
+		int arrowMode() const{return arrow_mode_;}
 		int arrowDensity() const { return arrow_density_; }
 		float arrowSpeedMult() const { return arrow_speed_mult_; }
 		float arrowSizeMult() const { return arrow_size_; }
@@ -354,6 +358,7 @@ namespace paracfd::gui
 		// sweeps the plane (axis position, or view-depth about the camera target); clip_flip_ swaps the
 		// hidden side. clip_vao_/vbo_ hold the translucent plane-visualisation quad (4 corners, per-paint).
 		bool clip_enabled_ = false;
+		bool clip_follows_slice_ = false;
 		int clip_mode_ = 2;       // default Z-normal
 		float clip_frac_ = 0.5f;
 		bool clip_flip_ = false;
@@ -380,7 +385,8 @@ namespace paracfd::gui
 		// Flow-arrow field (features 4+5). Instanced unit-arrow glyph + per-particle instance VBO.
 		FlowParticles arrows_;
 		bool show_arrows_ = true;
-		bool arrow_3d_ = true;         // 3D volume advection vs 2D on the slice plane
+		bool arrow_3d_ = true;         // compatibility query for 3D volume vs either 2D mode
+		int arrow_mode_ = 0;           // 0 animated volume, 1 animated slice, 2 static vector lattice
 		int arrow_density_ = 1500;     // particle count
 		float arrow_speed_mult_ = 1.0f; // visual advection-speed multiplier [0,1] (1 = default, 0 = frozen)
 		float arrow_size_ = 0.5f;       // uniform length/width scale; default compact to declutter
