@@ -347,10 +347,15 @@ namespace paracfd::gui
 		pg_pressure_iterations_spin_=new QSpinBox;pg_pressure_iterations_spin_->setRange(20,5000);pg_pressure_iterations_spin_->setSingleStep(50);pg_pressure_iterations_spin_->setValue(pgDefaults.solver.projection_max_iterations);
 		pg_reference_area_spin_=new QDoubleSpinBox;pg_reference_area_spin_->setRange(0,10000);pg_reference_area_spin_->setDecimals(3);pg_reference_area_spin_->setSingleStep(0.5);pg_reference_area_spin_->setSuffix(" m²");pg_reference_area_spin_->setToolTip("Set zero to withhold CL/CD/CS; ParaCFD does not invent a paraglider reference area.");
 		pg_reference_length_spin_=new QDoubleSpinBox;pg_reference_length_spin_->setRange(0,1000);pg_reference_length_spin_->setDecimals(3);pg_reference_length_spin_->setSingleStep(0.1);pg_reference_length_spin_->setSuffix(" m");
+		pg_surface_colour_box_=new QComboBox;
+		pg_surface_colour_box_->addItems({"Visible side (Cp+ / Cp-)",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});
+		pg_surface_colour_box_->setCurrentIndex(1);
+		pg_surface_colour_box_->setToolTip("Triangle winding defines the plus normal. Visible-side mode colours front faces by Cp+ and back faces by Cp-; reversing winding swaps the labels but not the physical pressure force.");
+		connect(pg_surface_colour_box_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){applyParagliderSurfaceColour();});
 		pgForm->addRow("Air density rho",pg_rho_spin_);pgForm->addRow("Kinematic nu",pg_nu_spin_);
 		pgForm->addRow("Upstream margin",pg_upstream_spin_);pgForm->addRow("Downstream margin",pg_downstream_spin_);pgForm->addRow("Lateral margin",pg_lateral_spin_);pgForm->addRow("Vertical margin",pg_vertical_spin_);
 		pgForm->addRow("Base cell size",pg_base_h_spin_);pgForm->addRow("AMR levels",pg_levels_spin_);pgForm->addRow("Wing refine distance",pg_wing_refine_spin_);pgForm->addRow("Surface finest distance",pg_surface_refine_spin_);pgForm->addRow("Wake length",pg_wake_length_spin_);pgForm->addRow("Wake radius",pg_wake_radius_spin_);
-		pgForm->addRow("CFL",pg_cfl_spin_);pgForm->addRow("Smagorinsky Cs",pg_cs_spin_);pgForm->addRow("Projection tolerance",pg_pressure_tolerance_spin_);pgForm->addRow("Pressure max iterations",pg_pressure_iterations_spin_);pgForm->addRow("Reference area",pg_reference_area_spin_);pgForm->addRow("Reference length",pg_reference_length_spin_);
+		pgForm->addRow("CFL",pg_cfl_spin_);pgForm->addRow("Smagorinsky Cs",pg_cs_spin_);pgForm->addRow("Projection tolerance",pg_pressure_tolerance_spin_);pgForm->addRow("Pressure max iterations",pg_pressure_iterations_spin_);pgForm->addRow("Reference area",pg_reference_area_spin_);pgForm->addRow("Reference length",pg_reference_length_spin_);pgForm->addRow("Canopy colour",pg_surface_colour_box_);
 		pgCol->addLayout(pgForm);
 		pg_grid_readout_=new QLabel;pg_grid_readout_->setWordWrap(true);pg_grid_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#bcd;");pgCol->addWidget(pg_grid_readout_);
 		col->addWidget(pgGroup);
@@ -2313,6 +2318,8 @@ namespace paracfd::gui
 		shutdownParagliderWorker();
 		paraglider_snapshot_generation_ = 0;
 		paraglider_surface_generation_ = 0;
+		paraglider_cp_plus_.clear();paraglider_cp_minus_.clear();paraglider_delta_cp_.clear();
+		if(viewer_)viewer_->clearTriangleSurfaceColouring();
 		paraglider_worker_ = new ParagliderSimWorker(std::move(core));
 		if (viewer_) viewer_->setParagliderWorker(paraglider_worker_);
 		paraglider_worker_->setPlaying(sim_started_ && play_btn_ && play_btn_->isChecked());
@@ -2342,6 +2349,16 @@ namespace paracfd::gui
 		paraglider_surface_generation_ = 0;
 	}
 
+	void MainWindow::applyParagliderSurfaceColour()
+	{
+		if(!viewer_||paraglider_delta_cp_.empty())return;
+		const int mode=pg_surface_colour_box_?pg_surface_colour_box_->currentIndex():1;
+		if(mode==0)viewer_->setTriangleSurfaceCp(paraglider_cp_plus_,paraglider_cp_minus_,-paraglider_side_cp_range_,paraglider_side_cp_range_);
+		else if(mode==2)viewer_->setTriangleSurfaceCp(paraglider_cp_plus_,paraglider_cp_plus_,-paraglider_side_cp_range_,paraglider_side_cp_range_);
+		else if(mode==3)viewer_->setTriangleSurfaceCp(paraglider_cp_minus_,paraglider_cp_minus_,-paraglider_side_cp_range_,paraglider_side_cp_range_);
+		else viewer_->setTriangleSurfaceCp(paraglider_delta_cp_,paraglider_delta_cp_,-paraglider_delta_cp_range_,paraglider_delta_cp_range_);
+	}
+
 	void MainWindow::updateParagliderReadout()
 	{
 		if (!paraglider_worker_) return;
@@ -2362,8 +2379,15 @@ namespace paracfd::gui
 			if (status_) status_->setText("initializing paraglider pressure field on GPU...");
 			return;
 		}
-		if (!snapshot.delta_cp.empty() && viewer_)
-			viewer_->setTriangleDeltaCp(snapshot.delta_cp, snapshot.cp_min, snapshot.cp_max);
+		if (!snapshot.delta_cp.empty())
+		{
+			paraglider_cp_plus_=std::move(snapshot.cp_plus);
+			paraglider_cp_minus_=std::move(snapshot.cp_minus);
+			paraglider_delta_cp_=std::move(snapshot.delta_cp);
+			paraglider_delta_cp_range_=std::max(std::abs(snapshot.cp_min),std::abs(snapshot.cp_max));
+			paraglider_side_cp_range_=std::max(std::abs(snapshot.side_cp_min),std::abs(snapshot.side_cp_max));
+			applyParagliderSurfaceColour();
+		}
 		if (status_)
 		{
 			status_->setText(QString("step %1   t = %2 s   dt = %3 ms   CFL %4   GPU %5 ms   pressure %6 ms / %7 it / r=%8%9")

@@ -88,8 +88,9 @@ in vec3 vColor;
 uniform vec3 uEye;
 uniform vec4 uBaseColor;
 uniform int  uUseVertexColor; // 0 = flat uBaseColor (STEP model / uniform voxels); !=0 = per-vertex Cp colour
-uniform int  uUseTriangleColor; // STEP surface: gl_PrimitiveID -> per-triangle Cp SSBO
-layout(std430, binding=3) readonly buffer TriangleColours { vec4 uTriangleColor[]; };
+uniform int  uUseTriangleColor; // STEP surface: gl_PrimitiveID -> per-triangle, per-side Cp SSBO
+struct TriangleSideColour { vec4 plus; vec4 minus; };
+layout(std430, binding=3) readonly buffer TriangleColours { TriangleSideColour uTriangleColor[]; };
 out vec4 fragColor;
 void main()
 {
@@ -97,8 +98,12 @@ void main()
 	vec3 L = normalize(uEye - vWorld);
 	float diff = max(abs(dot(N, L)), 0.0); // two-sided
 	float ambient = 0.28;
-	vec3 base = (uUseTriangleColor != 0) ? uTriangleColor[gl_PrimitiveID].rgb :
-		((uUseVertexColor != 0) ? vColor : uBaseColor.rgb);
+	vec3 base;
+	if (uUseTriangleColor != 0)
+		base = gl_FrontFacing ? uTriangleColor[gl_PrimitiveID].plus.rgb :
+			uTriangleColor[gl_PrimitiveID].minus.rgb;
+	else
+		base = (uUseVertexColor != 0) ? vColor : uBaseColor.rgb;
 	vec3 c = base * (ambient + 0.72 * diff);
 	fragColor = vec4(c, uBaseColor.a);
 }
@@ -580,20 +585,30 @@ void main()
 		emit modelPlacementChanged();
 	}
 
-	void SliceViewer::setTriangleDeltaCp(const std::vector<float>& values, float range_min, float range_max)
+	void SliceViewer::setTriangleSurfaceCp(const std::vector<float>& plus_values,
+		const std::vector<float>& minus_values, float range_min, float range_max)
 	{
 		if (!(range_max > range_min)) { range_min = -1.0f; range_max = 1.0f; }
-		mesh_triangle_colours_.resize(values.size() * 4);
-		const float span = range_max - range_min;
-		for (std::size_t triangle = 0; triangle < values.size(); ++triangle)
+		if (plus_values.size() != minus_values.size())
 		{
-			float r = 0.5f, g = 0.5f, b = 0.5f;
-			const float cp = values[triangle];
-			if (std::isfinite(cp)) scour_colormap((cp - range_min) / span, r, g, b);
-			mesh_triangle_colours_[4 * triangle + 0] = r;
-			mesh_triangle_colours_[4 * triangle + 1] = g;
-			mesh_triangle_colours_[4 * triangle + 2] = b;
-			mesh_triangle_colours_[4 * triangle + 3] = 1.0f;
+			clearTriangleSurfaceColouring();
+			return;
+		}
+		mesh_triangle_colours_.resize(plus_values.size() * 8);
+		const float span = range_max - range_min;
+		for (std::size_t triangle = 0; triangle < plus_values.size(); ++triangle)
+		{
+			for (std::size_t side = 0; side < 2; ++side)
+			{
+				float r = 0.5f, g = 0.5f, b = 0.5f;
+				const float cp = side == 0 ? plus_values[triangle] : minus_values[triangle];
+				if (std::isfinite(cp)) scour_colormap((cp - range_min) / span, r, g, b);
+				const std::size_t offset = 8 * triangle + 4 * side;
+				mesh_triangle_colours_[offset + 0] = r;
+				mesh_triangle_colours_[offset + 1] = g;
+				mesh_triangle_colours_[offset + 2] = b;
+				mesh_triangle_colours_[offset + 3] = 1.0f;
+			}
 		}
 		mesh_triangle_colour_upload_pending_ = true;
 		update();
@@ -1881,7 +1896,7 @@ void main()
 		if (!gl_ready_ || !mesh_triangle_colour_upload_pending_) return;
 		mesh_triangle_colour_upload_pending_ = false;
 		has_mesh_triangle_colours_ = has_mesh_ && mesh_index_count_ > 0 &&
-			mesh_triangle_colours_.size() == static_cast<std::size_t>(mesh_index_count_ / 3) * 4;
+			mesh_triangle_colours_.size() == static_cast<std::size_t>(mesh_index_count_ / 3) * 8;
 		glBindBuffer(GL_SHADER_STORAGE_BUFFER, mesh_triangle_colour_ssbo_);
 		if (has_mesh_triangle_colours_)
 			glBufferData(GL_SHADER_STORAGE_BUFFER, mesh_triangle_colours_.size() * sizeof(float), mesh_triangle_colours_.data(), GL_DYNAMIC_DRAW);

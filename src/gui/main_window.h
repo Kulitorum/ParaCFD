@@ -169,6 +169,7 @@ namespace paracfd::gui
 		// (Cd/Cl/Cs + Cp range). Called on the repaint tick; no-op until a building's loads are published.
 		void updateWindLoadReadout();
 		void updateParagliderReadout();
+		void applyParagliderSurfaceColour();
 
 		void shutdownWorker();
 		void shutdownParagliderWorker();
@@ -257,6 +258,7 @@ namespace paracfd::gui
 		QDoubleSpinBox *pg_cfl_spin_ = nullptr, *pg_cs_spin_ = nullptr,
 			*pg_pressure_tolerance_spin_ = nullptr, *pg_reference_area_spin_ = nullptr,
 			*pg_reference_length_spin_ = nullptr;
+		QComboBox* pg_surface_colour_box_ = nullptr;
 		QLabel* pg_grid_readout_ = nullptr;
 		QComboBox* inlet_profile_box_ = nullptr; // inlet profile: uniform (top-hat) ↔ boundary-layer (log-law)
 		QComboBox* fast_sim_box_ = nullptr;      // "Fast sim": graphics-update throttle (Off / 0.5 / 1 / 3 s / paused)
@@ -328,6 +330,8 @@ namespace paracfd::gui
 		QThread* paraglider_thread_ = nullptr;
 		std::uint64_t paraglider_snapshot_generation_ = 0;
 		std::uint64_t paraglider_surface_generation_ = 0;
+		std::vector<float> paraglider_cp_plus_,paraglider_cp_minus_,paraglider_delta_cp_;
+		float paraglider_delta_cp_range_=1.0f,paraglider_side_cp_range_=1.0f;
 		QLabel* status_ = nullptr;
 		QLabel* fps_label_ = nullptr;
 		SimRecipe recipe_;

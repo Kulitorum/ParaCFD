@@ -161,10 +161,12 @@ namespace paracfd::gui
 		void setMesh(paracfd::core::TriMesh mesh);
 		void clearMesh();
 		bool hasMesh() const { return has_mesh_; }
-		// Colour the actual STEP triangles by two-sided aerodynamic delta-Cp. Values are
-		// per source triangle (not per vertex), so shared CAD vertices never smear data
-		// across panel/rib edges. OpenGL gl_PrimitiveID indexes an SSBO at draw time.
-		void setTriangleDeltaCp(const std::vector<float>& delta_cp, float range_min, float range_max);
+		// Colour the actual STEP triangles by two-sided aerodynamic Cp. Values are per
+		// source triangle (not per vertex), so shared CAD vertices never smear data across
+		// panel/rib edges. The triangle's winding defines plus; front/back fragments select
+		// plus/minus from an OpenGL gl_PrimitiveID-indexed SSBO at draw time.
+		void setTriangleSurfaceCp(const std::vector<float>& plus_cp,
+			const std::vector<float>& minus_cp, float range_min, float range_max);
 		void clearTriangleSurfaceColouring();
 		// Static paraglider preprocessing overlay. Boxes are {xmin,ymin,zmin,xmax,ymax,zmax}
 		// in world metres. AMR bricks and EB/problem cells remain separate draw lists.
@@ -326,7 +328,7 @@ namespace paracfd::gui
 		bool mesh_upload_pending_ = false;
 		bool mesh_triangle_colour_upload_pending_ = false;
 		bool has_mesh_triangle_colours_ = false;
-		std::vector<float> mesh_triangle_colours_; // RGBA, one vec4 per source triangle
+		std::vector<float> mesh_triangle_colours_; // plus RGBA, minus RGBA per source triangle
 		paracfd::core::TriMesh pending_mesh_;
 		paracfd::core::TriMesh fabric_mesh_; // retained CPU source for tracer segment collision
 		std::unique_ptr<paracfd::core::TriangleBvh> fabric_bvh_;

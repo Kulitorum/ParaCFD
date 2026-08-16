@@ -31,8 +31,9 @@ namespace paracfd::gui
 		double net_integrated_flux_error = 0;
 		std::size_t gpu_bytes = 0;
 		std::string error;
-		std::vector<float> delta_cp;
+		std::vector<float> cp_plus,cp_minus,delta_cp;
 		float cp_min = -1,cp_max = 1;
+		float side_cp_min = -1,side_cp_max = 1;
 		paracfd::core::Vec3d pressure_force{};
 		bool coefficients_valid = false;
 		double cd_pressure = 0,cs_pressure = 0,cl_pressure = 0;

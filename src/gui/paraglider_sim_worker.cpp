@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <limits>
 
 namespace paracfd::gui
 {
@@ -132,7 +133,11 @@ namespace paracfd::gui
 		out.cl_pressure = snapshot_.cl_pressure;
 		if (snapshot_.surface_generation != surface_generation)
 		{
+			out.cp_plus = snapshot_.cp_plus;
+			out.cp_minus = snapshot_.cp_minus;
 			out.delta_cp = snapshot_.delta_cp;
+			out.side_cp_min = snapshot_.side_cp_min;
+			out.side_cp_max = snapshot_.side_cp_max;
 			surface_generation = snapshot_.surface_generation;
 		}
 		generation = snapshot_.generation;
@@ -141,8 +146,8 @@ namespace paracfd::gui
 
 	void ParagliderSimWorker::publish(const paracfd::core::ExternalAeroStepStats& stats,bool include_surface)
 	{
-		std::vector<float> delta_cp;
-		float cp_min = 0.0f, cp_max = 0.0f;
+		std::vector<float> cp_plus,cp_minus,delta_cp;
+		float cp_min = 0.0f, cp_max = 0.0f,side_cp_min=0.0f,side_cp_max=0.0f;
 		paracfd::core::AerodynamicLoads loads;
 		paracfd::core::ExternalAeroConservationStats conservation;
 		const bool have_surface = include_surface && stats.pressure.converged;
@@ -150,17 +155,24 @@ namespace paracfd::gui
 		{
 			loads = core_->pressure_loads();
 			conservation = core_->conservation_stats();
-			delta_cp.resize(loads.triangles.size());
-			float maximum = 0.0f;
+			const float missing=std::numeric_limits<float>::quiet_NaN();
+			cp_plus.assign(loads.triangles.size(),missing);
+			cp_minus.assign(loads.triangles.size(),missing);
+			delta_cp.assign(loads.triangles.size(),missing);
+			float maximum = 0.0f,side_maximum=0.0f;
 			for (std::size_t triangle = 0; triangle < loads.triangles.size(); ++triangle)
 			{
-				const double value = loads.triangles[triangle].delta_cp;
-				delta_cp[triangle] = std::isfinite(value) ? static_cast<float>(value) : 0.0f;
-				maximum = std::max(maximum, std::abs(delta_cp[triangle]));
+				const auto& source=loads.triangles[triangle];
+				if(std::isfinite(source.cp_plus)){cp_plus[triangle]=static_cast<float>(source.cp_plus);side_maximum=std::max(side_maximum,std::abs(cp_plus[triangle]));}
+				if(std::isfinite(source.cp_minus)){cp_minus[triangle]=static_cast<float>(source.cp_minus);side_maximum=std::max(side_maximum,std::abs(cp_minus[triangle]));}
+				if(std::isfinite(source.delta_cp)){delta_cp[triangle]=static_cast<float>(source.delta_cp);maximum=std::max(maximum,std::abs(delta_cp[triangle]));}
 			}
 			maximum = std::max(maximum, 1e-5f);
+			side_maximum = std::max(side_maximum, 1e-5f);
 			cp_min = -maximum;
 			cp_max = maximum;
+			side_cp_min=-side_maximum;
+			side_cp_max=side_maximum;
 		}
 
 		std::lock_guard lock(snapshot_mutex_);
@@ -181,9 +193,13 @@ namespace paracfd::gui
 		snapshot_.error.clear();
 		if (have_surface)
 		{
+			snapshot_.cp_plus = std::move(cp_plus);
+			snapshot_.cp_minus = std::move(cp_minus);
 			snapshot_.delta_cp = std::move(delta_cp);
 			snapshot_.cp_min = cp_min;
 			snapshot_.cp_max = cp_max;
+			snapshot_.side_cp_min=side_cp_min;
+			snapshot_.side_cp_max=side_cp_max;
 			snapshot_.pressure_force = loads.pressure_force;
 			snapshot_.coefficients_valid = loads.force_coefficients_valid;
 			snapshot_.cd_pressure = loads.cd_pressure;
