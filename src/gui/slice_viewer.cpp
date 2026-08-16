@@ -1553,7 +1553,7 @@ void main()
 			}
 			if(thin_debug_)
 			{
-				QFont debugFont=f;debugFont.setPointSizeF(11.0);debugFont.setBold(true);p.setFont(debugFont);const QRect debugCue(18,74,310,30);p.fillRect(debugCue,QColor(115,25,20,215));p.setPen(QColor(255,235,220));p.drawText(debugCue.adjusted(9,0,-5,0),Qt::AlignLeft|Qt::AlignVCenter,QString("THIN-Y DEBUG  %1 CELLS   STEP %2").arg(thin_debug_layers_).arg(simulation_step_));
+				QFont debugFont=f;debugFont.setPointSizeF(11.0);debugFont.setBold(true);p.setFont(debugFont);const QRect debugCue(18,74,340,30);p.fillRect(debugCue,QColor(115,25,20,215));p.setPen(QColor(255,235,220));p.drawText(debugCue.adjusted(9,0,-5,0),Qt::AlignLeft|Qt::AlignVCenter,QString("CROPPED-Y  %1 CELLS   STEP %2").arg(thin_debug_layers_).arg(simulation_step_));
 			}
 		}
 	}

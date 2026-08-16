@@ -39,7 +39,7 @@ namespace paracfd::gui
 		bool loadConfigFile(const QString& path,bool build_after_load=false);
 		bool saveConfigFile(const QString& path);
 		bool buildGrid();
-		void setThinYDiagnostic(double span_fraction);
+		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -85,7 +85,7 @@ namespace paracfd::gui
 		QSlider* slice_position_=nullptr;
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
 			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*thin_y_debug_=nullptr;
-		QDoubleSpinBox* thin_y_fraction_=nullptr;
+		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
 		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
 
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
