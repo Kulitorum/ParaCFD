@@ -7,7 +7,7 @@ ParaCFD is a purpose-built static-geometry paraglider solver. The former buildin
 Implemented:
 
 - OpenCascade STEP tessellation in metres with triangle-to-face provenance and optional UVs;
-- affine-safe placement, static double-precision triangle BVH, and face-only bbox/domain sizing (STEP wires do not affect the domain);
+- affine-safe placement, static double-precision triangle BVH, face-only bbox/domain sizing (STEP wires do not affect the domain), and a shared FP32-canonical zero-origin frame that gives GUI/probes identical clipping coordinates;
 - static balanced 2:1 brick AMR, pooled FP32 SoA fields, same-level halos, hash lookup, restriction/prolongation, and conservative four-tile coarse/fine interfaces;
 - a sparse cross-brick EB atlas, so brick boundaries are not walls and covered coarse cells are excluded by finest-owner selection;
 - smooth-sheet fitting plus a configurable finest-cell fluid-connectivity fallback supporting arbitrary fragment counts without solid/parity classification;
@@ -40,7 +40,7 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - 120 active bricks / 3,932,160 active cells;
 - 32,338 owned EB fragments, 114,042 face apertures, and 155,324 surface patches;
 - zero unresolved cells and 348 pressure-static isolated pockets;
-- 2,998 numerical aperture slivers discarded during level-atlas construction, totalling 0.000311495 m^2 of cumulative atlas area at the configurable `1e-4 h^2` cutoff;
+- 3,007 numerical aperture slivers discarded during canonical-frame level-atlas construction, totalling 0.000312367 m^2 of cumulative atlas area at the configurable `1e-4 h^2` cutoff;
 - 4,478,434 composite pressure slots with 81,920 coarse/fine and 102,227 EB connections;
 - 124.14 MiB pooled FP32 field estimate;
 - an initial +X freestream projection converging in about 189 PCG iterations to the tightened 1e-5 global relative residual in roughly 130-170 ms on the RTX 4090;
@@ -49,7 +49,7 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - about 25-30 ms bounded MacCormack advection, 8-10 ms LES/diffusion, 0.1-0.6 ms compact EB transport, and typically 40-140 ms projection as the warm solve evolves (individual timings vary);
 - 493.55 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
 
-`paraglider_case_probe` records long imported-wing histories. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, precomputed fabric-band link graph, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.622 s. The regular peak settled near 12.0 m/s instead of the previous 56.1 m/s leading-edge runaway. A compact EB aperture state remained near 46.0 m/s. Pressure-only force was still evolving at `[132.0, -0.58, 38.2]` N; max/RMS-volume divergence were `4.31e-4 / 3.90e-6 s^-1`, and net integrated flux error was `1.17e-5 m^3/s`. The last measured step was 66.4 ms, including 30.0 ms projection and 0.16 ms compact EB transport. Persistent storage is 493.55 MiB. This is a stability/conservation result, not a converged aerodynamic result.
+`paraglider_case_probe` records long imported-wing histories in the exact frame used by the GUI. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, precomputed fabric-band link graph, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.622 s. The regular peak stayed near 12.1 m/s instead of the previous 56.1 m/s leading-edge runaway. A compact EB aperture state remained near 46.0 m/s. Pressure-only force was still evolving at `[132.0, -0.57, 38.1]` N; max/RMS-volume divergence were `6.10e-4 / 3.90e-6 s^-1`, and net integrated flux error was `-6.02e-5 m^3/s`. The last measured step was 70.1 ms, including 35.6 ms projection and 0.15 ms compact EB transport. Persistent storage is 493.55 MiB. This is a stability/conservation result, not a converged aerodynamic result.
 
 ## Next engineering work
 

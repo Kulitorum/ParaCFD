@@ -124,4 +124,33 @@ namespace paracfd::core
 			for (int c = 0; c < 3; ++c) { out.bbox_min[c] = (float)bmin[c]; out.bbox_max[c] = (float)bmax[c]; }
 		return out;
 	}
+
+	// Recompute only the translation so an automatically sized external-aero domain
+	// snaps to a zero-origin base-brick frame. The supplied linear transform (confirmed
+	// orientation/AoA) is preserved. This is shared by GUI and command-line probes so
+	// robust EB clipping sees exactly the same world coordinates in both paths.
+	inline ModelPlacement frame_wing_for_external_domain(const TriMesh& source,
+		const ModelPlacement& orientation, double upstream_margin, double lateral_margin,
+		double vertical_margin, double base_brick_width)
+	{
+		ModelPlacement result = orientation;
+		// The OpenGL viewer and production TriMesh positions are FP32. Canonicalize
+		// placement to that representable frame before bbox arithmetic so GUI and
+		// non-GUI preprocessing cannot land on opposite sides of a clipping epsilon.
+		for (double& value : result.m) value = static_cast<double>(static_cast<float>(value));
+		result.tx = result.ty = result.tz = 0.0;
+		if (source.empty() || !(base_brick_width > 0.0)) return result;
+		const TriMesh placed = placed_mesh(source, result);
+		const double requested_y = (placed.bbox_max[1] - placed.bbox_min[1]) + 2.0 * lateral_margin;
+		const double requested_z = (placed.bbox_max[2] - placed.bbox_min[2]) + 2.0 * vertical_margin;
+		const double pad_y = std::ceil(requested_y / base_brick_width) * base_brick_width - requested_y;
+		const double pad_z = std::ceil(requested_z / base_brick_width) * base_brick_width - requested_z;
+		result.tx = upstream_margin - placed.bbox_min[0];
+		result.ty = lateral_margin + 0.5 * pad_y - placed.bbox_min[1];
+		result.tz = vertical_margin + 0.5 * pad_z - placed.bbox_min[2];
+		result.tx = static_cast<double>(static_cast<float>(result.tx));
+		result.ty = static_cast<double>(static_cast<float>(result.ty));
+		result.tz = static_cast<double>(static_cast<float>(result.tz));
+		return result;
+	}
 }
