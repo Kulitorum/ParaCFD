@@ -55,6 +55,15 @@ namespace paracfd::core
 	std::vector<TangentialMomentumInterfaceConnection> build_tangential_momentum_interface_connections(
 		const CompositeAmrPressureSystem& system);
 
+	struct AmrMacFaceDirectionalLink
+	{
+		AmrMacFaceAddress face;
+		std::int8_t transport_axis = 0;
+		std::int8_t direction = 1;
+	};
+	std::vector<AmrMacFaceDirectionalLink> build_momentum_interface_replaced_links(
+		const CompositeAmrPressureSystem& system);
+
 	// Persistent GPU indirection only for compact interface/EB work. Ordinary regular
 	// cells remain on structured brick kernels. Addresses must be canonical and unique,
 	// making scatter race-free; the field allocations themselves stay owned by
@@ -149,7 +158,8 @@ namespace paracfd::core
 	{
 	public:
 		DeviceAmrAdvection(const AmrHierarchy& hierarchy, const TriangleBvh& fabric,
-			double protection_cells = 2.5);
+			double protection_cells = 2.5,
+			const CompositeAmrPressureSystem* composite_system = nullptr);
 		~DeviceAmrAdvection();
 		DeviceAmrAdvection(const DeviceAmrAdvection&) = delete;
 		DeviceAmrAdvection& operator=(const DeviceAmrAdvection&) = delete;
@@ -164,6 +174,7 @@ namespace paracfd::core
 		void diffuse_smagorinsky(DeviceAmrFields& fields, Real molecular_nu, Real cs, Real dt);
 		std::size_t protected_face_count() const { return protected_faces_; }
 		std::size_t active_face_count() const { return active_faces_; }
+		std::size_t replaced_interface_link_count() const { return replaced_interface_links_; }
 		std::size_t bytes() const { return bytes_ + locator_.bytes(); }
 
 	private:
@@ -179,6 +190,6 @@ namespace paracfd::core
 		DeviceAmrLocator locator_;
 		DeviceAmrFieldLevelView *device_views_ = nullptr, *device_forward_views_ = nullptr;
 		std::vector<Level> levels_;
-		std::size_t protected_faces_ = 0, active_faces_ = 0, bytes_ = 0;
+		std::size_t protected_faces_ = 0, active_faces_ = 0, replaced_interface_links_ = 0, bytes_ = 0;
 	};
 }
