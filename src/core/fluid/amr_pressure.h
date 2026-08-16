@@ -87,6 +87,15 @@ namespace paracfd::core
 		int plus_dof = -1;
 		int minus_dof = -1;
 	};
+	// Host-only lookup retained for diagnostics and slice rendering. The timestep never
+	// traverses these vectors: regular CUDA kernels and compact EB work lists remain
+	// unchanged. Entries align with AmrEmbeddedBoundaryAtlas::levels.
+	struct CompositeEbPressureSamplingMap
+	{
+		int level = -1;
+		std::vector<int> cell_dof;     // atlas cell -> regular composite DOF, or -1 for split cells
+		std::vector<int> fragment_dof; // atlas fragment -> resolved same-side composite DOF
+	};
 
 	struct CompositeAmrPressureSystem
 	{
@@ -107,11 +116,16 @@ namespace paracfd::core
 		// Static CAD provenance and two-sided pressure mapping. These records are
 		// consumed only when publishing loads/visualization, not by timestep kernels.
 		std::vector<CompositeSurfacePressurePatch> surface_patches;
+		std::vector<CompositeEbPressureSamplingMap> eb_sampling_maps;
 		// One compact pressure reference for each active fluid component that cannot
 		// reach the X-max Dirichlet outlet. Empty for intentionally pure-Neumann tests.
 		std::vector<CompositePressureGauge> gauges;
 
 		int dof(int level, int brick, int i, int j, int k) const;
+		// Select the actual fluid-control-volume pressure at a world point. In a
+		// fabric-cut cell this returns the local fragment DOF instead of the inactive
+		// parent Cartesian slot, so opposite sides remain visually independent.
+		int pressure_dof_at_point(const AmrEmbeddedBoundaryAtlas& embedded_boundary, Vec3d point) const;
 		void apply_cpu(const std::vector<double>& pressure, std::vector<double>& output) const;
 		void diagonal_cpu(std::vector<double>& diagonal) const;
 	};

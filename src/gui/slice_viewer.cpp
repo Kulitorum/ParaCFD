@@ -1539,6 +1539,13 @@ void main()
 			p.setPen(QColor(255, 120, 90));
 			p.drawText(cue.adjusted(9, 0, -5, 0), Qt::AlignLeft | Qt::AlignVCenter,
 				QString::fromUtf8("FREESTREAM  +X  →"));
+			if(show_slice_)
+			{
+				QFont detail=f;detail.setBold(false);detail.setPointSizeF(9.0);p.setFont(detail);
+				const QRect resolutionCue(18,46,270,22);p.fillRect(resolutionCue,QColor(18,20,24,170));p.setPen(QColor(220,225,232));
+				p.drawText(resolutionCue.adjusted(9,0,-5,0),Qt::AlignLeft|Qt::AlignVCenter,
+					QString("SLICE  %1 x %2   finest h=%3 m").arg(slice_nu_).arg(slice_nv_).arg(info_.finest_h,0,'g',4));
+			}
 		}
 	}
 

@@ -34,6 +34,31 @@ namespace paracfd::core
 		return level_offset[level] + brick * brick_size * brick_size * brick_size + local_index(brick_size, i, j, k);
 	}
 
+	int CompositeAmrPressureSystem::pressure_dof_at_point(
+		const AmrEmbeddedBoundaryAtlas& embedded_boundary, Vec3d point) const
+	{
+		if(!hierarchy)return -1;const BrickLocation owner=hierarchy->locate_finest(point);if(!owner.found())return -1;
+		for(std::size_t atlas_index=0;atlas_index<embedded_boundary.levels.size();++atlas_index)
+		{
+			const AmrEbLevelAtlas& atlas=embedded_boundary.levels[atlas_index];if(atlas.level!=owner.level)continue;
+			if(atlas_index>=eb_sampling_maps.size())break;const CompositeEbPressureSamplingMap& map=eb_sampling_maps[atlas_index];const EmbeddedBoundary& eb=atlas.topology;const UniformEbGrid& grid=eb.grid;
+			const int i=static_cast<int>(std::floor((point.x-grid.origin.x)/grid.h)),j=static_cast<int>(std::floor((point.y-grid.origin.y)/grid.h)),k=static_cast<int>(std::floor((point.z-grid.origin.z)/grid.h));
+			if(i<0||j<0||k<0||i>=grid.nx||j>=grid.ny||k>=grid.nz)break;const int cell=grid.cell_index(i,j,k);if(cell<0||cell>=static_cast<int>(eb.cells.size())||cell>=static_cast<int>(map.cell_dof.size()))break;
+			const EbCellTopology& topology=eb.cells[cell];if(topology.state==EbCellState::regular)return map.cell_dof[cell];if(topology.state!=EbCellState::split)return -1;
+			FragmentRef ref=invalid_fragment;
+			if(topology.sampled_resolution&&topology.sampled_voxel_offset>=0)
+			{
+				const int resolution=topology.sampled_resolution;const Aabb3d box=grid.cell_box(i,j,k);const auto micro=[&](double coordinate,double lower){return std::clamp(static_cast<int>(std::floor((coordinate-lower)/grid.h*resolution)),0,resolution-1);};const int mi=micro(point.x,box.lo.x),mj=micro(point.y,box.lo.y),mk=micro(point.z,box.lo.z);const int sample=topology.sampled_voxel_offset+(mk*resolution+mj)*resolution+mi;if(sample>=0&&sample<static_cast<int>(eb.sampled_voxel_fragments.size()))ref=eb.sampled_voxel_fragments[sample];
+			}
+			else
+			{
+				const int side=dot(topology.plane_normal,point)-topology.plane_offset>=0?1:-1;ref=eb.fragment_for_side(cell,side);
+			}
+			if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int regular=regular_fragment_cell(ref);return regular>=0&&regular<static_cast<int>(map.cell_dof.size())?map.cell_dof[regular]:-1;}const int fragment=irregular_fragment_index(ref);return fragment>=0&&fragment<static_cast<int>(map.fragment_dof.size())?map.fragment_dof[fragment]:-1;
+		}
+		return dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);
+	}
+
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy, bool outlet)
 	{
 		CompositeAmrPressureSystem system; system.hierarchy = &hierarchy; system.brick_size = hierarchy.brick_size(); system.pressure_outlet_xmax = outlet;
@@ -101,6 +126,7 @@ namespace paracfd::core
 				if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int cell=regular_fragment_cell(ref);return cell>=0&&cell<static_cast<int>(cell_global.size())?cell_global[cell]:-1;}const int fragment=irregular_fragment_index(ref);if(fragment<0||fragment>=static_cast<int>(fragment_global.size()))return -1;if(fragment_global[fragment]>=0)return fragment_global[fragment];if(resolving[fragment])throw std::runtime_error("cyclic AMR EB fragment merge mapping");resolving[fragment]=1;fragment_global[fragment]=map_ref(eb.fragments[fragment].merge_target);resolving[fragment]=0;return fragment_global[fragment];
 			};
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&map_ref(irregular_fragment(fragment))<0)throw std::runtime_error("owned AMR EB fragment maps outside its level atlas");
+			CompositeEbPressureSamplingMap sampling;sampling.level=level_atlas.level;sampling.cell_dof=cell_global;sampling.fragment_dof.resize(eb.fragments.size(),-1);for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell])sampling.fragment_dof[fragment]=map_ref(irregular_fragment(fragment));system.eb_sampling_maps.push_back(std::move(sampling));
 			// Conservative merge transfer. A tiny fragment may resolve to an appended
 			// irregular root or to an ordinary structured cell. In both cases its volume
 			// and first moment belong to that same-side control volume in the composite

@@ -73,7 +73,13 @@ namespace paracfd::gui
 				case Field::VelU: scalar = static_cast<float>(u); break;
 				case Field::VelV: scalar = static_cast<float>(v); break;
 				case Field::VelW: scalar = static_cast<float>(w); break;
-				case Field::Pressure: scalar = static_cast<float>(level.p[layout.cell_index(brick, i, j, k)]); break;
+				case Field::Pressure:
+				{
+					const int pressure_dof=core_->pressure_system().pressure_dof_at_point(core_->embedded_boundary(),world);
+					scalar=pressure_dof>=0&&pressure_dof<static_cast<int>(display_pressure_.size())
+						?static_cast<float>(display_pressure_[pressure_dof]):0.0f;
+					break;
+				}
 				case Field::SpeedMag: break;
 				}
 				if (!std::isfinite(scalar) || !std::isfinite(speed)) continue;
@@ -93,6 +99,7 @@ namespace paracfd::gui
 		if (hierarchy.levels().empty()) return;
 		std::unique_lock display_lock(display_amr_mutex_);
 		core_->download_fields(*display_amr_);
+		core_->download_pressure(display_pressure_);
 
 		const Aabb3d& domain = hierarchy.domain();
 		const double h = hierarchy.levels().front().h;

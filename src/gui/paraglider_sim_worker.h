@@ -69,6 +69,7 @@ namespace paracfd::gui
 		void publishFlowField();
 		std::unique_ptr<paracfd::core::ExternalAeroCore> core_;
 		std::unique_ptr<paracfd::core::AmrHostFields> display_amr_;
+		std::vector<double> display_pressure_; // includes appended two-sided EB fragment DOFs
 		mutable std::mutex display_amr_mutex_;
 		bool display_amr_ready_ = false;
 		std::atomic<bool> stop_{false},playing_{false};
