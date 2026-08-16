@@ -1307,9 +1307,9 @@ void main()
 		const float kTracerSpan = 2.5f; // guaranteed arc reach ≥ 2.5·Lx (well above the 1.1·Lx filter top)
 		const int span_floor = (int)std::ceil(kTracerSpan * (float)info_.Lx / std::max(1e-6f, (float)info_.h));
 		view.max_points = std::max(tracer_trail_, span_floor);
-		// "Boring" is the travelled-distance/domain-length ratio. Exactly 1.0 is the explicit off
-		// position; values above it retain progressively longer, more circuitous wake paths.
-		view.min_length = (tracer_boring_ <= 1.0000001f) ? 0.0f : tracer_boring_ * (float)info_.Lx;
+		// "Boring" is the travelled-distance/domain-length ratio. The narrow range around one
+		// domain length provides a useful continuous threshold instead of an off discontinuity.
+		view.min_length = tracer_boring_ * (float)info_.Lx;
 		view.dt = dt;
 		view.hold_seconds = 1.0f; // keep a tracer for 1 s after it was last interesting (anti-flicker)
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)
