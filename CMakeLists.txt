@@ -64,11 +64,13 @@ add_library(libparacfd STATIC
 	# Paraglider solver foundation — static 2:1 bricks and pooled FP32 SoA fields.
 	src/core/fluid/amr_grid.cpp
 	src/core/fluid/amr_fields.cu
+	src/core/fluid/amr_advection.cu
 	src/core/fluid/amr_exchange.cpp
 	src/core/fluid/amr_eb.cpp
 	src/core/fluid/amr_eb.cu
 	src/core/fluid/amr_pressure.cpp
 	src/core/fluid/amr_pressure.cu
+	src/core/fluid/external_aero_core.cpp
 	src/core/fluid/eb_pressure.cpp
 	src/core/fluid/eb_pressure.cu
 	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor

@@ -16,7 +16,7 @@ This file records actual migration status, not a claim that unfinished architect
 - Compact brick metadata and CPU/GPU per-level coordinate hash.
 - Pooled SoA host/device `Real` fields and same-level halo exchange.
 
-The complete external-aero velocity timestep does not yet consume these fields.
+The external-aero core now consumes these pooled fields directly.
 
 ## C. One-level zero-thickness EB — implemented foundation
 
@@ -62,7 +62,7 @@ Pending:
 - Geometry preprocessing and force/reference calculations retain FP64 where valuable.
 - CUDA pressure operator has measured FP32/FP64 parity and timing probes.
 
-Pending: port the entire timestep and quantify full-case convergence, memory, and performance.
+The first-order AMR advection/Smagorinsky/external-BC/composite-projection path is GPU resident. Pending: higher-order fabric-side-safe reconstruction, consistent brick/coarse-fine velocity interpolation, and full-case convergence validation.
 
 ## G. Aerodynamics — manufactured load path implemented
 
@@ -71,7 +71,7 @@ Pending: port the entire timestep and quantify full-case convergence, memory, an
 - CL/CD/CS only with explicit positive reference area.
 - Pressure drag is labelled pressure-only.
 
-Pending: obtain the pressure states from a complete converged paraglider flow and add surface field transfer/rendering.
+Composite patches now retain global plus/minus pressure DOFs and publish triangle/whole-wing pressure-only loads. Pending: establish a converged validated paraglider flow and add automatic surface field transfer/rendering.
 
 ## H. GUI migration — preview foundation implemented
 

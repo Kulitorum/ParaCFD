@@ -25,6 +25,16 @@ namespace paracfd::core
 		std::int8_t direction = 1; // +1: first DOF is lower-axis; -1: second DOF is lower-axis
 	};
 	struct CompositePressureGauge { int dof = -1; double coefficient = 0.0; };
+	struct CompositeSurfacePressurePatch
+	{
+		std::uint32_t source_triangle_id = 0;
+		std::uint32_t source_face_id = 0;
+		double area = 0.0;
+		Vec3d centroid{};
+		Vec3d normal{}; // local triangle normal, minus -> plus
+		int plus_dof = -1;
+		int minus_dof = -1;
+	};
 
 	struct CompositeAmrPressureSystem
 	{
@@ -41,6 +51,9 @@ namespace paracfd::core
 		std::vector<int> preconditioner_aggregate;
 		std::vector<CoarseFinePressureConnection> coarse_fine;
 		std::vector<CoarseFinePressureConnection> embedded;
+		// Static CAD provenance and two-sided pressure mapping. These records are
+		// consumed only when publishing loads/visualization, not by timestep kernels.
+		std::vector<CompositeSurfacePressurePatch> surface_patches;
 		// One compact pressure reference for each active fluid component that cannot
 		// reach the X-max Dirichlet outlet. Empty for intentionally pure-Neumann tests.
 		std::vector<CompositePressureGauge> gauges;

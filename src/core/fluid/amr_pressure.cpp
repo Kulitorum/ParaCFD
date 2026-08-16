@@ -104,6 +104,10 @@ namespace paracfd::core
 			{
 				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(aperture.fragment_a)-eb.fragment_centroid(aperture.fragment_b))));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1});
 			}
+			for(const SurfacePatch& patch:eb.patches)
+			{
+				const BrickLocation owner=hierarchy.locate_finest(patch.centroid);if(!owner.found()||owner.level!=level_atlas.level)continue;const int plus=map_ref(patch.plus_fragment),minus=map_ref(patch.minus_fragment);if(plus<0||minus<0)throw std::runtime_error("owned AMR surface patch has no two-sided pressure mapping");system.surface_patches.push_back({patch.source_triangle_id,patch.source_face_id,patch.area,patch.centroid,patch.normal,plus,minus});
+			}
 		}
 		for(const CoarseFinePressureConnection& connection:system.coarse_fine)if(!system.active[connection.coarse_dof]||!system.active[connection.fine_dof])throw std::runtime_error("embedded boundary intersects a 2:1 interface; aperture-aware cross-level topology is required");
 		finalize_component_gauges(system);return system;

@@ -8,6 +8,7 @@
 
 namespace paracfd::core
 {
+	struct CompositeAmrPressureSystem;
 	struct EbPressureState
 	{
 		std::vector<double> regular;   // one value per Cartesian cell; ignored for split cells
@@ -42,4 +43,8 @@ namespace paracfd::core
 	AerodynamicLoads compute_pressure_loads(const EmbeddedBoundary& eb, const EbPressureState& pressure,
 		std::size_t source_triangle_count, const FreestreamConfig& freestream,
 		const AeroReferenceConfig& reference, double pressure_reference = 0.0);
+	AerodynamicLoads compute_pressure_loads(const CompositeAmrPressureSystem& system,
+		const std::vector<double>& pressure, std::size_t source_triangle_count,
+		const FreestreamConfig& freestream, const AeroReferenceConfig& reference,
+		double pressure_reference = 0.0);
 }

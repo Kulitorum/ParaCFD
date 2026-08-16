@@ -41,7 +41,7 @@ namespace paracfd::core
 		double cfl = 0.7;
 		double smagorinsky_cs = 0.10;
 		double projection_tolerance = 1e-4;
-		int projection_max_iterations = 100;
+		int projection_max_iterations = 300;
 	};
 
 	struct AeroReferenceConfig

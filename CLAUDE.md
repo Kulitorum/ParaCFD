@@ -35,6 +35,8 @@ Fields use pooled, contiguous Structure-of-Arrays storage per AMR level. Product
 
 The implemented AMR path includes same-level halo exchange, ratio-two restriction/prolongation, aperture-aware flux matching, hierarchy balancing, and one matrix-free composite pressure operator spanning all active levels. Coarse/fine faces are compact four-tile connections; ordinary same-level faces remain implicit structured stencils.
 
+`ExternalAeroCore` owns the static hierarchy/topology and persistent device fields. Its current timestep is first-order semi-Lagrangian AMR advection, explicit molecular/Smagorinsky diffusion, external boundary conditions, then the composite projection. Backtraces locate the finest active brick through the GPU hash. Static preprocessing marks face centres within 2.5 local cells of fabric; those faces retain their local value rather than tracing across a sheet. This guarantees side safety but is deliberately more dissipative than the required final side-aware MacCormack reconstruction.
+
 ## Zero-thickness embedded boundaries
 
 Regular cells retain implicit Cartesian topology. Only cells intersected by fabric receive compact irregular records:
@@ -52,7 +54,7 @@ Small fragments below `min_volume_fraction` are conservatively merged through su
 
 The matrix-free finite-volume pressure operator uses actual control-volume volumes and coefficients proportional to open area divided by centre distance. Regular/regular faces retain a structured fast path; EB apertures, blocked coincident faces, and 2:1 coarse/fine tiles are compact special cases. A sparse cross-brick atlas prevents brick boundaries from becoming physical walls and augments one composite pressure graph spanning every level. CPU reference and FP32/FP64 CUDA operator implementations share the topology. A persistent GPU projection performs divergence assembly, RHS formation, one composite PCG solve, pressure scatter, and conservative regular/special-flux correction without bulk field transfers. The PCG preconditioner combines the fine diagonal with an additive level-zero Galerkin aggregate solve; compact nonlocal aggregate edges retain conservative fragment-merge topology. Each active fluid component that cannot reach the pressure outlet receives a deterministic gauge. GPU boundary kernels prescribe +X freestream, use an X-max pressure reference/zero-gradient velocity, and apply the same free-slip far-field condition at both Y and both Z boundaries; there is no ground branch.
 
-Surface pressure results retain `p_plus`, `p_minus`, `delta_p`, the corresponding Cp values, and pressure force per source triangle. Whole-wing force and moment use double-precision accumulation. With freestream along +X, drag, side, and lift axes are +X, +Y, and +Z. Coefficients are reported only when the user supplies a positive reference area; the present aerodynamic load is explicitly pressure-only because fabric skin friction is not implemented.
+Every owned composite surface patch retains its global plus/minus pressure DOFs and CAD triangle/face provenance. Surface pressure results retain `p_plus`, `p_minus`, `delta_p`, the corresponding Cp values, and pressure force per source triangle. Whole-wing force and moment use double-precision accumulation. With freestream along +X, drag, side, and lift axes are +X, +Y, and +Z. Coefficients are reported only when the user supplies a positive reference area; the present aerodynamic load is explicitly pressure-only because fabric skin friction is not implemented.
 
 ## Visualization collision
 
@@ -86,8 +88,8 @@ The repository is in an incremental migration state and must not yet be describe
 
 - EB that reaches a 2:1 interface is currently rejected instead of receiving aperture-aware cross-level fragment reconstruction. The tested PlanB hierarchy keeps its EB atlas away from these interfaces.
 - The composite solver has a two-level additive geometric/Galerkin preconditioner, not yet a complete recursive multigrid hierarchy. The checked-in PlanB initial projection converges at the configured global residual tolerance, but local maximum divergence remains sensitive to the very small irregular control volumes and needs a stricter local/conservation acceptance criterion.
-- The existing MacCormack and Smagorinsky kernels have not yet been ported to AMR-aware, side-aware sampling on the new fields.
-- The new external-aerodynamic timestep is not wired end to end through advection, LES, boundary conditions, projection, and statistics.
+- The new external-aero timestep is wired end to end, but advection is first-order rather than MacCormack. Fabric-near faces use a conservative static protection fallback and interpolation/diffusion stencils clamp at brick edges; higher-order side-aware and fully consistent coarse/fine reconstruction are still required.
+- Compact coarse/fine and EB aperture velocities participate in projection but are not yet advected/diffused as independent velocity states.
 - The Qt viewer can inspect AMR bricks and owned EB cells and reports whether the composite pressure topology is ready. It deliberately refuses to run the legacy channel timestep for a loaded paraglider, but its controls remain substantially inherited from the building/channel product.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
 - Required full-flow validations such as the opening-cavity case and AMR-versus-uniform force comparison remain outstanding.
