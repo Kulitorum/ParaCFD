@@ -26,7 +26,7 @@ Implemented:
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors STEP triangles by visible-side Cp, Cp+, Cp-, or live delta-Cp;
-- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
+- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
 
 Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 
@@ -51,9 +51,11 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 
 `paraglider_case_probe` records long imported-wing histories in the exact frame used by the GUI. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, precomputed fabric-band link graph, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.622 s. The regular peak stayed near 12.1 m/s instead of the previous 56.1 m/s leading-edge runaway. A compact EB aperture state remained near 46.0 m/s. Pressure-only force was still evolving at `[132.0, -0.57, 38.1]` N; max/RMS-volume divergence were `6.10e-4 / 3.90e-6 s^-1`, and net integrated flux error was `-6.02e-5 m^3/s`. The last measured step was 70.1 ms, including 35.6 ms projection and 0.15 ms compact EB transport. Persistent storage is 493.55 MiB. This is a stability/conservation result, not a converged aerodynamic result.
 
+The case probe accepts `--max-levels N` for resolution studies. The current coarse two-level case uses 148.85 MiB and reaches a compact peak of about 29.0 m/s after 300 steps at 1.362 s. The default three-level case uses 493.55 MiB and retains the 46.0 m/s compact peak above. A four-level case builds 12.938 million pressure states with 1.427 GiB persistent storage; after 500 steps at only 0.202 s its regular peak is 13.9 m/s but its compact EB peak has grown to 78.8 m/s. The last four-level step takes 203 ms, including 95 ms projection. Because these samples are at unequal physical times, their forces are not a convergence comparison; they demonstrate that compact EB transport is resolution-sensitive and remains the primary numerical blocker.
+
 ## Next engineering work
 
-1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport and consistent EB Smagorinsky treatment; diagnose and bound the remaining compact PlanB aperture peak.
+1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport and consistent EB Smagorinsky treatment; diagnose and bound the resolution-growing compact PlanB aperture peak with a local acceptance gate.
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.

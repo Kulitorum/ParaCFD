@@ -339,6 +339,37 @@ void main()
 		tracers_.reset(); // re-seed the streakline grid for the new domain
 	}
 
+	void SliceViewer::frameDomainView()
+	{
+		if(!have_info_)return;
+		camera_.frameDomain((float)info_.Lx,(float)info_.Ly,(float)info_.Lz);
+		update();
+	}
+
+	bool SliceViewer::frameWingView()
+	{
+		if(!gz_valid_)return false;
+		const QMatrix4x4 transform=modelMatrix();
+		QVector3D lo,hi;
+		bool first=true;
+		for(int ix=0;ix<2;++ix)for(int iy=0;iy<2;++iy)for(int iz=0;iz<2;++iz)
+		{
+			const QVector3D source(ix?gz_bbox_max_.x():gz_bbox_min_.x(),
+				iy?gz_bbox_max_.y():gz_bbox_min_.y(),iz?gz_bbox_max_.z():gz_bbox_min_.z());
+			const QVector3D world=transform.map(source);
+			if(first){lo=hi=world;first=false;}
+			else
+			{
+				lo.setX(std::min(lo.x(),world.x()));lo.setY(std::min(lo.y(),world.y()));lo.setZ(std::min(lo.z(),world.z()));
+				hi.setX(std::max(hi.x(),world.x()));hi.setY(std::max(hi.y(),world.y()));hi.setZ(std::max(hi.z(),world.z()));
+			}
+		}
+		if(first)return false;
+		camera_.frameBounds(lo,hi);
+		update();
+		return true;
+	}
+
 	void SliceViewer::setReferenceU(double U)
 	{
 		if (!have_info_) return;

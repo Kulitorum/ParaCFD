@@ -22,9 +22,17 @@ namespace paracfd::gui
 		// Frame a domain [0,Lx]x[0,Ly]x[0,Lz]: target its centre, back off to fit.
 		void frameDomain(float Lx, float Ly, float Lz)
 		{
-			target_ = QVector3D(0.5f * Lx, 0.5f * Ly, 0.5f * Lz);
-			float diag = std::sqrt(Lx * Lx + Ly * Ly + Lz * Lz);
-			distance_ = 1.6f * diag;
+			frameBounds(QVector3D(0.0f, 0.0f, 0.0f), QVector3D(Lx, Ly, Lz), 1.6f);
+		}
+
+		// Frame an arbitrary world-space box. This is used for a close wing view while
+		// frameDomain remains available for inspecting the asymmetric wake volume.
+		void frameBounds(const QVector3D& lo, const QVector3D& hi, float distance_scale = 1.35f)
+		{
+			target_ = 0.5f * (lo + hi);
+			const QVector3D extent = hi - lo;
+			const float diag = std::sqrt(QVector3D::dotProduct(extent, extent));
+			distance_ = std::max(1e-2f, distance_scale * diag);
 			azimuth_ = 35.0f;
 			elevation_ = 22.0f;
 			panx_ = pany_ = 0.0f;

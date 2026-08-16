@@ -44,6 +44,11 @@ namespace paracfd::gui
 		// arrow host-flow request to the (possibly new) worker.
 		void setParagliderWorker(ParagliderSimWorker* w);
 		void setInfo(const SimInfo& info);
+		// Camera framing is deliberately separate from physical placement: a paraglider
+		// is upstream of the centre of its long wake domain, so fitting the domain makes
+		// a correctly placed wing look small and off-centre.
+		void frameDomainView();
+		bool frameWingView();
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
