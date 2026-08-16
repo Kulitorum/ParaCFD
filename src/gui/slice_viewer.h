@@ -57,7 +57,7 @@ namespace paracfd::gui
 
 		// Live view controls (main thread).
 		void setField(Field f) { field_ = f; updateRange(); range_valid_ = false; update(); }
-		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
+		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); updateSliceResolution(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
 		void setPlaneFraction(float frac); // 0..1 along the current axis
 
 		// Auto colour-range: when ON (default) the slice colormap, legend and arrow speed scale follow
@@ -248,6 +248,7 @@ namespace paracfd::gui
 		void drawAxes(const QMatrix4x4& mvp);  // world triad (depth-tested) + corner gizmo (on top)
 		void drawAxesLabels(QPainter& p);      // X/Y/Z + metre tick labels via the QPainter overlay
 		bool projectPoint(const QMatrix4x4& mvp, const QVector3D& w, QPointF& px) const; // world→screen px
+		void updateSliceResolution(); // match the plane samples to finest active AMR spacing
 
 		ParagliderSimWorker* paraglider_worker_ = nullptr;
 		SimInfo info_;
@@ -277,8 +278,13 @@ namespace paracfd::gui
 		int range_log_ctr_ = 0;         // throttles the [vmin,vmax] diagnostic line
 		static constexpr int kRangeEvery = 5;
 
-		// Fixed mesh resolution (nearest-cell sampling => oversampling is smooth & cheap).
-		static constexpr int NRES = 256;
+		// The slice follows finest h instead of using a fixed square texture. Dimensions are
+		// capped independently and by total vertex count so extreme configurations cannot
+		// stall the GUI with a multi-million-point CPU visualization resample.
+		static constexpr int kMaxSliceAxis = 1025;
+		static constexpr int kMaxSliceVertices = 1024 * 1024;
+		int slice_nu_ = 65, slice_nv_ = 65;
+		int slice_buffer_nu_ = 0, slice_buffer_nv_ = 0;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;

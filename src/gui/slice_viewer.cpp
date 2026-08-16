@@ -320,7 +320,9 @@ void main()
 	void SliceViewer::setInfo(const SimInfo& info)
 	{
 		info_ = info;
+		if (!(info_.finest_h > 0.0)) info_.finest_h = info_.h;
 		have_info_ = true;
+		updateSliceResolution();
 		camera_.frameDomain((float)info.Lx, (float)info.Ly, (float)info.Lz);
 		setDefaultPlane();
 		updateRange();
@@ -374,6 +376,32 @@ void main()
 		info_.U = U;
 		if (!auto_range_) updateRange(); // refresh the fixed per-field range to the new current
 		update();
+	}
+
+	void SliceViewer::updateSliceResolution()
+	{
+		if (!have_info_) return;
+		const double h = info_.finest_h > 0.0 ? info_.finest_h : info_.h;
+		const double extent_u = axis_ == Axis::X ? info_.Ly : info_.Lx;
+		const double extent_v = axis_ == Axis::Z ? info_.Ly : info_.Lz;
+		auto samples = [&](double extent)
+		{
+			if (!(extent > 0.0) || !(h > 0.0)) return 2;
+			return std::clamp(static_cast<int>(std::ceil(extent / h)) + 1, 2, kMaxSliceAxis);
+		};
+		int nu = samples(extent_u), nv = samples(extent_v);
+		const double vertex_count = static_cast<double>(nu) * nv;
+		if (vertex_count > kMaxSliceVertices)
+		{
+			const double scale = std::sqrt(static_cast<double>(kMaxSliceVertices) / vertex_count);
+			nu = std::max(2, static_cast<int>(std::floor((nu - 1) * scale)) + 1);
+			nv = std::max(2, static_cast<int>(std::floor((nv - 1) * scale)) + 1);
+		}
+		if (nu == slice_nu_ && nv == slice_nv_) return;
+		slice_nu_ = nu;
+		slice_nv_ = nv;
+		geometry_dirty_ = true;
+		std::fprintf(stderr, "[viewer] AMR slice %dx%d at finest h=%.6g m\n", slice_nu_, slice_nv_, h);
 	}
 
 	void SliceViewer::setDefaultPlane()
@@ -994,7 +1022,7 @@ void main()
 		sp.axis = axis_;
 		float L = (axis_ == Axis::X) ? (float)info_.Lx : (axis_ == Axis::Y) ? (float)info_.Ly : (float)info_.Lz;
 		sp.plane_pos = plane_frac_ * L;
-		sp.nu = NRES; sp.nv = NRES;
+		sp.nu = slice_nu_; sp.nv = slice_nv_;
 		sp.field = field_;
 		sp.vmin = vmin_; sp.vmax = vmax_;
 		return sp;
@@ -1068,31 +1096,19 @@ void main()
 		glGenBuffers(1, &corner_vbo_);
 		glGenBuffers(1, &clip_vbo_);
 
-		// Static index buffer for the (NRES x NRES) grid triangulation (axis-independent).
-		std::vector<unsigned int> idx;
-		idx.reserve((NRES - 1) * (NRES - 1) * 6);
-		for (int b = 0; b < NRES - 1; ++b)
-			for (int a = 0; a < NRES - 1; ++a)
-			{
-				unsigned int v00 = b * NRES + a, v10 = v00 + 1, v01 = v00 + NRES, v11 = v01 + 1;
-				idx.push_back(v00); idx.push_back(v10); idx.push_back(v11);
-				idx.push_back(v00); idx.push_back(v11); idx.push_back(v01);
-			}
-		index_count_ = (int)idx.size();
 		glBindVertexArray(slice_vao_);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, idx_ebo_);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, 0, nullptr, GL_STATIC_DRAW);
 
-		// Colour VBO: NRES*NRES float4, updated from the worker's throttled
-		// visualization resampling. The production AMR timestep remains GPU resident.
+		// The axis-dependent slice buffers are sized in buildSliceGeometry() from the
+		// domain extent and finest active AMR spacing.
 		glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, (size_t)NRES * NRES * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
 		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(1);
 
-		// Position VBO wired into the same VAO (filled in buildSliceGeometry()).
 		glBindBuffer(GL_ARRAY_BUFFER, pos_vbo_);
-		glBufferData(GL_ARRAY_BUFFER, (size_t)NRES * NRES * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 		glEnableVertexAttribArray(0);
 		glBindVertexArray(0);
@@ -1531,13 +1547,38 @@ void main()
 		PARACFD_ASSERT_GL_THREAD();
 		if (!gl_ready_ || !have_info_) return;
 		SliceParams sp = currentParams();
-		std::vector<float> pos((size_t)NRES * NRES * 3);
-		for (int b = 0; b < NRES; ++b)
-			for (int a = 0; a < NRES; ++a)
+		const std::size_t vertices = static_cast<std::size_t>(sp.nu) * sp.nv;
+		if (slice_buffer_nu_ != sp.nu || slice_buffer_nv_ != sp.nv)
+		{
+			std::vector<unsigned int> idx;
+			idx.reserve(static_cast<std::size_t>(sp.nu - 1) * (sp.nv - 1) * 6);
+			for (int b = 0; b < sp.nv - 1; ++b)
+				for (int a = 0; a < sp.nu - 1; ++a)
+				{
+					const unsigned int v00 = static_cast<unsigned int>(b * sp.nu + a);
+					const unsigned int v10 = v00 + 1, v01 = v00 + sp.nu, v11 = v01 + 1;
+					idx.push_back(v00); idx.push_back(v10); idx.push_back(v11);
+					idx.push_back(v00); idx.push_back(v11); idx.push_back(v01);
+				}
+			glBindVertexArray(slice_vao_);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, idx_ebo_);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
+			glBufferData(GL_ARRAY_BUFFER, vertices * 4 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, pos_vbo_);
+			glBufferData(GL_ARRAY_BUFFER, vertices * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+			glBindVertexArray(0);
+			index_count_ = static_cast<int>(idx.size());
+			slice_buffer_nu_ = sp.nu;
+			slice_buffer_nv_ = sp.nv;
+		}
+		std::vector<float> pos(vertices * 3);
+		for (int b = 0; b < sp.nv; ++b)
+			for (int a = 0; a < sp.nu; ++a)
 			{
 				float x, y, z;
 				slice_vertex_world(sp, a, b, x, y, z);
-				size_t o = (size_t)(b * NRES + a) * 3;
+				size_t o = static_cast<std::size_t>(b * sp.nu + a) * 3;
 				pos[o + 0] = x; pos[o + 1] = y; pos[o + 2] = z;
 			}
 		glBindBuffer(GL_ARRAY_BUFFER, pos_vbo_);

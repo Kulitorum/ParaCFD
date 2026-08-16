@@ -70,6 +70,7 @@ namespace paracfd::core
 		std::size_t gpu_bytes() const;
 		std::size_t protected_face_count() const;
 		std::size_t active_face_count() const;
+		int embedded_high_order_stencil_count() const;
 
 	private:
 		ExternalAeroStepStats project(bool warm_start, double dt);

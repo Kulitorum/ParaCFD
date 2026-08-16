@@ -13,6 +13,44 @@
 
 namespace paracfd::core
 {
+	namespace detail
+	{
+		PARACFD_AMR_HD inline Real compact_min(Real a, Real b) { return a < b ? a : b; }
+		PARACFD_AMR_HD inline Real compact_max(Real a, Real b) { return a > b ? a : b; }
+		PARACFD_AMR_HD inline Real compact_abs(Real a) { return a < Real(0) ? -a : a; }
+		PARACFD_AMR_HD inline Real compact_minmod(Real a, Real b)
+		{
+			return a * b <= Real(0) ? Real(0) : (compact_abs(a) < compact_abs(b) ? a : b);
+		}
+		// One compact-aperture transport update. `upstream*` and `downstream` are ordered
+		// along the sign of `current`; complete_chain selects MUSCL or the endpoint fallback.
+		PARACFD_AMR_HD inline Real bounded_compact_transport_update(Real current,
+			Real lower_node, Real upper_node, Real upstream, Real upstream2, Real downstream,
+			Real courant, Real diffusion, bool complete_chain)
+		{
+			Real stencil_min = compact_min(current, compact_min(lower_node, upper_node));
+			Real stencil_max = compact_max(current, compact_max(lower_node, upper_node));
+			Real advected;
+			if (complete_chain)
+			{
+				const Real delta = current - upstream;
+				const Real slope = compact_minmod(delta, downstream - current);
+				const Real upstream_slope = compact_minmod(upstream - upstream2, delta);
+				advected = current - courant * delta
+					- Real(0.5) * courant * (Real(1) - courant) * (slope - upstream_slope);
+				stencil_min = compact_min(stencil_min, compact_min(upstream, compact_min(upstream2, downstream)));
+				stencil_max = compact_max(stencil_max, compact_max(upstream, compact_max(upstream2, downstream)));
+			}
+			else
+			{
+				const Real node_upstream = current >= Real(0) ? lower_node : upper_node;
+				advected = current + courant * (node_upstream - current);
+			}
+			const Real candidate = advected + diffusion * (lower_node + upper_node - Real(2) * current);
+			return compact_max(stencil_min, compact_min(stencil_max, candidate));
+		}
+	}
+
 	struct DeviceCompositeAmrLevelView;
 	struct AmrEmbeddedBoundaryAtlas;
 	struct CoarseFinePressureConnection
@@ -171,6 +209,7 @@ namespace paracfd::core
 		// This is their explicit graph-transport Courant rate; tiny-area apertures do
 		// not spuriously constrain dt merely because their point velocity is large.
 		double max_embedded_cfl_rate() const;
+		int embedded_high_order_stencil_count() const { return embedded_high_order_stencil_count_; }
 		void compute_divergence();
 		void build_projection_rhs(Real rho, Real dt);
 		void correct_fluxes(Real rho, Real dt);
@@ -197,6 +236,7 @@ namespace paracfd::core
 		std::int8_t* cf_group_axis_ = nullptr;
 		Real *cf_group_area_ = nullptr, *cf_group_sum_ = nullptr;
 		int *eb_node_a_ = nullptr, *eb_node_b_ = nullptr;
+		int *eb_negative_edge_ = nullptr, *eb_positive_edge_ = nullptr;
 		int *eb_carrier_node_ = nullptr, *eb_carrier_level_ = nullptr;
 		std::uint64_t* eb_carrier_index_ = nullptr;
 		std::int8_t* eb_carrier_axis_ = nullptr;
@@ -207,6 +247,7 @@ namespace paracfd::core
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
 		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
 		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0;
+		int embedded_high_order_stencil_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
