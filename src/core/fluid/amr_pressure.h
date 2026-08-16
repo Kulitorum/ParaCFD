@@ -160,7 +160,9 @@ namespace paracfd::core
 		void sync_coarse_fine_from_fields();
 		// First-order same-side graph transport for split EB aperture states. Only
 		// DOFs incident to EB apertures are represented; there is no full-domain CSR.
-		void transport_embedded_apertures(Real dt, Real molecular_nu);
+		// A graph-normal Smagorinsky estimate supplies the missing irregular-region
+		// eddy viscosity while preserving a uniform state exactly.
+		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		double max_abs_special_velocity() const;

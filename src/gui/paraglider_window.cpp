@@ -172,8 +172,8 @@ namespace paracfd::gui
 			{
 				config_.placement=left_rotation(config_.placement,axes.yaw_degrees,{0,0,1});
 				orientation_note=axes.span_axis==0
-					?"bbox: span X / chord Y; assumed forward -Y -> +X"
-					:"bbox: span Y / chord X; assumed forward -X -> +X";
+					?"bbox: span X / chord Y; assumed chord flow -Y -> +X"
+					:"bbox: span Y / chord X; assumed chord flow -X -> +X";
 			}
 			else orientation_note="bbox span/chord ambiguous; imported axes retained";
 			std::fprintf(stderr,"[paraglider-orientation] bbox %.3f x %.3f m: %s\n",
