@@ -22,7 +22,7 @@ namespace paracfd::gui
 		n = std::max(0, std::min(n, 20000));
 		count_ = n;
 		px_.resize(n); py_.resize(n); pz_.resize(n);
-		age_.resize(n); life_.resize(n);
+		age_.resize(n); life_.resize(n); visible_age_.resize(n);
 		dirx_.resize(n); diry_.resize(n); dirz_.resize(n);
 		spd_.resize(n); alpha_.resize(n);
 		inst_.resize((size_t)n * 8);
@@ -92,6 +92,7 @@ namespace paracfd::gui
 		px_[k] = x; py_[k] = y; pz_[k] = z;
 		life_[k] = 2.5f + frand(rng_) * 2.5f;              // 2.5..5 s
 		age_[k] = initial ? frand(rng_) * life_[k] : 0.0f; // stagger initial ages so it looks alive
+		visible_age_[k] = initial ? 1.0f : 0.0f;           // initial population starts fully visible
 		alpha_[k] = 0.0f; spd_[k] = 0.0f;
 		dirx_[k] = diry_[k] = dirz_[k] = 0.0f;
 	}
@@ -119,7 +120,10 @@ namespace paracfd::gui
 
 		for (int k = 0; k < count_; ++k)
 		{
-			age_[k] += dt;
+			// Lifetime follows the visual advection rate. Slowing the animation must not make an
+			// arrow expire after travelling only a small fraction of its usual distance.
+			age_[k] += dt * std::max(view.age_rate, 0.0f);
+			visible_age_[k] += dt;
 			if (age_[k] > life_[k]) { spawn(k, view, f, false); continue; }
 
 			float x = px_[k], y = py_[k], z = pz_[k];
@@ -160,7 +164,10 @@ namespace paracfd::gui
 			}
 			px_[k] = x; py_[k] = y; pz_[k] = z;
 			float a = age_[k], life = life_[k];
-			alpha_[k] = std::clamp(a / 0.3f, 0.0f, 1.0f) * std::clamp((life - a) / 0.5f, 0.0f, 1.0f);
+			// Reach full opacity in 50 ms. Fade-out remains tied to travel time so arrows remain
+			// visible near the wing even when the animation-speed control is set very low.
+			alpha_[k] = std::clamp(visible_age_[k] / 0.05f, 0.0f, 1.0f)
+				* std::clamp((life - a) / 0.5f, 0.0f, 1.0f);
 		}
 
 		// Pack the interleaved instance array (stride 8).

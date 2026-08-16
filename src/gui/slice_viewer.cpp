@@ -120,7 +120,7 @@ layout(location=4) in float aAlpha;  // fade
 uniform mat4 uMVP;
 uniform vec3 uEye;
 uniform float uLen;                  // base glyph length [m]
-uniform float uWidth;                // lateral thickness scale (1 = the glyph's own width; length unaffected)
+uniform float uSize;                 // uniform glyph scale (both length and lateral width)
 out float vSpeed;
 out float vAlpha;
 void main()
@@ -133,10 +133,8 @@ void main()
 	if (dot(N, N) < 1e-8) N = cross(T, vec3(0.0, 0.0, 1.0));
 	if (dot(N, N) < 1e-8) N = cross(T, vec3(0.0, 1.0, 0.0));
 	N = normalize(N);
-	float L = uLen * (0.35 + 0.9 * aSpeed);        // length grows with speed
-	// Shaft length scales with L; the lateral (across-shaft) extent scales with L*uWidth, so lowering
-	// uWidth makes the shaft + head THINNER while the arrow length stays the same (declutter knob).
-	vec3 world = aPos + T * (aGlyph.x * L) + N * (aGlyph.y * L * uWidth);
+	float L = uLen * (0.35 + 0.9 * aSpeed) * uSize; // length grows with speed and the uniform size control
+	vec3 world = aPos + T * (aGlyph.x * L) + N * (aGlyph.y * L);
 	gl_Position = uMVP * vec4(world, 1.0);
 }
 )";
@@ -1171,6 +1169,7 @@ void main()
 		view.speed_scale = auto_range_ ? std::max(auto_speed_max_, 1e-3f)
 			: 1.8f * (have_info_ ? (float)info_.U : 1.0f);
 		view.gain = 1.5f * arrow_speed_mult_; // user speed multiplier [0,1] (visual only)
+		view.age_rate = arrow_speed_mult_;     // preserve travel distance before a particle ages out
 
 		ensureFabricBvh();
 		auto consume = [&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); arrows_.advance(dt, view, ff); };
@@ -1208,12 +1207,16 @@ void main()
 		if (!show_arrows_ || arrow_draw_count_ <= 0) return;
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glDepthMask(GL_FALSE); // blend arrows without fighting each other's depth; still occluded by solids
+		// Slice-plane arrows are an annotation overlay. With depth testing enabled, the plane/model
+		// can cut a billboarded glyph in half. Volume arrows retain ordinary 3D occlusion.
+		const bool slice_overlay = !arrow_3d_;
+		if (slice_overlay) glDisable(GL_DEPTH_TEST);
+		glDepthMask(GL_FALSE); // blend arrows without writing into the depth buffer
 		arrow_prog_.bind();
 		arrow_prog_.setUniformValue("uMVP", mvp);
 		arrow_prog_.setUniformValue("uEye", camera_.eye());
 		arrow_prog_.setUniformValue("uLen", arrow_len_);
-		arrow_prog_.setUniformValue("uWidth", arrow_width_);
+		arrow_prog_.setUniformValue("uSize", arrow_size_);
 		// Over a visible colour slice the speed-coloured arrows blend into the field, so draw them
 		// solid WHITE for contrast (reads over any colormap stop); when the slice is hidden, colour
 		// them by speed (matches the legend) so they stay informative against the dark background.
@@ -1224,6 +1227,7 @@ void main()
 		glBindVertexArray(0);
 		arrow_prog_.release();
 		glDepthMask(GL_TRUE);
+		if (slice_overlay) glEnable(GL_DEPTH_TEST);
 		glDisable(GL_BLEND);
 	}
 
@@ -1282,11 +1286,9 @@ void main()
 		const float kTracerSpan = 2.5f; // guaranteed arc reach ≥ 2.5·Lx (well above the 1.1·Lx filter top)
 		const int span_floor = (int)std::ceil(kTracerSpan * (float)info_.Lx / std::max(1e-6f, (float)info_.h));
 		view.max_points = std::max(tracer_trail_, span_floor);
-		// "Boring" filter: hide streamlines whose arc is below Lx·boring. A straight crosser starts half a
-		// display cell inside the inlet and normally measures about (Lx-h), which is ~0.984 Lx in the
-		// default domain. The former 0.995 off-switch therefore jumped directly past the entire useful
-		// transition. Only the new 0.75 bottom notch is off; 0.751..1.1 is continuous and reachable.
-		view.min_length = (tracer_boring_ <= 0.7505f) ? 0.0f : tracer_boring_ * (float)info_.Lx;
+		// "Boring" is the travelled-distance/domain-length ratio. Exactly 1.0 is the explicit off
+		// position; values above it retain progressively longer, more circuitous wake paths.
+		view.min_length = (tracer_boring_ <= 1.0000001f) ? 0.0f : tracer_boring_ * (float)info_.Lx;
 		view.dt = dt;
 		view.hold_seconds = 1.0f; // keep a tracer for 1 s after it was last interesting (anti-flicker)
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)
@@ -1886,33 +1888,33 @@ void main()
 
 		if (paraglider_worker_ && have_info_)
 		{
-			// The production field is block-AMR/FP32. The worker publishes a throttled,
-			// coarse uniform host resampling exclusively for visualization, which lets the
-			// mature slice renderer remain useful while AMR-native GL interop is developed.
-			paraglider_worker_->withFlowField([&](const FlowField& field)
+			// Sample this 2-D plane directly from the finest active AMR brick at each display
+			// vertex. Arrows and tracers retain a cheaper coarse 3-D snapshot, but the scalar
+			// plane now exposes the actual refinement around the wing.
+			SliceParams sp = currentParams();
+			FieldRange range;
+			if (paraglider_worker_->sampleAmrSlice(sp, host_slice_values_, range))
 			{
-				SliceParams sp = currentParams();
-				sp.grid = field.grid;
 				if (auto_range_ && (range_ctr_++ % kRangeEvery == 0))
 				{
-					float reduced[3]{};
-					slice_reduce_cpu(field.u, field.v, field.w, field.p, nullptr, field.grid, field_, reduced);
-					FieldRange range;
-					range.field_min = reduced[0]; range.field_max = reduced[1]; range.speed_max = reduced[2];
-					range.valid = std::isfinite(reduced[0]) && std::isfinite(reduced[1]) && reduced[0] <= reduced[1];
 					applyAutoRange(range);
-					sp.vmin = vmin_; sp.vmax = vmax_;
 				}
 				if (show_slice_)
 				{
-					host_slice_colours_.resize(static_cast<std::size_t>(sp.nu) * sp.nv);
-					slice_fill_cpu(field.u, field.v, field.w, field.p, sp, host_slice_colours_.data());
+					host_slice_colours_.resize(host_slice_values_.size());
+					const float span = vmax_ > vmin_ ? vmax_ - vmin_ : 1.0f;
+					for (std::size_t q = 0; q < host_slice_values_.size(); ++q)
+					{
+						float r, g, b;
+						scour_colormap((host_slice_values_[q] - vmin_) / span, r, g, b);
+						host_slice_colours_[q] = {r, g, b, 0.72f};
+					}
 					glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
 					glBufferSubData(GL_ARRAY_BUFFER, 0,
 						host_slice_colours_.size() * sizeof(float4), host_slice_colours_.data());
 					glBindBuffer(GL_ARRAY_BUFFER, 0);
 				}
-			});
+			}
 		}
 
 		updateArrows(); // advect the arrow tracers + upload instance data (reads the worker's host flow)

@@ -100,14 +100,13 @@ namespace paracfd::gui
 		// ONLY the tracer animation so fast currents (e.g. 8 m/s) don't whip the arrows about — physics
 		// is untouched. Applied live.
 		void setArrowSpeedMult(float m) { arrow_speed_mult_ = m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m); update(); }
-		// Lateral thickness scale for the arrow glyph (shaft + head): 1 = the glyph's own width, lower =
-		// thinner / less cluttered. The arrow LENGTH is unaffected (declutter knob for a dense field).
-		void setArrowWidthMult(float m) { arrow_width_ = m < 0.05f ? 0.05f : (m > 3.0f ? 3.0f : m); update(); }
+		// Uniform arrow glyph scale. Both shaft length and lateral width change together.
+		void setArrowSizeMult(float m) { arrow_size_ = m < 0.05f ? 0.05f : (m > 3.0f ? 3.0f : m); update(); }
 		bool showArrows() const { return show_arrows_; }
 		bool arrowMode3D() const { return arrow_3d_; }
 		int arrowDensity() const { return arrow_density_; }
 		float arrowSpeedMult() const { return arrow_speed_mult_; }
-		float arrowWidthMult() const { return arrow_width_; }
+		float arrowSizeMult() const { return arrow_size_; }
 
 		// --- Flow tracers (inlet-seeded streamlines: long lines coloured by speed) ----------------
 		// A grid of seeds on the INLET face each integrate a streamline through the live velocity field
@@ -122,10 +121,9 @@ namespace paracfd::gui
 		void setTracerTrail(int n);         // max streamline length [integration steps]
 		// Ribbon thickness in PIXELS (screen-space, constant regardless of zoom). A few px reads well.
 		void setTracerWidth(float w) { tracer_width_ = w < 0.5f ? 0.5f : (w > 12.0f ? 12.0f : w); update(); }
-		// "Boring" filter [0.75,1.1]: hide streamlines whose path length is below this multiple of the
-		// domain length Lx. The 0.75 minimum is an explicit show-all notch; values above it expose the
-		// useful short/straight transition continuously instead of jumping from off straight to ~Lx.
-		void setTracerBoring(float m) { tracer_boring_ = m < 0.75f ? 0.75f : (m > 1.1f ? 1.1f : m); update(); }
+		// "Boring" filter [1.0,1.1]: hide streamlines whose path length is below this multiple of the
+		// domain length Lx. 1.0 disables the filter; higher retains increasingly circuitous paths.
+		void setTracerBoring(float m) { tracer_boring_ = m < 1.0f ? 1.0f : (m > 1.1f ? 1.1f : m); update(); }
 		// While the boring slider is being dragged, bypass the anti-flicker retention so the filter
 		// updates instantly; retention resumes on release.
 		void setTracerBoringInstant(bool on) { tracer_boring_instant_ = on; update(); }
@@ -274,12 +272,13 @@ namespace paracfd::gui
 		bool range_valid_ = false;
 		float auto_speed_max_ = 1.0f;   // smoothed max |u| over fluid cells [m/s] (arrow colour scale)
 		int range_ctr_ = 0;             // paint counter → reduce every kRangeEvery frames (~12 Hz)
+		std::vector<float> host_slice_values_;   // finest-active AMR plane values before colour mapping
 		std::vector<float4> host_slice_colours_; // display-only AMR snapshot -> GL upload
 		int range_log_ctr_ = 0;         // throttles the [vmin,vmax] diagnostic line
 		static constexpr int kRangeEvery = 5;
 
 		// Fixed mesh resolution (nearest-cell sampling => oversampling is smooth & cheap).
-		static constexpr int NRES = 200;
+		static constexpr int NRES = 256;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;
@@ -369,7 +368,7 @@ namespace paracfd::gui
 		bool arrow_3d_ = true;         // 3D volume advection vs 2D on the slice plane
 		int arrow_density_ = 1500;     // particle count
 		float arrow_speed_mult_ = 1.0f; // visual advection-speed multiplier [0,1] (1 = default, 0 = frozen)
-		float arrow_width_ = 0.5f;      // lateral thickness scale (1 = glyph width); default thinner to declutter
+		float arrow_size_ = 0.5f;       // uniform length/width scale; default compact to declutter
 		QOpenGLShaderProgram arrow_prog_;
 		unsigned int arrow_vao_ = 0, arrow_glyph_vbo_ = 0, arrow_inst_vbo_ = 0;
 		int arrow_glyph_verts_ = 0;
@@ -389,7 +388,7 @@ namespace paracfd::gui
 		int tracer_grid_density_ = 12;   // inlet seed count along the larger inlet dimension
 		int tracer_trail_ = 600;         // max streamline length [integration steps]
 		float tracer_width_ = 2.0f;      // ribbon thickness in pixels (screen-space)
-		float tracer_boring_ = 0.75f;    // hide streamlines shorter than Lx·this (0.75 = off … 1.1)
+		float tracer_boring_ = 1.0f;     // hide streamlines shorter than Lx·this (1.0 = off … 1.1)
 		bool tracer_boring_instant_ = false; // true while the boring slider is dragged (bypass the hold)
 		QOpenGLShaderProgram tracer_prog_;
 		unsigned int tracer_vao_ = 0, tracer_vbo_ = 0; // interleaved ribbon geometry (stride 11 floats)

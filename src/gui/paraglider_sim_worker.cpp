@@ -28,11 +28,70 @@ namespace paracfd::gui
 		return true;
 	}
 
+	bool ParagliderSimWorker::sampleAmrSlice(
+		const SliceParams& params, std::vector<float>& values, FieldRange& range) const
+	{
+		using namespace paracfd::core;
+		std::lock_guard lock(display_amr_mutex_);
+		if (!display_amr_ready_ || params.nu <= 0 || params.nv <= 0) return false;
+		const AmrHierarchy& hierarchy = core_->hierarchy();
+		const Aabb3d& domain = hierarchy.domain();
+		const Vec3d extent = domain.hi - domain.lo;
+		values.assign(static_cast<std::size_t>(params.nu) * params.nv, 0.0f);
+		range = {};
+		range.field_min = std::numeric_limits<float>::max();
+		range.field_max = std::numeric_limits<float>::lowest();
+
+		auto inside = [](double value, double lo, double hi)
+		{
+			return std::clamp(value, lo, std::nextafter(hi, lo));
+		};
+		for (int b = 0; b < params.nv; ++b)
+			for (int a = 0; a < params.nu; ++a)
+			{
+				float x, y, z;
+				slice_vertex_world(params, a, b, x, y, z);
+				const Vec3d world{
+					inside(domain.lo.x + x, domain.lo.x, domain.lo.x + extent.x),
+					inside(domain.lo.y + y, domain.lo.y, domain.lo.y + extent.y),
+					inside(domain.lo.z + z, domain.lo.z, domain.lo.z + extent.z)};
+				const BrickLocation location = hierarchy.locate_finest(world);
+				if (!location.found()) continue;
+				const AmrHostLevelFields& level = display_amr_->levels()[location.level];
+				const BrickFieldLayout& layout = level.layout;
+				const int brick = location.brick, i = location.cell.x, j = location.cell.y, k = location.cell.z;
+				const double u = 0.5 * (static_cast<double>(level.u[layout.u_index(brick, i, j, k)])
+					+ static_cast<double>(level.u[layout.u_index(brick, i + 1, j, k)]));
+				const double v = 0.5 * (static_cast<double>(level.v[layout.v_index(brick, i, j, k)])
+					+ static_cast<double>(level.v[layout.v_index(brick, i, j + 1, k)]));
+				const double w = 0.5 * (static_cast<double>(level.w[layout.w_index(brick, i, j, k)])
+					+ static_cast<double>(level.w[layout.w_index(brick, i, j, k + 1)]));
+				const float speed = static_cast<float>(std::sqrt(u * u + v * v + w * w));
+				float scalar = speed;
+				switch (params.field)
+				{
+				case Field::VelU: scalar = static_cast<float>(u); break;
+				case Field::VelV: scalar = static_cast<float>(v); break;
+				case Field::VelW: scalar = static_cast<float>(w); break;
+				case Field::Pressure: scalar = static_cast<float>(level.p[layout.cell_index(brick, i, j, k)]); break;
+				case Field::SpeedMag: break;
+				}
+				if (!std::isfinite(scalar) || !std::isfinite(speed)) continue;
+				values[static_cast<std::size_t>(b) * params.nu + a] = scalar;
+				range.field_min = std::min(range.field_min, scalar);
+				range.field_max = std::max(range.field_max, scalar);
+				range.speed_max = std::max(range.speed_max, speed);
+			}
+		range.valid = range.field_min <= range.field_max;
+		return true;
+	}
+
 	void ParagliderSimWorker::publishFlowField()
 	{
 		using namespace paracfd::core;
 		const AmrHierarchy& hierarchy = core_->hierarchy();
 		if (hierarchy.levels().empty()) return;
+		std::unique_lock display_lock(display_amr_mutex_);
 		core_->download_fields(*display_amr_);
 
 		const Aabb3d& domain = hierarchy.domain();
@@ -89,6 +148,8 @@ namespace paracfd::gui
 			w[grid.widx(i,j,k)] = finite_or_zero(0.5 * (wc[grid.pidx(i,j,back)] + wc[grid.pidx(i,j,front)]));
 		}
 		for (double& value : pressure) value = finite_or_zero(value);
+		display_amr_ready_ = true;
+		display_lock.unlock();
 
 		std::lock_guard lock(flow_mutex_);
 		flow_grid_ = grid;

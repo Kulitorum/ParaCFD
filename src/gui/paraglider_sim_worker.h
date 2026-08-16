@@ -2,6 +2,7 @@
 
 #include "core/fluid/external_aero_core.h"
 #include "gui/flow_particles.h"
+#include "gui/slice_field.h"
 
 #include <QObject>
 
@@ -53,6 +54,9 @@ namespace paracfd::gui
 		// Borrow the latest coarse, uniform display resampling of the live AMR fields.
 		// The callback runs under a short mutex and must not retain the pointers.
 		bool withFlowField(const std::function<void(const FlowField&)>& fn) const;
+		// Sample the current plane directly from the finest active AMR bricks. Unlike withFlowField(),
+		// this does not pass through the coarse 3-D particle/tracer snapshot.
+		bool sampleAmrSlice(const SliceParams& params, std::vector<float>& values, FieldRange& range) const;
 
 	public slots:
 		void run();
@@ -65,6 +69,8 @@ namespace paracfd::gui
 		void publishFlowField();
 		std::unique_ptr<paracfd::core::ExternalAeroCore> core_;
 		std::unique_ptr<paracfd::core::AmrHostFields> display_amr_;
+		mutable std::mutex display_amr_mutex_;
+		bool display_amr_ready_ = false;
 		std::atomic<bool> stop_{false},playing_{false};
 		std::atomic<int> step_requests_{0};
 		mutable std::mutex snapshot_mutex_;

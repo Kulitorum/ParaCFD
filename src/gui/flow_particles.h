@@ -47,6 +47,7 @@ namespace paracfd::gui
 		float plane_pos = 0.0f;  // world coord [m] of the plane along `axis` (2D)
 		float speed_scale = 1.0f; // |vel| that maps to the hot end of the ramp [m/s]
 		float gain = 1.0f;       // advection speed multiplier (1 = real time)
+		float age_rate = 1.0f;   // lifetime clock multiplier; keeps travel distance stable as gain changes
 	};
 
 	class FlowParticles
@@ -78,7 +79,8 @@ namespace paracfd::gui
 		bool needs_reset_ = false;
 
 		std::vector<float> px_, py_, pz_;   // world position [m]
-		std::vector<float> age_, life_;     // age + lifetime [s]
+		std::vector<float> age_, life_;     // visual-advection age + lifetime [s]
+		std::vector<float> visible_age_;    // wall-clock age since spawn, for a fast fade-in
 		std::vector<float> dirx_, diry_, dirz_; // unit velocity direction (world)
 		std::vector<float> spd_;            // normalised speed [0,1] (for colour + length)
 		std::vector<float> alpha_;          // fade-in/out

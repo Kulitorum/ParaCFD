@@ -223,6 +223,9 @@ namespace paracfd::gui
 						const float dx = line_[i].x - line_[i - 1].x, dy = line_[i].y - line_[i - 1].y, dz = line_[i].z - line_[i - 1].z;
 						arc += std::sqrt(dx * dx + dy * dy + dz * dz);
 					}
+					// The first and last samples are half a cell inside the inlet/outlet. Restore
+					// those two half steps so a straight domain crossing measures Lx, not Lx-h.
+					arc += view.step_ds;
 					interesting = arc >= view.min_length;
 				}
 			}
