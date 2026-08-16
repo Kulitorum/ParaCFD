@@ -17,8 +17,11 @@ namespace paracfd::core
 	// permits tangential transport near a sheet without per-step triangle traversal or
 	// opposite-side stencil sampling.
 	// Trilinear and diffusion stencils resolve same-level brick crossings through the
-	// GPU coordinate hash. Coarse/fine samples are interpolated but are not yet the
-	// final conservative face reconstruction.
+	// GPU coordinate hash. At 2:1 transitions, staggered face and cell values use a
+	// one-sided linear prolongation rather than brick-local clamping; the reverse
+	// MacCormack correction falls back to the bounded forward RK2 value when its trace
+	// changes lattice. This is linearly consistent, while the semi-Lagrangian momentum
+	// update itself is not yet a globally conservative finite-volume/refluxed scheme.
 	class DeviceAmrAdvection
 	{
 	public:

@@ -178,6 +178,54 @@ int main()
 	AmrConfig ac;ac.base_cell_size=0.5;ac.max_levels=3;ac.brick_size=4;ac.surface_refinement_distance=0.1;ac.wing_refinement_distance=0.2;ac.wake_length=1;ac.wake_radius=0.5;AmrHierarchy ah=AmrHierarchy::build_static({{-1,-1,-1},{3,3,3}},flat,bvh,ac);
 	check(ah.levels().size()==3&&ah.is_two_to_one_balanced(),"static AMR hierarchy is 2:1 balanced");check(ah.locate_finest({0.5,0.5,0.5}).level==2,"surface region reaches configured finest level");
 	DeviceAmrFields multilevel_advection_fields(ah);multilevel_advection_fields.initialize_freestream(Real(1.5));DeviceAmrAdvection multilevel_advection(ah,no_fabric_bvh);multilevel_advection.advect(multilevel_advection_fields,Real(0.05));AmrHostFields multilevel_advection_host(ah);multilevel_advection_fields.download(multilevel_advection_host);double multilevel_advection_error=0;for(std::size_t level=0;level<ah.levels().size();++level)for(int brick=0;brick<static_cast<int>(ah.levels()[level].bricks.size());++brick)if(ah.levels()[level].bricks[brick].active())for(int k=0;k<4;++k)for(int j=0;j<4;++j)for(int i=0;i<=4;++i)multilevel_advection_error=std::max(multilevel_advection_error,std::abs(static_cast<double>(multilevel_advection_host.levels()[level].u[multilevel_advection_host.levels()[level].layout.u_index(brick,i,j,k)])-1.5));check(multilevel_advection_error<(sizeof(Real)==4?2e-6:1e-12),"finest-brick AMR advection sampling preserves constant state across 2:1 hierarchy");
+	AmrHostFields linear_cross_level_host(ah);
+	for(std::size_t level=0;level<ah.levels().size();++level)
+	{
+		auto& field=linear_cross_level_host.levels()[level];const int bs=ah.brick_size();
+		for(int brick=0;brick<static_cast<int>(ah.levels()[level].bricks.size());++brick)
+		{
+			const auto& metadata=ah.levels()[level].bricks[brick];
+			for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<=bs;++i)field.u[field.layout.u_index(brick,i,j,k)]=Real(1);
+			for(int k=0;k<bs;++k)for(int j=0;j<=bs;++j)for(int i=0;i<bs;++i)field.v[field.layout.v_index(brick,i,j,k)]=static_cast<Real>(metadata.origin.x+(i+0.5)*metadata.h);
+		}
+	}
+	DeviceAmrFields linear_cross_level_fields(ah);linear_cross_level_fields.upload(linear_cross_level_host);DeviceAmrAdvection linear_cross_level_advection(ah,no_fabric_bvh);const Real linear_dt=Real(0.05);linear_cross_level_advection.advect(linear_cross_level_fields,linear_dt);linear_cross_level_fields.download(linear_cross_level_host);double linear_cross_level_error=0;std::size_t linear_cross_level_samples=0;int worst_level=-1,worst_brick=-1,worst_i=-1,worst_j=-1,worst_k=-1,worst_lower=-1,worst_upper=-1;double worst_value=0,worst_exact=0;
+	for(std::size_t level=0;level<ah.levels().size();++level)
+	{
+		const auto& field=linear_cross_level_host.levels()[level];const int bs=ah.brick_size();
+		for(int brick=0;brick<static_cast<int>(ah.levels()[level].bricks.size());++brick)if(ah.levels()[level].bricks[brick].active())
+		{
+			const auto& metadata=ah.levels()[level].bricks[brick];
+			for(int k=0;k<bs;++k)for(int j=0;j<=bs;++j)for(int i=0;i<bs;++i)
+			{
+				const Vec3d point{metadata.origin.x+(i+0.5)*metadata.h,metadata.origin.y+j*metadata.h,metadata.origin.z+(k+0.5)*metadata.h};
+				if(point.x-ah.domain().lo.x<2*metadata.h||ah.domain().hi.x-point.x<2*metadata.h)continue;
+				const BrickLocation owner=ah.locate_finest(point);if(!owner.found()||owner.level!=static_cast<int>(level))continue;
+				const BrickLocation lower=ah.locate_finest({point.x-0.51*metadata.h,point.y,point.z}),upper=ah.locate_finest({point.x+0.51*metadata.h,point.y,point.z});
+				if(!lower.found()||!upper.found()||(lower.level==static_cast<int>(level)&&upper.level==static_cast<int>(level)))continue;
+				const double value=field.v[field.layout.v_index(brick,i,j,k)],exact=point.x-static_cast<double>(linear_dt);
+				const double error=std::abs(value-exact);if(error>linear_cross_level_error){linear_cross_level_error=error;worst_level=static_cast<int>(level);worst_brick=brick;worst_i=i;worst_j=j;worst_k=k;worst_lower=lower.level;worst_upper=upper.level;worst_value=value;worst_exact=exact;}++linear_cross_level_samples;
+			}
+		}
+	}
+	// GPU AMR locations and brick metadata intentionally remain FP32 in both field modes,
+	// so the FP64 validation build retains the coordinate-rounding floor seen here.
+	const double cross_level_coordinate_tolerance=5e-7;
+	std::printf("[paraglider] linear 2:1 advection: samples=%zu max error=%.3e value/exact=%.9g/%.9g level/brick/ijk=%d/%d/[%d %d %d] neighbours=%d/%d\n",linear_cross_level_samples,linear_cross_level_error,worst_value,worst_exact,worst_level,worst_brick,worst_i,worst_j,worst_k,worst_lower,worst_upper);check(linear_cross_level_samples>0&&linear_cross_level_error<cross_level_coordinate_tolerance,"2:1 interpolation preserves a linear tangential characteristic");
+	linear_cross_level_advection.diffuse_smagorinsky(linear_cross_level_fields,Real(0.1),Real(0),Real(0.01));linear_cross_level_fields.download(linear_cross_level_host);double linear_cross_level_diffusion_error=0;std::size_t linear_cross_level_diffusion_samples=0;
+	for(std::size_t level=0;level<ah.levels().size();++level)
+	{
+		const auto& field=linear_cross_level_host.levels()[level];const int bs=ah.brick_size();
+		for(int brick=0;brick<static_cast<int>(ah.levels()[level].bricks.size());++brick)if(ah.levels()[level].bricks[brick].active())
+		{
+			const auto& metadata=ah.levels()[level].bricks[brick];
+			for(int k=0;k<bs;++k)for(int j=0;j<=bs;++j)for(int i=0;i<bs;++i)
+			{
+				const Vec3d point{metadata.origin.x+(i+0.5)*metadata.h,metadata.origin.y+j*metadata.h,metadata.origin.z+(k+0.5)*metadata.h};const BrickLocation owner=ah.locate_finest(point);if(!owner.found()||owner.level!=static_cast<int>(level))continue;const BrickLocation lower=ah.locate_finest({point.x-0.51*metadata.h,point.y,point.z}),upper=ah.locate_finest({point.x+0.51*metadata.h,point.y,point.z});if(!lower.found()||!upper.found()||(lower.level==static_cast<int>(level)&&upper.level==static_cast<int>(level)))continue;const double value=field.v[field.layout.v_index(brick,i,j,k)],exact=point.x-static_cast<double>(linear_dt);linear_cross_level_diffusion_error=std::max(linear_cross_level_diffusion_error,std::abs(value-exact));++linear_cross_level_diffusion_samples;
+			}
+		}
+	}
+	std::printf("[paraglider] linear 2:1 diffusion: samples=%zu max error=%.3e\n",linear_cross_level_diffusion_samples,linear_cross_level_diffusion_error);check(linear_cross_level_diffusion_samples>0&&linear_cross_level_diffusion_error<cross_level_coordinate_tolerance,"2:1 diffusion preserves a linear tangential field");
 	CompositeAmrPressureSystem composite_amr=build_composite_amr_pressure_system(ah,false);check(!composite_amr.coarse_fine.empty()&&composite_amr.coarse_fine.size()%4==0,"composite AMR stores only compact 2:1 interface connections");bool interface_tiles=true;for(std::size_t edge=0;edge<composite_amr.coarse_fine.size();edge+=4){double tile_area=0;const int coarse_dof=composite_amr.coarse_fine[edge].coarse_dof;for(int tile=0;tile<4;++tile){const auto& connection=composite_amr.coarse_fine[edge+tile];tile_area+=connection.open_area;interface_tiles=interface_tiles&&connection.coarse_dof==coarse_dof;}const double fine_h=std::sqrt(composite_amr.coarse_fine[edge].open_area);interface_tiles=interface_tiles&&near(tile_area,4*fine_h*fine_h,1e-13);}check(interface_tiles,"four fine apertures exactly tile each coarse AMR face");
 	AmrHostFields coarse_fine_transport_host(ah);for(auto& level:coarse_fine_transport_host.levels()){std::fill(level.u.begin(),level.u.end(),Real(1.25));std::fill(level.v.begin(),level.v.end(),Real(-0.5));std::fill(level.w.begin(),level.w.end(),Real(0.75));}DeviceAmrFields coarse_fine_transport_fields(ah);coarse_fine_transport_fields.upload(coarse_fine_transport_host);DeviceCompositeAmrProjection coarse_fine_transport_projection(composite_amr,coarse_fine_transport_fields);coarse_fine_transport_projection.sync_coarse_fine_from_fields();CompositeAmrFluxes coarse_fine_transport_flux;coarse_fine_transport_projection.download_special_fluxes(coarse_fine_transport_flux);bool gathered_tiles=true;for(std::size_t edge=0;edge<composite_amr.coarse_fine.size();++edge){const int axis=composite_amr.coarse_fine[edge].axis;const double expected=axis==0?1.25:(axis==1?-0.5:0.75);gathered_tiles=gathered_tiles&&near(coarse_fine_transport_flux.coarse_fine_velocity[edge],expected,sizeof(Real)==4?2e-6:1e-12);}check(gathered_tiles,"2:1 compact velocities gather from collocated fine MAC faces");
 	for(std::size_t edge=0;edge<coarse_fine_transport_flux.coarse_fine_velocity.size();++edge)coarse_fine_transport_flux.coarse_fine_velocity[edge]=0.25+0.125*(edge%4);coarse_fine_transport_projection.upload_special_fluxes(coarse_fine_transport_flux);coarse_fine_transport_projection.correct_fluxes(Real(1),Real(0.1));coarse_fine_transport_projection.sync_coarse_fine_from_fields();CompositeAmrFluxes coarse_fine_roundtrip;coarse_fine_transport_projection.download_special_fluxes(coarse_fine_roundtrip);bool fine_roundtrip=true;for(std::size_t edge=0;edge<coarse_fine_transport_flux.coarse_fine_velocity.size();++edge)fine_roundtrip=fine_roundtrip&&near(coarse_fine_roundtrip.coarse_fine_velocity[edge],coarse_fine_transport_flux.coarse_fine_velocity[edge],sizeof(Real)==4?2e-6:1e-12);check(fine_roundtrip,"projected 2:1 tile velocities scatter back to fine MAC faces");

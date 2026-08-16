@@ -56,7 +56,7 @@ The case probe accepts `--max-levels N` for resolution studies. A four-level cas
 ## Next engineering work
 
 1. Extend compact MUSCL chains to multidimensional/junction-aware irregular reconstruction and extend graph-normal EB LES to a full irregular strain tensor/wall treatment.
-2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
+2. Replace the now linearly consistent cross-level semi-Lagrangian momentum update with a conservative/refluxed finite-volume transport and run systematic grid/domain/orientation force-convergence studies.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
 5. Replace the finest-brick-aware but throttled host slice snapshot with direct CUDA/OpenGL field sampling and add pressure-force vectors.
