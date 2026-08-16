@@ -1,4 +1,5 @@
 #include "core/fluid/amr_advection.h"
+#include "core/fluid/amr_pressure.h"
 
 #include <cuda_runtime.h>
 
@@ -6,6 +7,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace paracfd::core
 {
@@ -252,6 +254,46 @@ namespace paracfd::core
 			dx[edge.a]-=mx;dx[edge.b]+=mx;dy[edge.a]-=my;dy[edge.b]+=my;dz[edge.a]-=mz;dz[edge.b]+=mz;
 		}
 		for(std::size_t node=0;node<n;++node){velocity_x[node]+=dx[node]/dual_volume[node];velocity_y[node]+=dy[node]/dual_volume[node];velocity_z[node]+=dz[node]/dual_volume[node];}
+	}
+
+	std::vector<NormalMomentumInterfaceTile> build_normal_momentum_interface_tiles(
+		const CompositeAmrPressureSystem& system)
+	{
+		if(!system.hierarchy||system.brick_size<=0)throw std::invalid_argument("normal momentum tiles require a composite AMR hierarchy");const int bs=system.brick_size,cells=bs*bs*bs;
+		auto cell_address=[&](int dof)
+		{
+			AmrMacFaceAddress out;for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level){const int begin=system.level_offset[level],count=static_cast<int>(system.hierarchy->levels()[level].bricks.size())*cells;if(dof<begin||dof>=begin+count)continue;const int work=dof-begin,local=work%cells;out.level=level;out.brick=work/cells;out.i=local%bs;out.j=(local/bs)%bs;out.k=local/(bs*bs);return out;}throw std::invalid_argument("2:1 momentum tile pressure DOF is not a regular AMR cell");
+		};
+		std::vector<NormalMomentumInterfaceTile> tiles;tiles.reserve(system.coarse_fine.size());
+		for(const CoarseFinePressureConnection& connection:system.coarse_fine)
+		{
+			AmrMacFaceAddress coarse=cell_address(connection.coarse_dof),fine=cell_address(connection.fine_dof);if(fine.level!=coarse.level+1||connection.axis<0||connection.axis>2||(connection.direction!=1&&connection.direction!=-1))throw std::invalid_argument("invalid 2:1 normal momentum topology");
+			coarse.component=fine.component=connection.axis;NormalMomentumInterfaceTile tile;tile.coarse_interface=tile.coarse_interior=coarse;tile.fine_interface=tile.fine_interior=fine;tile.direction=connection.direction;int* coarse_interface=connection.axis==0?&tile.coarse_interface.i:(connection.axis==1?&tile.coarse_interface.j:&tile.coarse_interface.k);int* coarse_interior=connection.axis==0?&tile.coarse_interior.i:(connection.axis==1?&tile.coarse_interior.j:&tile.coarse_interior.k);int* fine_interface=connection.axis==0?&tile.fine_interface.i:(connection.axis==1?&tile.fine_interface.j:&tile.fine_interface.k);int* fine_interior=connection.axis==0?&tile.fine_interior.i:(connection.axis==1?&tile.fine_interior.j:&tile.fine_interior.k);*coarse_interface+=connection.direction>0?1:0;*coarse_interior+=connection.direction>0?0:1;*fine_interface+=connection.direction>0?0:1;*fine_interior+=connection.direction>0?1:0;const double hc=system.hierarchy->levels()[coarse.level].h,hf=system.hierarchy->levels()[fine.level].h;if(std::abs(hc-2*hf)>1e-10*hc)throw std::invalid_argument("normal momentum interface is not 2:1");tile.area=connection.open_area;tile.dual_volume=connection.open_area*0.5*(hc+hf);if(!(tile.area>0)||!(tile.dual_volume>0))throw std::invalid_argument("normal momentum interface has non-positive measure");tiles.push_back(tile);
+		}
+		return tiles;
+	}
+
+	std::vector<TangentialMomentumInterfaceConnection> build_tangential_momentum_interface_connections(
+		const CompositeAmrPressureSystem& system)
+	{
+		if(!system.hierarchy||system.brick_size<=0)throw std::invalid_argument("tangential momentum connections require a composite AMR hierarchy");const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;
+		auto cell_address=[&](int dof){AmrMacFaceAddress out;for(int level=0;level<static_cast<int>(hierarchy.levels().size());++level){const int begin=system.level_offset[level],count=static_cast<int>(hierarchy.levels()[level].bricks.size())*cells;if(dof<begin||dof>=begin+count)continue;const int work=dof-begin,local=work%cells;out.level=level;out.brick=work/cells;out.i=local%bs;out.j=(local/bs)%bs;out.k=local/(bs*bs);return out;}throw std::invalid_argument("2:1 tangential momentum pressure DOF is not a regular AMR cell");};
+		auto canonicalize=[&](AmrMacFaceAddress address){int* coordinate=address.component==0?&address.i:(address.component==1?&address.j:&address.k);if(*coordinate==0){const BrickMetadata& brick=hierarchy.levels()[address.level].bricks[address.brick];const int neighbour=brick.same_level_neighbor[2*address.component];if(neighbour>=0&&hierarchy.levels()[address.level].bricks[neighbour].active()){address.brick=neighbour;*coordinate=bs;}}return address;};
+		auto centre=[&](const AmrMacFaceAddress& address){const AmrLevel& level=hierarchy.levels()[address.level];const BrickMetadata& brick=level.bricks[address.brick];return brick.origin+Vec3d{(address.i+(address.component==0?0.0:0.5))*level.h,(address.j+(address.component==1?0.0:0.5))*level.h,(address.k+(address.component==2?0.0:0.5))*level.h};};
+		struct Key{AmrMacFaceAddress coarse,fine;bool operator==(const Key& other)const{return coarse.level==other.coarse.level&&coarse.brick==other.coarse.brick&&coarse.component==other.coarse.component&&coarse.i==other.coarse.i&&coarse.j==other.coarse.j&&coarse.k==other.coarse.k&&fine.level==other.fine.level&&fine.brick==other.fine.brick&&fine.component==other.fine.component&&fine.i==other.fine.i&&fine.j==other.fine.j&&fine.k==other.fine.k;}};
+		struct KeyHash{std::size_t operator()(const Key& key)const{std::size_t h=1469598103934665603ull;auto add=[&](int value){h^=static_cast<std::uint32_t>(value);h*=1099511628211ull;};for(int value:{key.coarse.level,key.coarse.brick,key.coarse.component,key.coarse.i,key.coarse.j,key.coarse.k,key.fine.level,key.fine.brick,key.fine.component,key.fine.i,key.fine.j,key.fine.k})add(value);return h;}};
+		std::vector<TangentialMomentumInterfaceConnection> output;std::unordered_map<Key,std::size_t,KeyHash> index;
+		for(const CoarseFinePressureConnection& pressure:system.coarse_fine)
+		{
+			const AmrMacFaceAddress coarse_cell=cell_address(pressure.coarse_dof),fine_cell=cell_address(pressure.fine_dof);if(fine_cell.level!=coarse_cell.level+1)throw std::invalid_argument("invalid tangential 2:1 level pair");const double hc=hierarchy.levels()[coarse_cell.level].h,hf=hierarchy.levels()[fine_cell.level].h;if(std::abs(hc-2*hf)>1e-10*hc)throw std::invalid_argument("tangential momentum interface is not 2:1");
+			for(int component=0;component<3;++component)if(component!=pressure.axis)for(int coarse_side=0;coarse_side<2;++coarse_side)for(int fine_side=0;fine_side<2;++fine_side)
+			{
+				AmrMacFaceAddress coarse=coarse_cell,fine=fine_cell;coarse.component=fine.component=component;int* coarse_coordinate=component==0?&coarse.i:(component==1?&coarse.j:&coarse.k);int* fine_coordinate=component==0?&fine.i:(component==1?&fine.j:&fine.k);*coarse_coordinate+=coarse_side;*fine_coordinate+=fine_side;coarse=canonicalize(coarse);fine=canonicalize(fine);const Vec3d coarse_centre=centre(coarse),fine_centre=centre(fine);double overlap=1;
+				for(int axis=0;axis<3;++axis)if(axis!=pressure.axis){const double tile_lo=pressure.face_centroid[axis]-0.5*hf,tile_hi=pressure.face_centroid[axis]+0.5*hf,coarse_lo=coarse_centre[axis]-0.5*hc,coarse_hi=coarse_centre[axis]+0.5*hc,fine_lo=fine_centre[axis]-0.5*hf,fine_hi=fine_centre[axis]+0.5*hf;overlap*=std::max(0.0,std::min({tile_hi,coarse_hi,fine_hi})-std::max({tile_lo,coarse_lo,fine_lo}));}if(overlap<=1e-14*hf*hf)continue;
+				const Key key{coarse,fine};const auto found=index.find(key);if(found==index.end()){index.emplace(key,output.size());output.push_back({coarse,fine,overlap,0.5*(hc+hf),static_cast<std::int8_t>(pressure.axis),static_cast<std::int8_t>(component),pressure.direction});}else{TangentialMomentumInterfaceConnection& existing=output[found->second];if(existing.interface_axis!=pressure.axis||existing.component!=component||existing.direction!=pressure.direction)throw std::runtime_error("inconsistent duplicate tangential momentum overlap");existing.open_area+=overlap;}
+			}
+		}
+		return output;
 	}
 
 	DevicePairwiseMomentumTransport::DevicePairwiseMomentumTransport(const std::vector<double>& dual_volume,

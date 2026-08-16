@@ -8,6 +8,53 @@
 
 namespace paracfd::core
 {
+	struct CompositeAmrPressureSystem;
+
+	struct AmrMacFaceAddress
+	{
+		int level = -1;
+		int brick = -1;
+		int component = -1;
+		int i = -1, j = -1, k = -1;
+	};
+
+	// One normal-velocity tile at a 2:1 interface. The fine interface face owns the
+	// transported state; the coincident coarse face is an area-mean alias. Transport
+	// links from the coarse/fine interior faces meet at this tile, whose dual volume
+	// spans half a coarse cell and half a fine cell. This keeps the four fine fluxes
+	// explicit instead of evolving an independent coarse interface value.
+	struct NormalMomentumInterfaceTile
+	{
+		AmrMacFaceAddress coarse_interface;
+		AmrMacFaceAddress fine_interface;
+		AmrMacFaceAddress coarse_interior;
+		AmrMacFaceAddress fine_interior;
+		double area = 0.0;
+		double dual_volume = 0.0;
+		std::int8_t direction = 1;
+	};
+
+	std::vector<NormalMomentumInterfaceTile> build_normal_momentum_interface_tiles(
+		const CompositeAmrPressureSystem& system);
+
+	struct TangentialMomentumInterfaceConnection
+	{
+		AmrMacFaceAddress coarse;
+		AmrMacFaceAddress fine;
+		double open_area = 0.0;
+		double centre_distance = 0.0;
+		std::int8_t interface_axis = 0;
+		std::int8_t component = 0;
+		std::int8_t direction = 1;
+	};
+
+	// Intersect the staggered component-dual rectangles on both sides of every 2:1
+	// interface. This is not assumed to be four links: face-centred tangential lattices
+	// meet on grid lines, so exact overlap clipping and same-level face canonicalization
+	// are required to avoid double counting at child/brick boundaries.
+	std::vector<TangentialMomentumInterfaceConnection> build_tangential_momentum_interface_connections(
+		const CompositeAmrPressureSystem& system);
+
 	// Geometry-independent conservative transport contract used by the composite
 	// momentum path. A node is one velocity-component dual control volume (a regular
 	// MAC face, a 2:1 tile, or a compact EB aperture state). Every connection is
