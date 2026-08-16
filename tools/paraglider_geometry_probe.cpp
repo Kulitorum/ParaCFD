@@ -147,6 +147,50 @@ int main()
 	const int sampled_minus=interior_system.pressure_dof_at_point(interior_atlas,{3.25,1.5,1.5}),sampled_plus=interior_system.pressure_dof_at_point(interior_atlas,{3.75,1.5,1.5});const BrickLocation sampled_regular_location=uh.locate_finest({1.25,1.5,1.5});const int sampled_regular=interior_system.pressure_dof_at_point(interior_atlas,{1.25,1.5,1.5});check(sampled_minus>=0&&sampled_plus>=0&&sampled_minus!=sampled_plus&&interior_system.active[sampled_minus]&&interior_system.active[sampled_plus]&&sampled_regular==interior_system.dof(sampled_regular_location.level,sampled_regular_location.brick,sampled_regular_location.cell.x,sampled_regular_location.cell.y,sampled_regular_location.cell.z),"slice pressure lookup selects independent EB sides and regular cells");
 	AmrHostFields interior_transport_host(uh);for(auto& level:interior_transport_host.levels())std::fill(level.u.begin(),level.u.end(),Real(1));DeviceAmrFields interior_transport_fields(uh);interior_transport_fields.upload(interior_transport_host);DeviceCompositeAmrProjection interior_transport_projection(interior_system,interior_transport_fields);interior_transport_projection.initialize_special_freestream(Real(1));double expected_eb_cfl_rate=0;for(const CoarseFinePressureConnection& edge:interior_system.embedded)if(edge.axis==0){const double a=std::cbrt(interior_system.volume[edge.coarse_dof]),b=std::cbrt(interior_system.volume[edge.fine_dof]),length=std::max(edge.centre_distance,0.5*(a+b));expected_eb_cfl_rate=std::max(expected_eb_cfl_rate,1.0/length);}check(near(interior_transport_projection.max_embedded_cfl_rate(),expected_eb_cfl_rate,sizeof(Real)==4?2e-6:1e-12),"compact EB graph publishes its explicit CFL rate");interior_transport_projection.transport_embedded_apertures(Real(0.1),Real(0.01),Real(0.1));CompositeAmrFluxes interior_uniform_flux;interior_transport_projection.download_special_fluxes(interior_uniform_flux);bool eb_uniform=true;for(std::size_t edge=0;edge<interior_system.embedded.size();++edge)eb_uniform=eb_uniform&&near(interior_uniform_flux.embedded_velocity[edge],interior_system.embedded[edge].axis==0?1.0:0.0,sizeof(Real)==4?2e-6:1e-12);check(eb_uniform,"compact same-side transport preserves uniform freestream with graph LES");
 	CompositeAmrFluxes interior_perturbed_flux=interior_uniform_flux;interior_perturbed_flux.embedded_velocity.front()=Real(2);if(interior_perturbed_flux.embedded_velocity.size()>1)interior_perturbed_flux.embedded_velocity[1]=Real(-1);interior_transport_fields.upload(interior_transport_host);interior_transport_projection.upload_special_fluxes(interior_perturbed_flux);interior_transport_projection.transport_embedded_apertures(Real(0.1),Real(0),Real(0));CompositeAmrFluxes interior_no_les;interior_transport_projection.download_special_fluxes(interior_no_les);interior_transport_fields.upload(interior_transport_host);interior_transport_projection.upload_special_fluxes(interior_perturbed_flux);interior_transport_projection.transport_embedded_apertures(Real(0.1),Real(0),Real(0.2));CompositeAmrFluxes interior_transported_flux;interior_transport_projection.download_special_fluxes(interior_transported_flux);auto perturbation_energy=[&](const CompositeAmrFluxes& flux){double energy=0;for(std::size_t edge=0;edge<interior_system.embedded.size();++edge){const double uniform=interior_system.embedded[edge].axis==0?1.0:0.0,difference=flux.embedded_velocity[edge]-uniform;energy+=interior_system.embedded[edge].open_area*difference*difference;}return energy;};const bool eb_evolved=std::isfinite(interior_transported_flux.embedded_velocity.front())&&!near(interior_transported_flux.embedded_velocity.front(),interior_perturbed_flux.embedded_velocity.front(),1e-7);const bool eb_distinct=interior_transported_flux.embedded_velocity.size()<2||!near(interior_transported_flux.embedded_velocity[0],interior_transported_flux.embedded_velocity[1],1e-7);bool eb_bounded=true;for(double velocity:interior_transported_flux.embedded_velocity)eb_bounded=eb_bounded&&velocity>=-1.000001&&velocity<=2.000001;check(eb_evolved&&eb_distinct,"compact EB apertures evolve as distinct fluid-connected velocity states with graph LES");check(eb_bounded,"compact EB transport cannot create a same-side stencil velocity extremum");check(perturbation_energy(interior_transported_flux)<perturbation_energy(interior_no_les),"compact graph Smagorinsky term dissipates a nonuniform aperture state");
+	// The compact EB graph samples each velocity component at different MAC/aperture
+	// locations. A multidimensional reconstruction must nevertheless reproduce an
+	// affine vector field exactly wherever its local stencil spans all three axes.
+	const double affine_base[3]={1.0,-0.5,0.7};
+	const double affine_gradient[9]={0.20,0.30,-0.10,-0.40,0.15,0.25,0.05,-0.20,0.35};
+	auto affine_value=[&](int component,Vec3d position){return affine_base[component]+affine_gradient[component*3]*position.x+affine_gradient[component*3+1]*position.y+affine_gradient[component*3+2]*position.z;};
+	auto& affine_level=interior_transport_host.levels()[0];
+	const BrickFieldLayout affine_layout=affine_level.layout;
+	const int affine_bs=uh.brick_size();
+	for(std::size_t brick=0;brick<uh.levels()[0].bricks.size();++brick)
+	{
+		const BrickMetadata& metadata=uh.levels()[0].bricks[brick];
+		const double h=metadata.h;
+		for(int k=0;k<affine_bs;++k)for(int j=0;j<affine_bs;++j)for(int i=0;i<=affine_bs;++i)
+			affine_level.u[affine_layout.u_index(static_cast<int>(brick),i,j,k)]=static_cast<Real>(affine_value(0,metadata.origin+Vec3d{i*h,(j+0.5)*h,(k+0.5)*h}));
+		for(int k=0;k<affine_bs;++k)for(int j=0;j<=affine_bs;++j)for(int i=0;i<affine_bs;++i)
+			affine_level.v[affine_layout.v_index(static_cast<int>(brick),i,j,k)]=static_cast<Real>(affine_value(1,metadata.origin+Vec3d{(i+0.5)*h,j*h,(k+0.5)*h}));
+		for(int k=0;k<=affine_bs;++k)for(int j=0;j<affine_bs;++j)for(int i=0;i<affine_bs;++i)
+			affine_level.w[affine_layout.w_index(static_cast<int>(brick),i,j,k)]=static_cast<Real>(affine_value(2,metadata.origin+Vec3d{(i+0.5)*h,(j+0.5)*h,k*h}));
+	}
+	interior_transport_fields.upload(interior_transport_host);
+	CompositeAmrFluxes affine_flux=make_zero_composite_fluxes(interior_system);
+	for(std::size_t edge=0;edge<interior_system.embedded.size();++edge)
+	{
+		const auto& connection=interior_system.embedded[edge];
+		affine_flux.embedded_velocity[edge]=affine_value(connection.axis,connection.face_centroid);
+	}
+	interior_transport_projection.upload_special_fluxes(affine_flux);
+	interior_transport_projection.transport_embedded_apertures(Real(1e-6),Real(0),Real(0));
+	std::vector<Real> affine_reconstructed_gradient;
+	std::vector<std::uint8_t> affine_gradient_rank;
+	interior_transport_projection.download_embedded_node_gradients(affine_reconstructed_gradient,&affine_gradient_rank);
+	double affine_gradient_error=0;
+	int affine_full_rank_components=0;
+	for(std::size_t node_component=0;node_component<affine_gradient_rank.size();++node_component)if(affine_gradient_rank[node_component]==3)
+	{
+		++affine_full_rank_components;
+		const int component=static_cast<int>(node_component%3);
+		const std::size_t gradient_offset=(node_component/3)*9+component*3;
+		for(int direction=0;direction<3;++direction)affine_gradient_error=std::max(affine_gradient_error,std::abs(static_cast<double>(affine_reconstructed_gradient[gradient_offset+direction])-affine_gradient[component*3+direction]));
+	}
+	std::printf("[paraglider] compact EB affine LS full-rank components=%d, max error=%.3e\n",affine_full_rank_components,affine_gradient_error);
+	check(affine_full_rank_components==interior_transport_projection.embedded_least_squares_full_rank_count()&&affine_full_rank_components>0&&affine_gradient_error<(sizeof(Real)==4?2e-5:1e-11),"compact EB least-squares reconstruction reproduces affine velocity gradients");
+
 	Real compact_shear_gradient[9]={};compact_shear_gradient[1]=Real(2);check(near(detail::compact_strain_magnitude_squared(compact_shear_gradient),4.0,sizeof(Real)==4?2e-6:1e-12),"compact strain formula includes tangential shear");
 	Real compact_rotation_gradient[9]={};compact_rotation_gradient[1]=Real(2);compact_rotation_gradient[3]=Real(-2);check(near(detail::compact_strain_magnitude_squared(compact_rotation_gradient),0.0,sizeof(Real)==4?2e-6:1e-12),"compact strain formula excludes rigid rotation");
 	Real compact_extension_gradient[9]={};compact_extension_gradient[0]=Real(2);check(near(detail::compact_strain_magnitude_squared(compact_extension_gradient),8.0,sizeof(Real)==4?2e-6:1e-12),"compact strain formula retains normal extension");

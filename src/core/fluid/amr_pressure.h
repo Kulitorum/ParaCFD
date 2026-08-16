@@ -250,8 +250,8 @@ namespace paracfd::core
 		// Bounded same-side graph transport for split EB aperture states. Complete
 		// same-axis chains use minmod-limited MUSCL; endings and junctions use the donor
 		// fallback. Only DOFs incident to EB apertures are represented, so there is no
-		// full-domain CSR. An area-weighted graph reconstruction of all nine velocity-
-		// gradient components supplies irregular-region Smagorinsky viscosity. The
+		// full-domain CSR. A component-collocated multidimensional least-squares graph
+		// reconstruction supplies all nine irregular-region velocity gradients. The
 		// combined update obeys local same-side stencil bounds.
 		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
@@ -262,6 +262,10 @@ namespace paracfd::core
 		// not spuriously constrain dt merely because their point velocity is large.
 		double max_embedded_cfl_rate() const;
 		int embedded_high_order_stencil_count() const { return embedded_high_order_stencil_count_; }
+		int embedded_least_squares_full_rank_count() const { return embedded_least_squares_full_rank_count_; }
+		// Validation-only D2H diagnostic. Production timesteps never call this.
+		void download_embedded_node_gradients(std::vector<Real>& gradients,
+			std::vector<std::uint8_t>* component_rank = nullptr) const;
 		void compute_divergence();
 		void build_projection_rhs(Real rho, Real dt);
 		void correct_fluxes(Real rho, Real dt);
@@ -295,15 +299,18 @@ namespace paracfd::core
 		std::int8_t* eb_carrier_axis_ = nullptr;
 		Real *eb_carrier_area_ = nullptr, *eb_carrier_mass_ = nullptr, *eb_node_axis_sum_ = nullptr,
 			*eb_node_axis_weight_ = nullptr, *eb_node_gradient_sum_ = nullptr,
-			*eb_node_gradient_weight_ = nullptr, *eb_transport_length_ = nullptr,
+			*eb_node_gradient_inverse_ = nullptr, *eb_edge_ls_displacement_ = nullptr,
+			*eb_edge_ls_weight_ = nullptr, *eb_transport_length_ = nullptr,
 			*eb_transport_scratch_ = nullptr, *eb_diffusion_rate_ = nullptr,
 			*eb_node_diffusion_sum_ = nullptr, *eb_node_neighbor_count_ = nullptr,
 			*eb_diffusion_scratch_ = nullptr;
 		std::vector<int> brick_counts_;
+		std::vector<std::uint8_t> embedded_gradient_rank_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
 		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
 		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0;
 		int embedded_high_order_stencil_count_ = 0;
+		int embedded_least_squares_full_rank_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
