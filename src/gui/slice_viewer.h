@@ -122,10 +122,10 @@ namespace paracfd::gui
 		void setTracerTrail(int n);         // max streamline length [integration steps]
 		// Ribbon thickness in PIXELS (screen-space, constant regardless of zoom). A few px reads well.
 		void setTracerWidth(float w) { tracer_width_ = w < 0.5f ? 0.5f : (w > 12.0f ? 12.0f : w); update(); }
-		// "Boring" filter [0.99,1.1]: hide streamlines whose path length is below this multiple of the
-		// domain length Lx. 0.99 (the minimum) disables the filter (show all); higher hides all but the
-		// meandering (eddy/wake) lines. A straight crosser has path length ≈ Lx.
-		void setTracerBoring(float m) { tracer_boring_ = m < 0.99f ? 0.99f : (m > 1.1f ? 1.1f : m); update(); }
+		// "Boring" filter [0.75,1.1]: hide streamlines whose path length is below this multiple of the
+		// domain length Lx. The 0.75 minimum is an explicit show-all notch; values above it expose the
+		// useful short/straight transition continuously instead of jumping from off straight to ~Lx.
+		void setTracerBoring(float m) { tracer_boring_ = m < 0.75f ? 0.75f : (m > 1.1f ? 1.1f : m); update(); }
 		// While the boring slider is being dragged, bypass the anti-flicker retention so the filter
 		// updates instantly; retention resumes on release.
 		void setTracerBoringInstant(bool on) { tracer_boring_instant_ = on; update(); }
@@ -389,7 +389,7 @@ namespace paracfd::gui
 		int tracer_grid_density_ = 12;   // inlet seed count along the larger inlet dimension
 		int tracer_trail_ = 600;         // max streamline length [integration steps]
 		float tracer_width_ = 2.0f;      // ribbon thickness in pixels (screen-space)
-		float tracer_boring_ = 0.99f;    // hide streamlines shorter than Lx·this (0.99 = off … 1.1)
+		float tracer_boring_ = 0.75f;    // hide streamlines shorter than Lx·this (0.75 = off … 1.1)
 		bool tracer_boring_instant_ = false; // true while the boring slider is dragged (bypass the hold)
 		QOpenGLShaderProgram tracer_prog_;
 		unsigned int tracer_vao_ = 0, tracer_vbo_ = 0; // interleaved ribbon geometry (stride 11 floats)

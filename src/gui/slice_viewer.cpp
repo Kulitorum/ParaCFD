@@ -1282,11 +1282,11 @@ void main()
 		const float kTracerSpan = 2.5f; // guaranteed arc reach ≥ 2.5·Lx (well above the 1.1·Lx filter top)
 		const int span_floor = (int)std::ceil(kTracerSpan * (float)info_.Lx / std::max(1e-6f, (float)info_.h));
 		view.max_points = std::max(tracer_trail_, span_floor);
-		// "Boring" filter: hide streamlines whose arc is below Lx·boring. The slider minimum (0.99) disables
-		// the filter entirely (show all) — a fixed multiple can't reliably clear a straight crosser's arc
-		// (≈ Lx − h) across domain sizes, so treat the bottom notch as "off". The span_floor above keeps
-		// the threshold reachable regardless of resolution (else refining the grid makes it binary).
-		view.min_length = (tracer_boring_ <= 0.995f) ? 0.0f : tracer_boring_ * (float)info_.Lx;
+		// "Boring" filter: hide streamlines whose arc is below Lx·boring. A straight crosser starts half a
+		// display cell inside the inlet and normally measures about (Lx-h), which is ~0.984 Lx in the
+		// default domain. The former 0.995 off-switch therefore jumped directly past the entire useful
+		// transition. Only the new 0.75 bottom notch is off; 0.751..1.1 is continuous and reachable.
+		view.min_length = (tracer_boring_ <= 0.7505f) ? 0.0f : tracer_boring_ * (float)info_.Lx;
 		view.dt = dt;
 		view.hold_seconds = 1.0f; // keep a tracer for 1 s after it was last interesting (anti-flicker)
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)
