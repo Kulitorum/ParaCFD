@@ -4,7 +4,9 @@
 #include "gui/colormap.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
+#include <numeric>
 
 namespace paracfd::gui
 {
@@ -147,7 +149,7 @@ namespace paracfd::gui
 
 	// --- ribbon geometry from the current line_ ----------------------------------------------------
 
-	void FlowTracers::emit_ribbon(const TracerView& view, int n)
+	void FlowTracers::emit_ribbon(const TracerView& view, const Pt* line, int n)
 	{
 		const float eps = 1e-6f;
 		// Ribbon: two vertices (side ±1) per point, tangent from central differences. Coloured by the
@@ -158,9 +160,9 @@ namespace paracfd::gui
 		counts_.push_back(2 * n);
 		for (int i = 0; i < n; ++i)
 		{
-			const Pt& p = line_[i];
-			const Pt& pa = line_[std::max(0, i - 1)];
-			const Pt& pb = line_[std::min(n - 1, i + 1)];
+			const Pt& p = line[i];
+			const Pt& pa = line[std::max(0, i - 1)];
+			const Pt& pb = line[std::min(n - 1, i + 1)];
 			float tx = pb.x - pa.x, ty = pb.y - pa.y, tz = pb.z - pa.z;
 			float tl = std::sqrt(tx * tx + ty * ty + tz * tz);
 			if (tl > eps) { tx /= tl; ty /= tl; tz /= tl; }
@@ -181,7 +183,7 @@ namespace paracfd::gui
 		}
 	}
 
-	// --- per-frame: integrate every seed, apply the boring filter + temporal hold ------------------
+	// --- cache one field generation; quantile-filter and pack it per frame -------------------------
 
 	void FlowTracers::advance(const TracerView& view, const FlowField& f)
 	{
@@ -194,6 +196,7 @@ namespace paracfd::gui
 		const float plane_sig = view.three_d ? 0.0f : view.plane_pos;
 		const bool changed = !cfg_valid_ || view.three_d != s_three_d_ || view.axis != s_axis_
 			|| view.density != s_density_ || g.nx != s_nx_ || g.ny != s_ny_ || g.nz != s_nz_
+			|| view.max_points!=s_max_points_ || std::fabs(view.step_ds-s_step_ds_)>1e-9f
 			|| std::fabs(plane_sig - s_plane_) > 1e-6f;
 		if (changed)
 		{
@@ -201,29 +204,40 @@ namespace paracfd::gui
 			cfg_valid_ = true;
 			s_three_d_ = view.three_d; s_axis_ = view.axis; s_density_ = view.density;
 			s_nx_ = g.nx; s_ny_ = g.ny; s_nz_ = g.nz; s_plane_ = plane_sig;
+			s_max_points_=view.max_points;s_step_ds_=view.step_ds;cache_valid_=false;
+		}
+
+		if(!cache_valid_||cached_generation_!=f.generation)
+		{
+			const std::size_t count=seeds_.size();cached_points_.clear();cached_offsets_.assign(count+1,0);
+			cached_score_.assign(count,1.0f);cached_rank_.assign(count,-1);std::vector<std::size_t> order;order.reserve(count);
+			for(std::size_t k=0;k<count;++k)
+			{
+				cached_offsets_[k]=cached_points_.size();const int n=integrate_line(view,f,seeds_[k][0],seeds_[k][1],seeds_[k][2]);
+				cached_points_.insert(cached_points_.end(),line_.begin(),line_.end());
+				if(n<2)continue;const float dx=line_.back().x-line_.front().x,dy=line_.back().y-line_.front().y,dz=line_.back().z-line_.front().z;
+				const float chord=std::sqrt(dx*dx+dy*dy+dz*dz),arc=(n-1)*view.step_ds;
+				cached_score_[k]=std::max(1.0f,arc/std::max(chord,1e-6f));order.push_back(k);
+			}
+			cached_offsets_[count]=cached_points_.size();
+			auto stable_hash=[](std::size_t index){std::uint32_t x=static_cast<std::uint32_t>(index)+0x9e3779b9u;x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;};
+			std::sort(order.begin(),order.end(),[&](std::size_t a,std::size_t b){if(cached_score_[a]!=cached_score_[b])return cached_score_[a]<cached_score_[b];const std::uint32_t ha=stable_hash(a),hb=stable_hash(b);return ha!=hb?ha<hb:a<b;});
+			for(std::size_t rank=0;rank<order.size();++rank)cached_rank_[order[rank]]=static_cast<int>(rank);
+			cached_generation_=f.generation;cache_valid_=true;
 		}
 
 		const float dt = std::clamp(view.dt, 0.0f, 0.5f);
+		int valid_count=0;for(int rank:cached_rank_)if(rank>=0)valid_count=std::max(valid_count,rank+1);
+		const float hidden_fraction=std::clamp(view.boring_hide_fraction,0.0f,1.0f);
+		const int hidden_count=std::min(valid_count,static_cast<int>(std::floor(hidden_fraction*valid_count)));
 		for (size_t k = 0; k < seeds_.size(); ++k)
 		{
-			const int n = integrate_line(view, f, seeds_[k][0], seeds_[k][1], seeds_[k][2]);
-
-			// Straightness is path length / endpoint distance (tortuosity). Because integration uses
-			// fixed arc-length steps, the numerator is known exactly without summing every segment.
-			// Clamp to the mathematical lower bound so floating-point accumulation cannot randomly
-			// classify a perfectly straight line on opposite sides of one.
-			bool interesting = false;
-			if (n >= 2)
-			{
-				const float dx=line_.back().x-line_.front().x,dy=line_.back().y-line_.front().y,dz=line_.back().z-line_.front().z;
-				const float chord=std::sqrt(dx*dx+dy*dy+dz*dz),arc=(n-1)*view.step_ds;
-				const float tortuosity=std::max(1.0f,arc/std::max(chord,1e-6f));
-				interesting=tortuosity>view.straightness_threshold;
-			}
+			const int n=static_cast<int>(cached_offsets_[k+1]-cached_offsets_[k]);
+			const bool interesting=cached_rank_[k]>=hidden_count;
 			if (interesting) hold_[k] = view.hold_seconds;
 			else hold_[k] = view.instant ? 0.0f : std::max(0.0f, hold_[k] - dt); // instant ⇒ no retention
 
-			if (n >= 2 && (interesting || hold_[k] > 0.0f)) emit_ribbon(view, n);
+			if (n >= 2 && (interesting || hold_[k] > 0.0f))emit_ribbon(view,cached_points_.data()+cached_offsets_[k],n);
 		}
 	}
 }

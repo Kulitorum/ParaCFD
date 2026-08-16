@@ -80,6 +80,7 @@ namespace paracfd::gui
 		paracfd::core::MacGrid flow_grid_{};
 		std::vector<double> flow_u_, flow_v_, flow_w_, flow_p_;
 		bool flow_ready_ = false;
+		std::uint64_t flow_generation_ = 0;
 		long long steps_ = 0;
 	};
 }

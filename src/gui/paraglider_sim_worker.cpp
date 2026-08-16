@@ -25,7 +25,7 @@ namespace paracfd::gui
 		if (!flow_ready_ || flow_u_.empty()) return false;
 		FlowField field;
 		field.u = flow_u_.data(); field.v = flow_v_.data(); field.w = flow_w_.data();
-		field.p = flow_p_.data(); field.grid = flow_grid_;
+		field.p = flow_p_.data(); field.grid = flow_grid_; field.generation = flow_generation_;
 		fn(field);
 		return true;
 	}
@@ -163,6 +163,7 @@ namespace paracfd::gui
 		std::lock_guard lock(flow_mutex_);
 		flow_grid_ = grid;
 		flow_u_.swap(u); flow_v_.swap(v); flow_w_.swap(w); flow_p_.swap(pressure);
+		++flow_generation_;
 		flow_ready_ = true;
 	}
 

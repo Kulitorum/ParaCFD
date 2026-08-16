@@ -38,12 +38,11 @@ namespace paracfd::gui
 		int density = 12;         // inlet seed count along the larger inlet dimension
 		int max_points = 600;     // max streamline length in integration steps (bounds eddies)
 		float step_ds = 0.05f;    // arc-length step [m] (caller sets to ~h)
-		// "Boring" filter: arc length / endpoint distance. A straight path is exactly 1; curved and
-		// looping paths are greater than 1. Paths at or below the threshold are hidden. Values below
-		// 1 therefore provide a deterministic off region without relying on integration-step counts.
-		float straightness_threshold = 0.99f;
+		// Fraction [0,1] of the least-interesting current paths to hide. Interest is deterministic
+		// arc/chord tortuosity; the empirical rank adapts the whole control range to each flow field.
+		float boring_hide_fraction = 0.0f;
 		// Temporal hold: a tracer keeps being drawn for this long [s] after it was last "interesting"
-		// (tortuosity > straightness_threshold), so paths hovering at the threshold don't flicker.
+		// (outside the hidden quantile), so paths hovering at the threshold don't flicker.
 		// `dt` is the
 		// seconds elapsed since the previous advance() (drives the hold countdown).
 		float dt = 0.0f;
@@ -58,12 +57,11 @@ namespace paracfd::gui
 	class FlowTracers
 	{
 	public:
-		// Re-integrate every streamline this frame through `f` under `view`, filling the packed ribbon
-		// geometry below. Persistent per-seed state (the temporal hold) carries across frames; a
-		// null/empty field clears the buffers.
+		// Integrate once per published CFD field and cache the paths/scores. Slider changes only rank
+		// and repack the cached geometry; a null/empty field clears the buffers.
 		void advance(const TracerView& view, const FlowField& f);
 		// Force the seed lattice to rebuild + the temporal hold to reset (call on a domain/axis change).
-		void reset() { cfg_valid_ = false; }
+		void reset() { cfg_valid_ = false; cache_valid_ = false; }
 
 		// Packed ribbon geometry for glMultiDrawArrays(GL_TRIANGLE_STRIP, firsts, counts, strips).
 		// Interleaved stride 11 floats per vertex: [pos.x pos.y pos.z side  tan.x tan.y tan.z  r g b a]
@@ -85,19 +83,24 @@ namespace paracfd::gui
 		void build_seeds(const TracerView& view, const FlowField& f);
 		// Integrate one streamline from the seed into line_; returns the point count.
 		int integrate_line(const TracerView& view, const FlowField& f, float sx, float sy, float sz);
-		// Build a ribbon strip from the current line_ (n points) into the packed buffers.
-		void emit_ribbon(const TracerView& view, int n);
+		// Build a ribbon strip from a cached line into the packed buffers.
+		void emit_ribbon(const TracerView& view, const Pt* line, int n);
 
 		std::vector<std::array<float, 3>> seeds_; // persistent inlet seed points [m]
 		std::vector<float> hold_;                 // per-seed visibility remaining [s] (temporal hold)
 		std::vector<Pt> line_;                    // scratch: the current streamline's points
+		std::vector<Pt> cached_points_;           // flattened paths for the current flow generation
+		std::vector<std::size_t> cached_offsets_; // one offset per seed plus a terminal offset
+		std::vector<float> cached_score_;         // arc/chord tortuosity for each seed
+		std::vector<int> cached_rank_;            // ascending-interest empirical rank; -1 if too short
 		std::vector<float> vbo_;                  // interleaved ribbon vertices (see vertices())
 		std::vector<int> firsts_, counts_;
 
 		// Seed-config signature: rebuild seeds + reset the holds when any of these change.
-		bool cfg_valid_ = false;
+		bool cfg_valid_ = false,cache_valid_ = false;
+		std::uint64_t cached_generation_ = 0;
 		bool s_three_d_ = true;
-		int s_axis_ = 2, s_density_ = 0, s_nx_ = 0, s_ny_ = 0, s_nz_ = 0;
-		float s_plane_ = 0.0f;
+		int s_axis_ = 2, s_density_ = 0, s_nx_ = 0, s_ny_ = 0, s_nz_ = 0,s_max_points_=0;
+		float s_plane_ = 0.0f,s_step_ds_=0.0f;
 	};
 }

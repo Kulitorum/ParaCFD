@@ -1297,19 +1297,14 @@ void main()
 			: 1.8f * (float)info_.U;
 		view.density = tracer_grid_density_;
 		view.step_ds = (float)info_.h; // one cell per integration step (each step adds exactly h of arc)
-		// Integration-step cap. The boring filter (below) thresholds a streamline's ARC LENGTH against a
-		// multiple of Lx (slider top = 1.1·Lx), but a streamline integrates at most max_points·h of arc.
-		// On a FINE grid (small h) a fixed step count spans < Lx, so NO streamline can reach the threshold
-		// and the filter collapses to all-or-nothing after a resize. Floor the cap at a couple of domain
-		// lengths of arc (steps to cross the domain × kTracerSpan) so the filter keeps a working gradient
-		// at any resolution; a larger user "Tracer length" still wins. At the nominal grid (nx≈200) the
-		// floor (500) is below the default trail (600), so nominal behaviour is unchanged.
+		// Integration-step cap. Ensure a fine display grid can still follow recirculating paths for a
+		// couple of domain lengths; a larger user "Tracer length" remains authoritative.
 		const float kTracerSpan = 2.5f; // enough arc reach for recirculating paths before the cap
 		const int span_floor = (int)std::ceil(kTracerSpan * (float)info_.Lx / std::max(1e-6f, (float)info_.h));
 		view.max_points = std::max(tracer_trail_, span_floor);
-		// "Boring" is path tortuosity: arc length / endpoint distance. It is one for a straight
-		// path and rises continuously with curvature, independent of cell-count quantization.
-		view.straightness_threshold = tracer_boring_;
+		// Rank the current field by path tortuosity and hide this fraction from the boring end.
+		// Quantiles use the full slider range even when most paths are exactly straight.
+		view.boring_hide_fraction = tracer_boring_;
 		view.dt = dt;
 		view.hold_seconds = 1.0f; // keep a tracer for 1 s after it was last interesting (anti-flicker)
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)

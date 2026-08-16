@@ -36,6 +36,7 @@ namespace paracfd::gui
 		// against the static placed-mesh BVH, so particles cannot tunnel from one fluid side to the other.
 		const paracfd::core::TriangleBvh* fabric = nullptr;
 		paracfd::core::MacGrid grid;
+		std::uint64_t generation = 0; // changes only when the worker publishes a new CFD field
 	};
 
 	// What plane / mode the arrows are advected in, plus the colour scale (so arrow speed maps
