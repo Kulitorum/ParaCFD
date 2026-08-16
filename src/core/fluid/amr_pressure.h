@@ -22,6 +22,19 @@ namespace paracfd::core
 		{
 			return a * b <= Real(0) ? Real(0) : (compact_abs(a) < compact_abs(b) ? a : b);
 		}
+		// Squared Smagorinsky strain magnitude for a row-major velocity gradient:
+		// gradient[velocity_component * 3 + derivative_axis]. This form avoids a
+		// host/device sqrt in the shared manufactured tests; timestep kernels take
+		// the square root after reconstructing the compact EB graph gradient.
+		PARACFD_AMR_HD inline Real compact_strain_magnitude_squared(const Real* gradient)
+		{
+			const Real sxx = gradient[0], syy = gradient[4], szz = gradient[8];
+			const Real sxy = Real(0.5) * (gradient[1] + gradient[3]);
+			const Real sxz = Real(0.5) * (gradient[2] + gradient[6]);
+			const Real syz = Real(0.5) * (gradient[5] + gradient[7]);
+			return Real(2) * (sxx*sxx + syy*syy + szz*szz
+				+ Real(2) * (sxy*sxy + sxz*sxz + syz*syz));
+		}
 		// One compact-aperture transport update. `upstream*` and `downstream` are ordered
 		// along the sign of `current`; complete_chain selects MUSCL or the endpoint fallback.
 		PARACFD_AMR_HD inline Real bounded_compact_transport_update(Real current,
@@ -199,8 +212,9 @@ namespace paracfd::core
 		// Bounded same-side graph transport for split EB aperture states. Complete
 		// same-axis chains use minmod-limited MUSCL; endings and junctions use the donor
 		// fallback. Only DOFs incident to EB apertures are represented, so there is no
-		// full-domain CSR. A graph-normal Smagorinsky estimate supplies irregular-region
-		// eddy viscosity. The combined update obeys local same-side stencil bounds.
+		// full-domain CSR. An area-weighted graph reconstruction of all nine velocity-
+		// gradient components supplies irregular-region Smagorinsky viscosity. The
+		// combined update obeys local same-side stencil bounds.
 		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
@@ -241,7 +255,8 @@ namespace paracfd::core
 		std::uint64_t* eb_carrier_index_ = nullptr;
 		std::int8_t* eb_carrier_axis_ = nullptr;
 		Real *eb_carrier_area_ = nullptr, *eb_node_axis_sum_ = nullptr,
-			*eb_node_axis_weight_ = nullptr, *eb_transport_length_ = nullptr,
+			*eb_node_axis_weight_ = nullptr, *eb_node_gradient_sum_ = nullptr,
+			*eb_node_gradient_weight_ = nullptr, *eb_transport_length_ = nullptr,
 			*eb_transport_scratch_ = nullptr;
 		std::vector<int> brick_counts_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
