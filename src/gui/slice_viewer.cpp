@@ -1254,11 +1254,9 @@ void main()
 		if (!show_arrows_ || arrow_draw_count_ <= 0) return;
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		// Slice-plane arrows are an annotation overlay. With depth testing enabled, the plane/model
-		// can cut a billboarded glyph in half. Volume arrows retain ordinary 3D occlusion.
-		const bool slice_overlay = arrow_mode_!=0;
-		if (slice_overlay) glDisable(GL_DEPTH_TEST);
-		glDepthMask(GL_FALSE); // blend arrows without writing into the depth buffer
+		// The scalar slice never writes depth, so arrows remain visible over it while ordinary depth
+		// testing still lets the zero-thickness STEP canopy occlude glyphs on its far side.
+		glDepthMask(GL_FALSE);
 		arrow_prog_.bind();
 		arrow_prog_.setUniformValue("uMVP", mvp);
 		arrow_prog_.setUniformValue("uEye", camera_.eye());
@@ -1274,7 +1272,6 @@ void main()
 		glBindVertexArray(0);
 		arrow_prog_.release();
 		glDepthMask(GL_TRUE);
-		if (slice_overlay) glEnable(GL_DEPTH_TEST);
 		glDisable(GL_BLEND);
 	}
 
@@ -2088,12 +2085,12 @@ void main()
 		// clip test OFF so the plane itself is not clipped; only shown while the feature is enabled.
 		if (clip_enabled_&&!clip_follows_slice_) drawClipPlaneViz(mvp, clipPlane);
 
-		// Animated flow arrows (drawn last: blended, no depth write). Never clipped (flow stays visible).
+		// Flow arrows are blended without writing depth. The scalar plane cannot occlude them, but the
+		// opaque STEP surface already in the depth buffer can.
 		drawArrows(mvp);
 
-		// Grid-seeded streaklines (blended line strips, no depth write; depth-tested against solids so
-		// they read as 3D). Never clipped, like the arrows. Drawn after the arrows so both flow layers
-		// blend over the scene.
+		// Grid-seeded streaklines use the same rule: the scalar plane does not occlude them, while the
+		// STEP surface does. Drawn after arrows so both flow layers blend over the scene.
 		drawTracers(mvp);
 
 		// Model-placement gizmo (fluid-viewer model): the manipulator glyph, always on top (depth test
