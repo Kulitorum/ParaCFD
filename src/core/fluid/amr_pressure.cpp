@@ -15,6 +15,18 @@ namespace paracfd::core
 		{
 			if (a < 0 || b < 0 || a == b) return; const double flux = coefficient * (pressure[a] - pressure[b]); output[a] += flux; output[b] -= flux;
 		}
+		void finalize_component_gauges(CompositeAmrPressureSystem& system)
+		{
+			system.gauges.clear();if(!system.pressure_outlet_xmax)return;const int n=system.storage_size,bs=system.brick_size;std::vector<int> parent(n,-1);for(int q=0;q<n;++q)if(system.active[q])parent[q]=q;auto root=[&](int q){while(parent[q]!=q){parent[q]=parent[parent[q]];q=parent[q];}return q;};auto join=[&](int a,int b){if(a<0||b<0||!system.active[a]||!system.active[b])return;a=root(a);b=root(b);if(a!=b)parent[std::max(a,b)]=std::min(a,b);};
+			for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level){const AmrLevel& source=system.hierarchy->levels()[level];for(int brick=0;brick<static_cast<int>(source.bricks.size());++brick){const BrickMetadata& meta=source.bricks[brick];if(!meta.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=system.dof(level,brick,i,j,k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if(system.cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k},b=-1;if(++c[axis]<bs)b=system.dof(level,brick,c[0],c[1],c[2]);else{const int neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&source.bricks[neighbour].active()){c[axis]=0;b=system.dof(level,neighbour,c[0],c[1],c[2]);}}join(a,b);}}}}
+			for(const CoarseFinePressureConnection& edge:system.coarse_fine)join(edge.coarse_dof,edge.fine_dof);for(const CoarseFinePressureConnection& edge:system.embedded)join(edge.coarse_dof,edge.fine_dof);
+			std::vector<unsigned char> outlet_root(n,0);for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level){const AmrLevel& source=system.hierarchy->levels()[level];for(int brick=0;brick<static_cast<int>(source.bricks.size());++brick){const BrickMetadata& meta=source.bricks[brick];if(!meta.active()||!(meta.flags&BRICK_XMAX))continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j){const int q=system.dof(level,brick,bs-1,j,k);if(system.active[q])outlet_root[root(q)]=1;}}}
+			std::vector<unsigned char> emitted(n,0);for(int q=0;q<n;++q)if(system.active[q]){const int r=root(q);if(!outlet_root[r]&&!emitted[r]){emitted[r]=1;system.gauges.push_back({q,std::max(1e-12,std::cbrt(std::max(0.0,system.volume[q])))});}}
+		}
+		int base_aggregate_dof(const CompositeAmrPressureSystem& system,Vec3d point)
+		{
+			const AmrLevel& base=system.hierarchy->levels().front();const double brick_width=system.brick_size*base.h;const Aabb3d& domain=system.hierarchy->domain();Int3 coord{static_cast<int>(std::floor((point.x-domain.lo.x)/brick_width)),static_cast<int>(std::floor((point.y-domain.lo.y)/brick_width)),static_cast<int>(std::floor((point.z-domain.lo.z)/brick_width))};const int brick=system.hierarchy->find_brick(0,coord);if(brick<0)return -1;const BrickMetadata& metadata=base.bricks[brick];const int i=std::clamp(static_cast<int>(std::floor((point.x-metadata.origin.x)/base.h)),0,system.brick_size-1),j=std::clamp(static_cast<int>(std::floor((point.y-metadata.origin.y)/base.h)),0,system.brick_size-1),k=std::clamp(static_cast<int>(std::floor((point.z-metadata.origin.z)/base.h)),0,system.brick_size-1);return system.dof(0,brick,i,j,k);
+		}
 	}
 
 	int CompositeAmrPressureSystem::dof(int level, int brick, int i, int j, int k) const
@@ -30,13 +42,13 @@ namespace paracfd::core
 		{
 			system.level_offset[level] = system.storage_size; system.storage_size += static_cast<int>(hierarchy.levels()[level].bricks.size()) * cells_per_brick;
 		}
-		system.active.assign(system.storage_size, 0); system.volume.assign(system.storage_size, 0.0);
+		system.active.assign(system.storage_size, 0); system.volume.assign(system.storage_size, 0.0);system.preconditioner_aggregate.assign(system.storage_size,-1);
 		system.cut_face_mask.assign(system.storage_size, 0);
 		for (int level = 0; level < static_cast<int>(hierarchy.levels().size()); ++level)
 		{
 			const AmrLevel& source = hierarchy.levels()[level]; const double cell_volume = static_cast<double>(source.h) * source.h * source.h;
 			for (int brick = 0; brick < static_cast<int>(source.bricks.size()); ++brick) if (source.bricks[brick].active())
-				for (int k = 0; k < bs; ++k) for (int j = 0; j < bs; ++j) for (int i = 0; i < bs; ++i) { const int q = system.dof(level, brick, i, j, k); system.active[q] = 1; system.volume[q] = cell_volume; }
+				for (int k = 0; k < bs; ++k) for (int j = 0; j < bs; ++j) for (int i = 0; i < bs; ++i) { const int q = system.dof(level, brick, i, j, k); system.active[q] = 1; system.volume[q] = cell_volume;const Vec3d point=source.bricks[brick].origin+Vec3d{(i+0.5)*source.h,(j+0.5)*source.h,(k+0.5)*source.h};system.preconditioner_aggregate[q]=base_aggregate_dof(system,point); }
 		}
 
 		// Each active coarse brick scans all six faces for a covered same-level
@@ -66,13 +78,13 @@ namespace paracfd::core
 				}
 			}
 		}
-		return system;
+		finalize_component_gauges(system);return system;
 	}
 
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
 		const AmrEmbeddedBoundaryAtlas& atlas, bool outlet)
 	{
-		CompositeAmrPressureSystem system=build_composite_amr_pressure_system(hierarchy,outlet);
+		CompositeAmrPressureSystem system=build_composite_amr_pressure_system(hierarchy,outlet);system.gauges.clear();
 		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
 		{
 			if(level_atlas.level<0||level_atlas.level>=static_cast<int>(hierarchy.levels().size()))throw std::invalid_argument("EB atlas level is outside AMR hierarchy");const EmbeddedBoundary& eb=level_atlas.topology;EbPressureSystem local=build_eb_pressure_system(eb,false);std::vector<int> cell_global(eb.grid.cell_count(),-1),fragment_global(eb.fragments.size(),-1);
@@ -81,7 +93,7 @@ namespace paracfd::core
 			// and pressure-static state come from the already-resolved local EB system.
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&eb.fragments[fragment].merge_target==irregular_fragment(fragment))
 			{
-				const int local_dof=local.fragment_dof[fragment],global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(local.active[local_dof]);system.volume.push_back(local.volume[local_dof]);system.cut_face_mask.push_back(0);
+				const int local_dof=local.fragment_dof[fragment],global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(local.active[local_dof]);system.volume.push_back(local.volume[local_dof]);system.cut_face_mask.push_back(0);system.preconditioner_aggregate.push_back(base_aggregate_dof(system,eb.fragments[fragment].centroid));
 			}
 			std::vector<unsigned char> resolving(eb.fragments.size(),0);std::function<int(FragmentRef)> map_ref=[&](FragmentRef ref)->int
 			{
@@ -94,7 +106,7 @@ namespace paracfd::core
 			}
 		}
 		for(const CoarseFinePressureConnection& connection:system.coarse_fine)if(!system.active[connection.coarse_dof]||!system.active[connection.fine_dof])throw std::runtime_error("embedded boundary intersects a 2:1 interface; aperture-aware cross-level topology is required");
-		return system;
+		finalize_component_gauges(system);return system;
 	}
 
 	CompositeAmrFluxes make_zero_composite_fluxes(const CompositeAmrPressureSystem& system){CompositeAmrFluxes flux;flux.coarse_fine_velocity.assign(system.coarse_fine.size(),0);flux.embedded_velocity.assign(system.embedded.size(),0);return flux;}
@@ -157,6 +169,7 @@ namespace paracfd::core
 		}
 		for (const CoarseFinePressureConnection& edge : coarse_fine)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area / edge.centre_distance);
 		for (const CoarseFinePressureConnection& edge : embedded)if(active[edge.coarse_dof]&&active[edge.fine_dof])add_edge(output, pressure, edge.coarse_dof, edge.fine_dof, edge.open_area / edge.centre_distance);
+		for(const CompositePressureGauge& gauge:gauges)if(gauge.dof>=0&&active[gauge.dof])output[gauge.dof]+=gauge.coefficient*pressure[gauge.dof];
 	}
 
 	void CompositeAmrPressureSystem::diagonal_cpu(std::vector<double>& diagonal) const
@@ -168,5 +181,6 @@ namespace paracfd::core
 			for (int brick = 0; brick < static_cast<int>(source.bricks.size()); ++brick) { const BrickMetadata& meta = source.bricks[brick]; if (!meta.active()) continue; for (int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i) { const int a=dof(level,brick,i,j,k);if(!active[a])continue;for(int axis=0;axis<3;++axis){if(cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k};++c[axis];if(c[axis]<bs)add_diagonal(a,dof(level,brick,c[0],c[1],c[2]),coefficient);else{int neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&source.bricks[neighbour].active()){c[axis]=0;add_diagonal(a,dof(level,neighbour,c[0],c[1],c[2]),coefficient);}}}if(pressure_outlet_xmax&&(meta.flags&BRICK_XMAX)&&i==bs-1)diagonal[a]+=2.0*source.h;} }
 		}
 		for(const CoarseFinePressureConnection& edge:coarse_fine)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area/edge.centre_distance);for(const CoarseFinePressureConnection& edge:embedded)add_diagonal(edge.coarse_dof,edge.fine_dof,edge.open_area/edge.centre_distance);
+		for(const CompositePressureGauge& gauge:gauges)if(gauge.dof>=0&&active[gauge.dof])diagonal[gauge.dof]+=gauge.coefficient;
 	}
 }

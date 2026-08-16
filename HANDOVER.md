@@ -14,7 +14,8 @@ Implemented:
 - split face apertures, including multiple disconnected openings on a partially covered aligned Cartesian face;
 - conservative same-fluid small-fragment merging and explicitly retained/counted pressure-static pockets;
 - a composite matrix-free pressure operator containing implicit regular faces plus compact EB and coarse/fine connections;
-- CPU divergence/gradient reference operations and CUDA FP32/FP64 operator/Jacobi-PCG projection across all AMR levels;
+- CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
+- pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a GUI AMR/EB preview that validates pressure-topology construction and refuses to run the unrelated legacy channel timestep.
@@ -32,13 +33,15 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - 32,338 owned EB fragments, 117,040 face apertures, and 155,324 surface patches;
 - zero unresolved cells and 294 pressure-static isolated pockets;
 - 4,484,367 composite pressure slots with 81,920 coarse/fine and 112,563 EB connections;
-- 124.14 MiB pooled FP32 field estimate (before pressure solver/topology scratch).
+- 124.14 MiB pooled FP32 field estimate;
+- an initial +X freestream projection converging in 168 PCG iterations to a 9.37e-5 global relative residual in about 138 ms on the RTX 4090;
+- 347.02 MiB estimated persistent GPU storage for fields plus projection (CUDA context/driver allocations excluded).
 
 ## Next engineering work
 
-1. Move composite divergence, pressure RHS, and velocity correction from the CPU reference into persistent CUDA allocations over `DeviceAmrFields` and compact special-flux arrays.
-2. Implement the new external-aero timestep: +X freestream BC, regular/EB velocity fluxes, composite projection, then AMR-aware advection and LES with side-safe backtraces.
-3. Add component-wise pressure gauges and aperture-aware EB reconstruction when fabric reaches a 2:1 interface; replace Jacobi with a geometric multilevel preconditioner.
+1. Implement the new external-aero timestep around the persistent projection: AMR-aware advection and LES with side-safe backtraces, then boundary conditions, projection, and statistics.
+2. Retain composite surface-patch-to-pressure-DOF mappings and publish p+/p-/delta-Cp and pressure-only forces from a converged flow.
+3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Add dynamic normal/parallel/inclined plate and opened-cavity tests, followed by AMR-versus-uniform force validation.
 5. Complete the Qt workflow and only then remove building/channel/ground/seabed/porous code.
 

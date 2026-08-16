@@ -13,11 +13,6 @@ namespace paracfd::core
 		l.cell_stride=static_cast<std::size_t>(l.cell_n)*l.cell_n*l.cell_n;
 		l.u_stride=static_cast<std::size_t>(l.u_nx)*l.cell_n*l.cell_n; l.v_stride=static_cast<std::size_t>(l.cell_n)*l.v_ny*l.cell_n; l.w_stride=static_cast<std::size_t>(l.cell_n)*l.cell_n*l.w_nz; return l;
 	}
-	PARACFD_AMR_HD std::size_t BrickFieldLayout::cell_index(int b,int i,int j,int k) const { i+=ghost;j+=ghost;k+=ghost; return static_cast<std::size_t>(b)*cell_stride+(static_cast<std::size_t>(k)*cell_n+j)*cell_n+i; }
-	PARACFD_AMR_HD std::size_t BrickFieldLayout::u_index(int b,int i,int j,int k) const { i+=ghost;j+=ghost;k+=ghost; return static_cast<std::size_t>(b)*u_stride+(static_cast<std::size_t>(k)*cell_n+j)*u_nx+i; }
-	PARACFD_AMR_HD std::size_t BrickFieldLayout::v_index(int b,int i,int j,int k) const { i+=ghost;j+=ghost;k+=ghost; return static_cast<std::size_t>(b)*v_stride+(static_cast<std::size_t>(k)*v_ny+j)*cell_n+i; }
-	PARACFD_AMR_HD std::size_t BrickFieldLayout::w_index(int b,int i,int j,int k) const { i+=ghost;j+=ghost;k+=ghost; return static_cast<std::size_t>(b)*w_stride+(static_cast<std::size_t>(k)*cell_n+j)*cell_n+i; }
-
 	AmrHostFields::AmrHostFields(const AmrHierarchy& h)
 	{
 		levels_.resize(h.levels().size());

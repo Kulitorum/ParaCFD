@@ -35,7 +35,7 @@ The cross-brick atlas and deterministic multi-fragment fallback are implemented.
 - CPU-double reference/PCG and CUDA `Real` operator/CG.
 - Manufactured independent-side pressure/load and projection tests.
 
-The composite CPU divergence/gradient reference and GPU pressure solve now cover EB fluxes. Remaining: robust component gauges and GPU velocity correction integrated into the timestep.
+The composite CPU reference and persistent GPU projection now cover EB divergence, RHS, pressure, regular/special-flux correction, and post-projection divergence. Disconnected active fluid components receive deterministic gauges. Remaining: integrate the projection into the external-aero timestep.
 
 ## E. Static AMR — composite pressure foundation implemented
 
@@ -45,13 +45,15 @@ The composite CPU divergence/gradient reference and GPU pressure solve now cover
 - Sparse cross-brick EB atlas with finest-owner selection.
 - One coupled matrix-free pressure graph spanning every level.
 - Compact conservative 2:1 face tiles and EB aperture connections.
-- CUDA operator/Jacobi-PCG plus manufactured coupled projection tests.
+- CUDA operator/composite PCG plus manufactured coupled projection tests.
+- Persistent GPU divergence/RHS/correction bridge over pooled fields and compact special-flux arrays.
+- Additive two-level Galerkin preconditioner with compact nonlocal aggregate connections.
+- Deterministic gauges for active pressure components disconnected from the outlet.
 
 Pending:
 
 - aperture-aware cross-level EB topology when fabric reaches a 2:1 interface;
-- GPU-resident composite divergence and velocity correction (CPU reference exists);
-- geometric multilevel preconditioner and disconnected-component gauges;
+- recursive multigrid/V-cycle acceleration beyond the present two-level preconditioner;
 - AMR-versus-uniform flow validation.
 
 ## F. FP32 production — storage/operator foundation implemented

@@ -22,16 +22,28 @@ namespace paracfd::core
 		std::size_t cell_stride = 0, u_stride = 0, v_stride = 0, w_stride = 0;
 
 		static BrickFieldLayout make(int brick_size, int ghost);
-		PARACFD_AMR_HD std::size_t cell_index(int brick, int i, int j, int k) const;
-		PARACFD_AMR_HD std::size_t u_index(int brick, int i, int j, int k) const;
-		PARACFD_AMR_HD std::size_t v_index(int brick, int i, int j, int k) const;
-		PARACFD_AMR_HD std::size_t w_index(int brick, int i, int j, int k) const;
+		PARACFD_AMR_HD std::size_t cell_index(int brick, int i, int j, int k) const { i+=ghost;j+=ghost;k+=ghost;return static_cast<std::size_t>(brick)*cell_stride+(static_cast<std::size_t>(k)*cell_n+j)*cell_n+i; }
+		PARACFD_AMR_HD std::size_t u_index(int brick, int i, int j, int k) const { i+=ghost;j+=ghost;k+=ghost;return static_cast<std::size_t>(brick)*u_stride+(static_cast<std::size_t>(k)*cell_n+j)*u_nx+i; }
+		PARACFD_AMR_HD std::size_t v_index(int brick, int i, int j, int k) const { i+=ghost;j+=ghost;k+=ghost;return static_cast<std::size_t>(brick)*v_stride+(static_cast<std::size_t>(k)*v_ny+j)*cell_n+i; }
+		PARACFD_AMR_HD std::size_t w_index(int brick, int i, int j, int k) const { i+=ghost;j+=ghost;k+=ghost;return static_cast<std::size_t>(brick)*w_stride+(static_cast<std::size_t>(k)*cell_n+j)*cell_n+i; }
 	};
 
 	struct AmrHostLevelFields
 	{
 		BrickFieldLayout layout;
 		std::vector<Real> u, v, w, p, nut, temp;
+	};
+
+	// Non-owning view of one persistent device pool. It is intentionally plain data so
+	// composite CUDA launchers can upload a compact array of level views without gaining
+	// access to DeviceAmrFields ownership or introducing per-brick allocations.
+	struct DeviceAmrFieldLevelView
+	{
+		BrickFieldLayout layout;
+		int brick_count = 0;
+		Real *u = nullptr, *v = nullptr, *w = nullptr, *p = nullptr, *nut = nullptr, *temp = nullptr;
+		const int* neighbors = nullptr;
+		const std::uint32_t* flags = nullptr;
 	};
 
 	class AmrHostFields
@@ -70,6 +82,11 @@ namespace paracfd::core
 		std::size_t bytes() const { return bytes_; }
 		Real* pressure(int level) { return levels_[level].p; }
 		const Real* pressure(int level) const { return levels_[level].p; }
+		int level_count() const { return static_cast<int>(levels_.size()); }
+		DeviceAmrFieldLevelView level_view(int level)
+		{
+			auto& d=levels_[level];return {d.layout,d.brick_count,d.u,d.v,d.w,d.p,d.nut,d.temp,d.neighbors,d.flags};
+		}
 
 	private:
 		struct Level

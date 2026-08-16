@@ -24,6 +24,7 @@ namespace paracfd::core
 		std::int8_t axis = 0;
 		std::int8_t direction = 1; // +1: first DOF is lower-axis; -1: second DOF is lower-axis
 	};
+	struct CompositePressureGauge { int dof = -1; double coefficient = 0.0; };
 
 	struct CompositeAmrPressureSystem
 	{
@@ -35,8 +36,14 @@ namespace paracfd::core
 		std::vector<unsigned char> active;
 		std::vector<std::uint8_t> cut_face_mask; // +X/+Y/+Z bits on regular Cartesian DOFs
 		std::vector<double> volume;
+		// Active pressure DOF -> containing level-0 Cartesian cell DOF. This compact
+		// geometric aggregation map feeds the matrix-free two-level preconditioner.
+		std::vector<int> preconditioner_aggregate;
 		std::vector<CoarseFinePressureConnection> coarse_fine;
 		std::vector<CoarseFinePressureConnection> embedded;
+		// One compact pressure reference for each active fluid component that cannot
+		// reach the X-max Dirichlet outlet. Empty for intentionally pure-Neumann tests.
+		std::vector<CompositePressureGauge> gauges;
 
 		int dof(int level, int brick, int i, int j, int k) const;
 		void apply_cpu(const std::vector<double>& pressure, std::vector<double>& output) const;
@@ -80,9 +87,11 @@ namespace paracfd::core
 		std::vector<int> brick_counts_;
 		int *coarse_dof_ = nullptr, *fine_dof_ = nullptr;
 		Real* coefficient_ = nullptr;
+		int* gauge_dof_ = nullptr;
+		Real* gauge_coefficient_ = nullptr;
 		unsigned char *active_ = nullptr;
 		std::uint8_t *cut_face_mask_ = nullptr;
-		int level_count_ = 0, connection_count_ = 0, storage_size_ = 0, brick_size_ = 0;
+		int level_count_ = 0, connection_count_ = 0, gauge_count_ = 0, storage_size_ = 0, brick_size_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
@@ -107,6 +116,57 @@ namespace paracfd::core
 		int n_ = 0;
 		Real *r_ = nullptr, *z_ = nullptr, *direction_ = nullptr, *Ad_ = nullptr, *diagonal_ = nullptr;
 		unsigned char* active_ = nullptr;
+		int *aggregate_ = nullptr, *base_neighbors_ = nullptr, *base_extra_a_ = nullptr, *base_extra_b_ = nullptr;
+		Real *base_positive_ = nullptr, *base_diagonal_ = nullptr, *base_extra_coefficient_ = nullptr, *base_rhs_ = nullptr, *base_x_ = nullptr, *base_tmp_ = nullptr;
+		int base_offset_ = 0, base_bricks_ = 0, base_cells_ = 0, base_extra_count_ = 0, brick_size_ = 0;
+		std::size_t bytes_ = 0;
+		void apply_preconditioner(const Real* residual, Real* output);
+	};
+
+	struct DeviceCompositeAmrFluxLevelView;
+
+	// Persistent GPU bridge from pooled brick MAC velocities to the composite pressure
+	// graph. Regular faces stay implicit and structured; only coarse/fine and EB aperture
+	// velocities occupy the compact `special_velocity_` array. A project() call performs
+	// divergence -> RHS -> coupled pressure solve -> flux correction without bulk host
+	// transfers or per-step CPU geometry work. PCG scalar reductions are host-orchestrated.
+	class DeviceCompositeAmrProjection
+	{
+	public:
+		DeviceCompositeAmrProjection(const CompositeAmrPressureSystem& system, DeviceAmrFields& fields);
+		~DeviceCompositeAmrProjection();
+		DeviceCompositeAmrProjection(const DeviceCompositeAmrProjection&) = delete;
+		DeviceCompositeAmrProjection& operator=(const DeviceCompositeAmrProjection&) = delete;
+
+		void clear_special_fluxes();
+		void initialize_special_freestream(Real speed);
+		void upload_special_fluxes(const CompositeAmrFluxes& host);
+		void download_special_fluxes(CompositeAmrFluxes& host) const;
+		void compute_divergence();
+		void build_projection_rhs(Real rho, Real dt);
+		void correct_fluxes(Real rho, Real dt);
+		AmrGpuSolveResult project(Real rho, Real dt, double tolerance, int max_iterations, bool warm_start = false);
+		void download_divergence(std::vector<Real>& host) const;
+		void download_pressure(std::vector<Real>& host) const;
+		Real* pressure() { return pressure_; }
+		const Real* pressure() const { return pressure_; }
+		const Real* rhs() const { return rhs_; }
+		std::size_t bytes() const { return bytes_; }
+
+	private:
+		DeviceCompositeAmrPressureSolver solver_;
+		DeviceAmrFields* fields_ = nullptr;
+		DeviceCompositeAmrFluxLevelView* levels_ = nullptr;
+		unsigned char* active_ = nullptr;
+		std::uint8_t* cut_face_mask_ = nullptr;
+		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr, *pressure_ = nullptr;
+		int *first_dof_ = nullptr, *second_dof_ = nullptr;
+		std::int8_t *direction_ = nullptr, *axis_ = nullptr;
+		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *special_velocity_ = nullptr;
+		std::vector<int> brick_counts_;
+		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
+		int coarse_fine_count_ = 0, special_count_ = 0;
+		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
 }
