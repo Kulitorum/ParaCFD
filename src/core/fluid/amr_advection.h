@@ -55,6 +55,33 @@ namespace paracfd::core
 	std::vector<TangentialMomentumInterfaceConnection> build_tangential_momentum_interface_connections(
 		const CompositeAmrPressureSystem& system);
 
+	// Persistent GPU indirection only for compact interface/EB work. Ordinary regular
+	// cells remain on structured brick kernels. Addresses must be canonical and unique,
+	// making scatter race-free; the field allocations themselves stay owned by
+	// DeviceAmrFields.
+	class DeviceAmrMacFaceMap
+	{
+	public:
+		DeviceAmrMacFaceMap(DeviceAmrFields& fields,
+			const std::vector<AmrMacFaceAddress>& addresses);
+		~DeviceAmrMacFaceMap();
+		DeviceAmrMacFaceMap(const DeviceAmrMacFaceMap&) = delete;
+		DeviceAmrMacFaceMap& operator=(const DeviceAmrMacFaceMap&) = delete;
+
+		void gather(Real* compact) const;
+		void scatter(const Real* compact) const;
+		int size() const { return size_; }
+		std::size_t bytes() const { return bytes_; }
+
+	private:
+		DeviceAmrFieldLevelView* levels_ = nullptr;
+		int* level_ = nullptr;
+		std::uint64_t* index_ = nullptr;
+		std::int8_t* component_ = nullptr;
+		int size_ = 0, level_count_ = 0;
+		std::size_t bytes_ = 0;
+	};
+
 	// Geometry-independent conservative transport contract used by the composite
 	// momentum path. A node is one velocity-component dual control volume (a regular
 	// MAC face, a 2:1 tile, or a compact EB aperture state). Every connection is

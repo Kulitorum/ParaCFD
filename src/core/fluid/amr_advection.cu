@@ -37,6 +37,18 @@ namespace paracfd::core
 			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=count)return;const Real inverse=Real(1)/volume[node];
 			velocity_x[node]+=delta_x[node]*inverse;velocity_y[node]+=delta_y[node]*inverse;velocity_z[node]+=delta_z[node]*inverse;
 		}
+		__global__ void gather_mac_face_map_kernel(const DeviceAmrFieldLevelView* levels,
+			const int* level,const std::uint64_t* index,const std::int8_t* component,
+			Real* compact,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const DeviceAmrFieldLevelView view=levels[level[q]];compact[q]=component[q]==0?view.u[index[q]]:(component[q]==1?view.v[index[q]]:view.w[index[q]]);
+		}
+		__global__ void scatter_mac_face_map_kernel(const DeviceAmrFieldLevelView* levels,
+			const int* level,const std::uint64_t* index,const std::int8_t* component,
+			const Real* compact,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const DeviceAmrFieldLevelView view=levels[level[q]];if(component[q]==0)view.u[index[q]]=compact[q];else if(component[q]==1)view.v[index[q]]=compact[q];else view.w[index[q]]=compact[q];
+		}
 
 		__host__ __device__ std::uint64_t coordinate_hash(int x,int y,int z)
 		{
@@ -295,6 +307,20 @@ namespace paracfd::core
 		}
 		return output;
 	}
+
+	DeviceAmrMacFaceMap::DeviceAmrMacFaceMap(DeviceAmrFields& fields,
+		const std::vector<AmrMacFaceAddress>& addresses)
+	{
+		size_=static_cast<int>(addresses.size());level_count_=fields.level_count();std::vector<DeviceAmrFieldLevelView> levels(level_count_);for(int level=0;level<level_count_;++level)levels[level]=fields.level_view(level);levels_=upload(levels,"upload compact MAC field views");std::vector<int> level(size_);std::vector<std::uint64_t> index(size_);std::vector<std::int8_t> component(size_);
+		struct Key{int level,brick,component,i,j,k;bool operator==(const Key& other)const{return level==other.level&&brick==other.brick&&component==other.component&&i==other.i&&j==other.j&&k==other.k;}};struct Hash{std::size_t operator()(const Key& key)const{std::size_t h=0;for(int value:{key.level,key.brick,key.component,key.i,key.j,key.k})h=(h*1315423911u)^static_cast<std::uint32_t>(value);return h;}};std::unordered_map<Key,int,Hash> unique;
+		for(int q=0;q<size_;++q){const auto& address=addresses[q];if(address.level<0||address.level>=level_count_||address.brick<0||address.brick>=levels[address.level].brick_count||address.component<0||address.component>2)throw std::invalid_argument("compact MAC map address outside field hierarchy");const int bs=levels[address.level].layout.brick_size,nx=address.component==0?bs+1:bs,ny=address.component==1?bs+1:bs,nz=address.component==2?bs+1:bs;if(address.i<0||address.j<0||address.k<0||address.i>=nx||address.j>=ny||address.k>=nz)throw std::invalid_argument("compact MAC map local face index outside brick");const Key key{address.level,address.brick,address.component,address.i,address.j,address.k};if(!unique.emplace(key,q).second)throw std::invalid_argument("compact MAC map addresses must be unique");level[q]=address.level;component[q]=static_cast<std::int8_t>(address.component);const BrickFieldLayout& layout=levels[address.level].layout;index[q]=address.component==0?layout.u_index(address.brick,address.i,address.j,address.k):(address.component==1?layout.v_index(address.brick,address.i,address.j,address.k):layout.w_index(address.brick,address.i,address.j,address.k));}
+		level_=upload(level,"upload compact MAC map levels");index_=upload(index,"upload compact MAC map indices");component_=upload(component,"upload compact MAC map components");bytes_=level_count_*sizeof(DeviceAmrFieldLevelView)+size_*(sizeof(int)+sizeof(std::uint64_t)+sizeof(std::int8_t));
+	}
+
+	DeviceAmrMacFaceMap::~DeviceAmrMacFaceMap(){for(void* pointer:{(void*)levels_,(void*)level_,(void*)index_,(void*)component_})if(pointer)cudaFree(pointer);}
+
+	void DeviceAmrMacFaceMap::gather(Real* compact)const{if(size_&&!compact)throw std::invalid_argument("compact MAC gather destination is null");if(size_)gather_mac_face_map_kernel<<<(size_+255)/256,256>>>(levels_,level_,index_,component_,compact,size_);check(cudaDeviceSynchronize(),"gather compact MAC face map");}
+	void DeviceAmrMacFaceMap::scatter(const Real* compact)const{if(size_&&!compact)throw std::invalid_argument("compact MAC scatter source is null");if(size_)scatter_mac_face_map_kernel<<<(size_+255)/256,256>>>(levels_,level_,index_,component_,compact,size_);check(cudaDeviceSynchronize(),"scatter compact MAC face map");}
 
 	DevicePairwiseMomentumTransport::DevicePairwiseMomentumTransport(const std::vector<double>& dual_volume,
 		const std::vector<PairwiseMomentumConnection>& connections)
