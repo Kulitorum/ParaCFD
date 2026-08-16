@@ -110,6 +110,7 @@ namespace paracfd::gui
 		out.residual = snapshot_.residual;
 		out.max_abs_regular_velocity = snapshot_.max_abs_regular_velocity;
 		out.max_abs_special_velocity = snapshot_.max_abs_special_velocity;
+		out.max_embedded_cfl_rate = snapshot_.max_embedded_cfl_rate;
 		out.effective_cfl = snapshot_.effective_cfl;
 		out.pressure_iterations = snapshot_.pressure_iterations;
 		out.initialized = snapshot_.initialized;
@@ -172,6 +173,7 @@ namespace paracfd::gui
 		snapshot_.residual = stats.pressure.relative_residual;
 		snapshot_.max_abs_regular_velocity = stats.max_abs_regular_velocity;
 		snapshot_.max_abs_special_velocity = stats.max_abs_special_velocity;
+		snapshot_.max_embedded_cfl_rate = stats.max_embedded_cfl_rate;
 		snapshot_.effective_cfl = stats.effective_cfl;
 		snapshot_.gpu_bytes = core_->gpu_bytes();
 		snapshot_.initialized = core_->initialized();

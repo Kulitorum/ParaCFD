@@ -42,13 +42,13 @@ namespace paracfd::core
 		{
 			system.level_offset[level] = system.storage_size; system.storage_size += static_cast<int>(hierarchy.levels()[level].bricks.size()) * cells_per_brick;
 		}
-		system.active.assign(system.storage_size, 0); system.volume.assign(system.storage_size, 0.0);system.preconditioner_aggregate.assign(system.storage_size,-1);
+		system.active.assign(system.storage_size, 0); system.volume.assign(system.storage_size, 0.0);system.centroid.assign(system.storage_size,{});system.preconditioner_aggregate.assign(system.storage_size,-1);
 		system.cut_face_mask.assign(system.storage_size, 0);
 		for (int level = 0; level < static_cast<int>(hierarchy.levels().size()); ++level)
 		{
 			const AmrLevel& source = hierarchy.levels()[level]; const double cell_volume = static_cast<double>(source.h) * source.h * source.h;
 			for (int brick = 0; brick < static_cast<int>(source.bricks.size()); ++brick) if (source.bricks[brick].active())
-				for (int k = 0; k < bs; ++k) for (int j = 0; j < bs; ++j) for (int i = 0; i < bs; ++i) { const int q = system.dof(level, brick, i, j, k); system.active[q] = 1; system.volume[q] = cell_volume;const Vec3d point=source.bricks[brick].origin+Vec3d{(i+0.5)*source.h,(j+0.5)*source.h,(k+0.5)*source.h};system.preconditioner_aggregate[q]=base_aggregate_dof(system,point); }
+				for (int k = 0; k < bs; ++k) for (int j = 0; j < bs; ++j) for (int i = 0; i < bs; ++i) { const int q = system.dof(level, brick, i, j, k); system.active[q] = 1; system.volume[q] = cell_volume;const Vec3d point=source.bricks[brick].origin+Vec3d{(i+0.5)*source.h,(j+0.5)*source.h,(k+0.5)*source.h};system.centroid[q]=point;system.preconditioner_aggregate[q]=base_aggregate_dof(system,point); }
 		}
 
 		// Each active coarse brick scans all six faces for a covered same-level
@@ -87,22 +87,37 @@ namespace paracfd::core
 		CompositeAmrPressureSystem system=build_composite_amr_pressure_system(hierarchy,outlet);system.gauges.clear();
 		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
 		{
-			if(level_atlas.level<0||level_atlas.level>=static_cast<int>(hierarchy.levels().size()))throw std::invalid_argument("EB atlas level is outside AMR hierarchy");const EmbeddedBoundary& eb=level_atlas.topology;EbPressureSystem local=build_eb_pressure_system(eb,false);std::vector<int> cell_global(eb.grid.cell_count(),-1),fragment_global(eb.fragments.size(),-1);
+			if(level_atlas.level<0||level_atlas.level>=static_cast<int>(hierarchy.levels().size()))throw std::invalid_argument("EB atlas level is outside AMR hierarchy");const EmbeddedBoundary& eb=level_atlas.topology;std::vector<int> cell_global(eb.grid.cell_count(),-1),fragment_global(eb.fragments.size(),-1);
 			for(int cell=0;cell<eb.grid.cell_count();++cell)if(level_atlas.owned_cell[cell]){const BrickLocation owner=hierarchy.locate_finest(eb.grid.cell_centroid(cell));if(!owner.found()||owner.level!=level_atlas.level)throw std::runtime_error("owned EB atlas cell has no matching AMR owner");const int dof=system.dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);cell_global[cell]=dof;if(eb.cells[cell].state==EbCellState::split){system.active[dof]=0;system.volume[dof]=0;}else if(eb.cells[cell].state==EbCellState::regular&&!eb.cut_face_mask.empty())system.cut_face_mask[dof]|=eb.cut_face_mask[cell];}
-			// Allocate one appended DOF for every owned root fragment. Aggregated volume
-			// and pressure-static state come from the already-resolved local EB system.
+			// Allocate one appended DOF for every owned root fragment. Volume and centroid
+			// are accumulated below from owned fragments only; using the atlas-local EB
+			// aggregates here would incorrectly include covered halo fragments.
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&eb.fragments[fragment].merge_target==irregular_fragment(fragment))
 			{
-				const int local_dof=local.fragment_dof[fragment],global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(local.active[local_dof]);system.volume.push_back(local.volume[local_dof]);system.cut_face_mask.push_back(0);system.preconditioner_aggregate.push_back(base_aggregate_dof(system,eb.fragments[fragment].centroid));
+				const int global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(eb.fragments[fragment].pressure_static?0:1);system.volume.push_back(0);system.centroid.push_back({});system.cut_face_mask.push_back(0);system.preconditioner_aggregate.push_back(-1);
 			}
 			std::vector<unsigned char> resolving(eb.fragments.size(),0);std::function<int(FragmentRef)> map_ref=[&](FragmentRef ref)->int
 			{
 				if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int cell=regular_fragment_cell(ref);return cell>=0&&cell<static_cast<int>(cell_global.size())?cell_global[cell]:-1;}const int fragment=irregular_fragment_index(ref);if(fragment<0||fragment>=static_cast<int>(fragment_global.size()))return -1;if(fragment_global[fragment]>=0)return fragment_global[fragment];if(resolving[fragment])throw std::runtime_error("cyclic AMR EB fragment merge mapping");resolving[fragment]=1;fragment_global[fragment]=map_ref(eb.fragments[fragment].merge_target);resolving[fragment]=0;return fragment_global[fragment];
 			};
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&map_ref(irregular_fragment(fragment))<0)throw std::runtime_error("owned AMR EB fragment maps outside its level atlas");
+			// Conservative merge transfer. A tiny fragment may resolve to an appended
+			// irregular root or to an ordinary structured cell. In both cases its volume
+			// and first moment belong to that same-side control volume in the composite
+			// projection; omitting this transfer changes divergence normalization.
+			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell])
+			{
+				const int target=map_ref(irregular_fragment(fragment));const double add=eb.fragments[fragment].volume;
+				if(!(add>=0)||target<0)throw std::runtime_error("invalid owned AMR EB merge volume");const double old=system.volume[target];
+				if(old+add>0)system.centroid[target]=(system.centroid[target]*old+eb.fragments[fragment].centroid*add)/(old+add);system.volume[target]=old+add;
+			}
+			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell])
+			{
+				const int target=map_ref(irregular_fragment(fragment));system.preconditioner_aggregate[target]=base_aggregate_dof(system,system.centroid[target]);
+			}
 			for(const FaceAperture& aperture:eb.apertures)
 			{
-				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(aperture.fragment_a)-eb.fragment_centroid(aperture.fragment_b))));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1,aperture.centroid});
+				const int a=map_ref(aperture.fragment_a),b=map_ref(aperture.fragment_b);if(a<0||b<0||a==b)continue;const bool a_active=system.active[a]!=0,b_active=system.active[b]!=0;if(!a_active&&!b_active)continue;const double distance=std::max(1e-12,std::sqrt(length2(system.centroid[a]-system.centroid[b])));system.embedded.push_back({a,b,aperture.area,distance,aperture.axis,1,aperture.centroid});
 			}
 			for(const SurfacePatch& patch:eb.patches)
 			{

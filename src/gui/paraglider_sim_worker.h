@@ -21,7 +21,8 @@ namespace paracfd::gui
 		std::uint64_t surface_generation = 0;
 		long long steps = 0;
 		double physical_time = 0,dt = 0,step_ms = 0,projection_ms = 0,residual = 0;
-		double max_abs_regular_velocity = 0,max_abs_special_velocity = 0,effective_cfl = 0;
+		double max_abs_regular_velocity = 0,max_abs_special_velocity = 0;
+		double max_embedded_cfl_rate = 0,effective_cfl = 0;
 		int pressure_iterations = 0;
 		bool initialized = false,converged = false;
 		bool conservation_valid = false;

@@ -177,6 +177,11 @@ namespace paracfd::core
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count)velocity[special_offset+edge]=source[edge];
 		}
+		__global__ void embedded_cfl_rate_kernel(const Real* velocity,const Real* transport_length,
+			Real* rate,int special_offset,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count)rate[edge]=abs(velocity[special_offset+edge])/max(transport_length[edge],Real(1e-12));
+		}
 		__global__ void scatter_regular_pressure_kernel(const DeviceCompositeAmrFluxLevelView* levels,int level,int bs,const unsigned char* active,const Real* pressure)
 		{
 			const DeviceCompositeAmrFluxLevelView source=levels[level];const DeviceAmrFieldLevelView fields=source.fields;const int cells_per_brick=bs*bs*bs,work=blockIdx.x*blockDim.x+threadIdx.x;if(work>=fields.brick_count*cells_per_brick)return;const int brick=work/cells_per_brick,local=work%cells_per_brick,a=source.level_offset+work;if(!active[a]||(fields.flags[brick]&BRICK_COVERED))return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs);fields.p[fields.layout.cell_index(brick,i,j,k)]=pressure[a];
@@ -303,6 +308,10 @@ namespace paracfd::core
 		std::vector<Real> values(special_count_);if(special_count_)check(cudaMemcpy(values.data(),special_velocity_,values.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite special fluxes");host.coarse_fine_velocity.resize(coarse_fine_count_);host.embedded_velocity.resize(special_count_-coarse_fine_count_);for(int q=0;q<coarse_fine_count_;++q)host.coarse_fine_velocity[q]=values[q];for(int q=coarse_fine_count_;q<special_count_;++q)host.embedded_velocity[q-coarse_fine_count_]=values[q];
 	}
 	double DeviceCompositeAmrProjection::max_abs_special_velocity()const{return max_abs_device_values(special_velocity_,special_count_,max_abs_scratch_);}
+	double DeviceCompositeAmrProjection::max_embedded_cfl_rate()const
+	{
+		if(!embedded_count_)return 0;embedded_cfl_rate_kernel<<<(embedded_count_+255)/256,256>>>(special_velocity_,eb_transport_length_,eb_transport_scratch_,coarse_fine_count_,embedded_count_);return max_abs_device_values(eb_transport_scratch_,embedded_count_,max_abs_scratch_);
+	}
 
 	namespace
 	{

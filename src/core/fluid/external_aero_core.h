@@ -23,6 +23,7 @@ namespace paracfd::core
 		double max_abs_velocity = 0.0;
 		double max_abs_regular_velocity = 0.0;
 		double max_abs_special_velocity = 0.0;
+		double max_embedded_cfl_rate = 0.0; // 1/s, compact EB graph transport
 		double cfl_velocity = 0.0;
 		double effective_cfl = 0.0;
 		AmrGpuSolveResult pressure;
@@ -57,6 +58,7 @@ namespace paracfd::core
 		AerodynamicLoads pressure_loads(double pressure_reference = 0.0) const;
 		void download_fields(AmrHostFields& host) const;
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
+		void download_pressure(std::vector<double>& host) const; // throttled validation/debug download
 		ExternalAeroConservationStats conservation_stats() const; // throttled validation/statistics download
 		double max_abs_divergence() const; // throttled validation/statistics download
 

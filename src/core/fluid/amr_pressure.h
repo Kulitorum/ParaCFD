@@ -47,6 +47,7 @@ namespace paracfd::core
 		std::vector<unsigned char> active;
 		std::vector<std::uint8_t> cut_face_mask; // +X/+Y/+Z bits on regular Cartesian DOFs
 		std::vector<double> volume;
+		std::vector<Vec3d> centroid; // merged fluid-control-volume centroid
 		// Active pressure DOF -> containing level-0 Cartesian cell DOF. This compact
 		// geometric aggregation map feeds the matrix-free two-level preconditioner.
 		std::vector<int> preconditioner_aggregate;
@@ -163,6 +164,10 @@ namespace paracfd::core
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		double max_abs_special_velocity() const;
+		// Maximum |u_aperture| / transport_length over compact EB states [1/s].
+		// This is their explicit graph-transport Courant rate; tiny-area apertures do
+		// not spuriously constrain dt merely because their point velocity is large.
+		double max_embedded_cfl_rate() const;
 		void compute_divergence();
 		void build_projection_rhs(Real rho, Real dt);
 		void correct_fluxes(Real rho, Real dt);

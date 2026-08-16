@@ -2395,9 +2395,11 @@ namespace paracfd::gui
 			else
 				text += "\n  coefficients withheld: reference area not set";
 			text += QString("\n  max velocity: regular %1 / compact EB %2 m/s"
-				"\n  persistent GPU estimate: %3 MiB")
+				"\n  compact EB transport CFL rate: %3 1/s"
+				"\n  persistent GPU estimate: %4 MiB")
 				.arg(snapshot.max_abs_regular_velocity, 0, 'g', 5)
 				.arg(snapshot.max_abs_special_velocity, 0, 'g', 5)
+				.arg(snapshot.max_embedded_cfl_rate, 0, 'g', 5)
 				.arg(snapshot.gpu_bytes / (1024.0 * 1024.0), 0, 'f', 1);
 			if (snapshot.conservation_valid)
 				text += QString("\n  divergence max/RMSV: %1 / %2 1/s"
