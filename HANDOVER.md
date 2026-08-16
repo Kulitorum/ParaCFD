@@ -17,6 +17,7 @@ Implemented:
 - CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
 - bounded MacCormack/RK2 finest-brick GPU advection, minmod-limited linear transport on complete stencils of a static one-byte same-side six-link fabric graph (first-order fallback at incomplete stencils), and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
+- a separately callable one-level finite-volume MAC advection foundation whose shared upwind link fluxes conserve discrete momentum across same-level bricks, preserve constants, and cannot cross fabric; it is validation-only until compact EB aperture exchange and 2:1 staggered flux registers are coupled;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
 - compact same-side EB aperture transport using structured carrier states, bounded minmod-limited MUSCL updates on complete same-axis chains, a first-order fallback at endings/junctions, molecular diffusion, and an area-weighted nine-component graph-gradient reconstruction for Smagorinsky strain without a full-domain sparse velocity graph; the combined update obeys its local same-side stencil extrema without imposing an absolute velocity cap;
 - adaptive one-global-step CFL control from a persistent GPU maximum reduction over regular AMR velocity fields; compact EB states retain their own bounded local update;
@@ -58,7 +59,7 @@ Use `paraglider_case_probe --physical-time T --max-levels N` for new comparisons
 ## Next engineering work
 
 1. Replace axis-column averaging at compact junctions with a multidimensional least-squares irregular reconstruction and add an arbitrary-orientation fabric wall treatment.
-2. Replace the now linearly consistent cross-level semi-Lagrangian momentum update with a conservative/refluxed finite-volume transport and run systematic grid/domain/orientation force-convergence studies.
+2. Extend the validated one-level conservative MAC link fluxes through compact EB aperture exchange and 2:1 staggered flux registers, then switch `ExternalAeroCore` and rerun the equal-time convergence gate.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
 5. Replace the finest-brick-aware but throttled host slice snapshot with direct CUDA/OpenGL field sampling and add pressure-force vectors.

@@ -32,6 +32,12 @@ namespace paracfd::core
 		DeviceAmrAdvection& operator=(const DeviceAmrAdvection&) = delete;
 
 		void advect(DeviceAmrFields& fields, Real dt);
+		// Incremental conservative-momentum foundation. This finite-volume MAC update
+		// uses one shared upwind flux per same-level lattice link and is currently
+		// restricted to one uniform level. Fabric-band links can suppress a flux, but
+		// compact EB aperture coupling and 2:1 flux registers are not yet included. It
+		// remains separate from production advect() until both pieces are complete.
+		void advect_conservative_uniform(DeviceAmrFields& fields, Real dt);
 		void diffuse_smagorinsky(DeviceAmrFields& fields, Real molecular_nu, Real cs, Real dt);
 		std::size_t protected_face_count() const { return protected_faces_; }
 		std::size_t active_face_count() const { return active_faces_; }
