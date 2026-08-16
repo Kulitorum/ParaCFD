@@ -38,12 +38,13 @@ namespace paracfd::gui
 		int density = 12;         // inlet seed count along the larger inlet dimension
 		int max_points = 600;     // max streamline length in integration steps (bounds eddies)
 		float step_ds = 0.05f;    // arc-length step [m] (caller sets to ~h)
-		// "Boring" filter: drop any streamline whose total PATH length is below this [m]. Straight
-		// tracers that just cross the domain have arc length ≈ Lx; ones that loop through eddies are
-		// longer. Caller sets it to Lx·(slider); 0 ⇒ no filter (draw everything).
-		float min_length = 0.0f;
+		// "Boring" filter: arc length / endpoint distance. A straight path is exactly 1; curved and
+		// looping paths are greater than 1. Paths at or below the threshold are hidden. Values below
+		// 1 therefore provide a deterministic off region without relying on integration-step counts.
+		float straightness_threshold = 0.99f;
 		// Temporal hold: a tracer keeps being drawn for this long [s] after it was last "interesting"
-		// (arc ≥ min_length), so tracers hovering at the threshold don't flicker on/off. `dt` is the
+		// (tortuosity > straightness_threshold), so paths hovering at the threshold don't flicker.
+		// `dt` is the
 		// seconds elapsed since the previous advance() (drives the hold countdown).
 		float dt = 0.0f;
 		float hold_seconds = 1.0f;

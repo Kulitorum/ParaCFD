@@ -208,26 +208,17 @@ namespace paracfd::gui
 		{
 			const int n = integrate_line(view, f, seeds_[k][0], seeds_[k][1], seeds_[k][2]);
 
-			// "Interesting" = the streamline exists and its path length clears the boring threshold
-			// (or the filter is off). Refresh the hold when interesting; otherwise let it decay — a
-			// tracer keeps drawing until its hold runs out, so it can't flicker at the threshold.
+			// Straightness is path length / endpoint distance (tortuosity). Because integration uses
+			// fixed arc-length steps, the numerator is known exactly without summing every segment.
+			// Clamp to the mathematical lower bound so floating-point accumulation cannot randomly
+			// classify a perfectly straight line on opposite sides of one.
 			bool interesting = false;
 			if (n >= 2)
 			{
-				if (view.min_length <= 0.0f) interesting = true;
-				else
-				{
-					float arc = 0.0f;
-					for (int i = 1; i < n; ++i)
-					{
-						const float dx = line_[i].x - line_[i - 1].x, dy = line_[i].y - line_[i - 1].y, dz = line_[i].z - line_[i - 1].z;
-						arc += std::sqrt(dx * dx + dy * dy + dz * dz);
-					}
-					// The first and last samples are half a cell inside the inlet/outlet. Restore
-					// those two half steps so a straight domain crossing measures Lx, not Lx-h.
-					arc += view.step_ds;
-					interesting = arc >= view.min_length;
-				}
+				const float dx=line_.back().x-line_.front().x,dy=line_.back().y-line_.front().y,dz=line_.back().z-line_.front().z;
+				const float chord=std::sqrt(dx*dx+dy*dy+dz*dz),arc=(n-1)*view.step_ds;
+				const float tortuosity=std::max(1.0f,arc/std::max(chord,1e-6f));
+				interesting=tortuosity>view.straightness_threshold;
 			}
 			if (interesting) hold_[k] = view.hold_seconds;
 			else hold_[k] = view.instant ? 0.0f : std::max(0.0f, hold_[k] - dt); // instant ⇒ no retention

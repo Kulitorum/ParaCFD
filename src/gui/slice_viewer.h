@@ -124,8 +124,8 @@ namespace paracfd::gui
 		void setTracerTrail(int n);         // max streamline length [integration steps]
 		// Ribbon thickness in PIXELS (screen-space, constant regardless of zoom). A few px reads well.
 		void setTracerWidth(float w) { tracer_width_ = w < 0.5f ? 0.5f : (w > 12.0f ? 12.0f : w); update(); }
-		// "Boring" filter [0.99,1.02]: hide streamlines whose path length is below this multiple of
-		// the domain length Lx. The GUI maps this narrow interval continuously while dragging.
+		// "Boring" filter [0.99,1.02]: hide streamlines whose arc/chord straightness is no greater
+		// than this threshold. The GUI maps this narrow interval continuously while dragging.
 		void setTracerBoring(float m) { tracer_boring_ = m < 0.99f ? 0.99f : (m > 1.02f ? 1.02f : m); update(); }
 		// While the boring slider is being dragged, bypass the anti-flicker retention so the filter
 		// updates instantly; retention resumes on release.
@@ -400,7 +400,7 @@ namespace paracfd::gui
 		int tracer_grid_density_ = 12;   // inlet seed count along the larger inlet dimension
 		int tracer_trail_ = 600;         // max streamline length [integration steps]
 		float tracer_width_ = 2.0f;      // ribbon thickness in pixels (screen-space)
-		float tracer_boring_ = 1.0f;     // hide streamlines shorter than Lx·this (0.99 … 1.02)
+		float tracer_boring_ = 1.0f;     // maximum hidden arc/chord ratio (0.99 … 1.02)
 		bool tracer_boring_instant_ = false; // true while the boring slider is dragged (bypass the hold)
 		QOpenGLShaderProgram tracer_prog_;
 		unsigned int tracer_vao_ = 0, tracer_vbo_ = 0; // interleaved ribbon geometry (stride 11 floats)
