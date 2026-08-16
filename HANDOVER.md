@@ -16,7 +16,7 @@ Implemented:
 - a composite matrix-free pressure operator containing implicit regular faces plus compact EB and coarse/fine connections;
 - CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
-- bounded MacCormack/RK2 finest-brick GPU advection, a static no-cross-fabric protection band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
+- bounded MacCormack/RK2 finest-brick GPU advection, a static one-byte same-side six-link graph in the fabric band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
 - compact same-side EB aperture transport using structured carrier states, first-order upwinding, and molecular diffusion without a full-domain sparse velocity graph;
 - adaptive one-global-step CFL control from a persistent GPU maximum reduction over regular AMR velocity fields; compact EB states retain their own bounded local update;
@@ -49,11 +49,11 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - about 25-30 ms bounded MacCormack advection, 8-10 ms LES/diffusion, 0.1-0.6 ms compact EB transport, and typically 40-140 ms projection as the warm solve evolves (individual timings vary);
 - 493.55 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
 
-`paraglider_case_probe` records long imported-wing histories. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.552 s. The compact peak was 50.6 m/s versus 56.1 m/s in the regular field, so the former 231 m/s compact-state runaway is gone. Pressure-only force was still evolving at `[38.7, -0.72, -1.64]` N; max/RMS-volume divergence were `2.95e-4 / 3.82e-6 s^-1`, and net integrated flux error was `2.71e-5 m^3/s`. The last measured step was 78.0 ms, including 42.8 ms projection and 0.14 ms compact EB transport. This is a stability/conservation result, not a converged aerodynamic result.
+`paraglider_case_probe` records long imported-wing histories. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, precomputed fabric-band link graph, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.622 s. The regular peak settled near 12.0 m/s instead of the previous 56.1 m/s leading-edge runaway. A compact EB aperture state remained near 46.0 m/s. Pressure-only force was still evolving at `[132.0, -0.58, 38.2]` N; max/RMS-volume divergence were `4.31e-4 / 3.90e-6 s^-1`, and net integrated flux error was `1.17e-5 m^3/s`. The last measured step was 66.4 ms, including 30.0 ms projection and 0.16 ms compact EB transport. Persistent storage is 493.55 MiB. This is a stability/conservation result, not a converged aerodynamic result.
 
 ## Next engineering work
 
-1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport and consistent EB Smagorinsky treatment; quantify why the regular PlanB peak continues growing.
+1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport and consistent EB Smagorinsky treatment; diagnose and bound the remaining compact PlanB aperture peak.
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.

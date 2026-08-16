@@ -79,7 +79,9 @@ namespace paracfd::core
 		// There is deliberately no ground-plane branch.
 		void apply_external_aero_boundaries(Real freestream_speed);
 		void exchange_same_level_pressure_halos();
-		double max_abs_velocity() const; // one scalar D2H reduction, used for the global CFL step
+		// Physical faces of active bricks only: ghost storage and covered coarse bricks
+		// cannot spuriously throttle the one-global-step CFL reduction.
+		double max_abs_velocity() const; // one scalar D2H reduction
 		std::size_t bytes() const { return bytes_; }
 		Real* pressure(int level) { return levels_[level].p; }
 		const Real* pressure(int level) const { return levels_[level].p; }

@@ -62,6 +62,10 @@ namespace paracfd::core
 		{
 			const std::size_t q=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;if(q<count)atomic_max_positive(maximum,abs(values[q]));
 		}
+		__global__ void max_abs_active_velocity_kernel(const Real* u,const Real* v,const Real* w,BrickFieldLayout layout,const std::uint32_t* flags,int bricks,Real* maximum)
+		{
+			const int bs=layout.brick_size,per_component=bs*bs*(bs+1),q=blockIdx.x*blockDim.x+threadIdx.x,total=bricks*3*per_component;if(q>=total)return;int local=q%per_component,r=q/per_component,component=r%3,brick=r/3;if(flags[brick]&BRICK_COVERED)return;int i=0,j=0,k=0;if(component==0){i=local%(bs+1);local/=bs+1;j=local%bs;k=local/bs;}else if(component==1){i=local%bs;local/=bs;j=local%(bs+1);k=local/(bs+1);}else{i=local%bs;local/=bs;j=local%bs;k=local/bs;}const std::size_t index=component==0?layout.u_index(brick,i,j,k):(component==1?layout.v_index(brick,i,j,k):layout.w_index(brick,i,j,k));atomic_max_positive(maximum,abs(component==0?u[index]:(component==1?v[index]:w[index])));
+		}
 		__global__ void initialize_velocity_kernel(Real* u,Real* v,Real* w,BrickFieldLayout layout,int bricks,Real speed)
 		{
 			std::size_t q=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -190,7 +194,7 @@ namespace paracfd::core
 	}
 	double DeviceAmrFields::max_abs_velocity() const
 	{
-		check(cudaMemset(max_abs_scratch_,0,sizeof(Real)),"clear pooled velocity maximum");for(const auto& d:levels_)if(d.brick_count){const std::size_t un=static_cast<std::size_t>(d.brick_count)*d.layout.u_stride,vn=static_cast<std::size_t>(d.brick_count)*d.layout.v_stride,wn=static_cast<std::size_t>(d.brick_count)*d.layout.w_stride;max_abs_kernel<<<static_cast<unsigned>((un+255)/256),256>>>(d.u,un,max_abs_scratch_);max_abs_kernel<<<static_cast<unsigned>((vn+255)/256),256>>>(d.v,vn,max_abs_scratch_);max_abs_kernel<<<static_cast<unsigned>((wn+255)/256),256>>>(d.w,wn,max_abs_scratch_);}Real host=0;check(cudaMemcpy(&host,max_abs_scratch_,sizeof(Real),cudaMemcpyDeviceToHost),"download pooled velocity maximum");return static_cast<double>(host);
+		check(cudaMemset(max_abs_scratch_,0,sizeof(Real)),"clear pooled velocity maximum");for(const auto& d:levels_)if(d.brick_count){const int work=d.brick_count*3*d.layout.brick_size*d.layout.brick_size*(d.layout.brick_size+1);max_abs_active_velocity_kernel<<<(work+255)/256,256>>>(d.u,d.v,d.w,d.layout,d.flags,d.brick_count,max_abs_scratch_);}Real host=0;check(cudaMemcpy(&host,max_abs_scratch_,sizeof(Real),cudaMemcpyDeviceToHost),"download active velocity maximum");return static_cast<double>(host);
 	}
 
 	DeviceAmrLocator::DeviceAmrLocator(const AmrHierarchy& hierarchy)

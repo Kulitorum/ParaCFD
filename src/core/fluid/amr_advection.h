@@ -9,10 +9,12 @@
 namespace paracfd::core
 {
 	// Production AMR advection layer. Backtraces locate the finest active brick
-	// through the integer-coordinate GPU hash. A static protection mask covers every
-	// face centre within `protection_cells * h` of fabric; those values retain their
-	// local state, so no sample can jump to the opposite side of a sheet. Away from
-	// that band, bounded MacCormack advection uses RK2 characteristics.
+	// through the integer-coordinate GPU hash. Static preprocessing marks faces within
+	// `protection_cells * h` of fabric and stores their six Cartesian same-side links.
+	// Those faces use bounded first-order donor transport and link-restricted molecular
+	// diffusion; far-field faces retain bounded RK2/MacCormack transport and LES. This
+	// permits tangential transport near a sheet without per-step triangle traversal or
+	// opposite-side stencil sampling.
 	// Trilinear and diffusion stencils resolve same-level brick crossings through the
 	// GPU coordinate hash. Coarse/fine samples are interpolated but are not yet the
 	// final conservative face reconstruction.
@@ -38,7 +40,8 @@ namespace paracfd::core
 			int brick_count = 0;
 			Real *u = nullptr, *v = nullptr, *w = nullptr;
 			Real *forward_u = nullptr, *forward_v = nullptr, *forward_w = nullptr;
-			unsigned char *protect_u = nullptr, *protect_v = nullptr, *protect_w = nullptr;
+			// Bits 0..5 are -/+ xyz links; bit 6 marks the near-fabric band.
+			unsigned char *links_u = nullptr, *links_v = nullptr, *links_w = nullptr;
 		};
 		DeviceAmrLocator locator_;
 		DeviceAmrFieldLevelView *device_views_ = nullptr, *device_forward_views_ = nullptr;
