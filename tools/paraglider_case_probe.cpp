@@ -1,4 +1,5 @@
 #include "core/fluid/external_aero_core.h"
+#include "core/geometry/mesh_clip.h"
 #include "core/geometry/step_import.h"
 #include "core/geometry/triangle_bvh.h"
 #include "core/paraglider_config.h"
@@ -70,7 +71,7 @@ int main(int argc,char** argv)
 	// each diagnostic sample visible while the case is running instead of buffering
 	// the entire multi-minute history until process exit.
 	std::setvbuf(stdout,nullptr,_IONBF,0);
-	std::string config_path="configs/planb_parakite.json";int steps=50,sample_every=5,max_levels=0;double projection_tolerance=0,min_volume_fraction=0,target_physical_time=0;bool locate_regular_max=false,steps_explicit=false;
+	std::string config_path="configs/planb_parakite.json";int steps=50,sample_every=5,max_levels=0;double projection_tolerance=0,min_volume_fraction=0,target_physical_time=0,thin_y_fraction=-1;bool locate_regular_max=false,steps_explicit=false;
 	for(int i=1;i<argc;++i)
 	{
 		const std::string argument=argv[i];
@@ -81,12 +82,13 @@ int main(int argc,char** argv)
 		else if(argument=="--projection-tolerance"&&i+1<argc)projection_tolerance=std::atof(argv[++i]);
 		else if(argument=="--min-volume-fraction"&&i+1<argc)min_volume_fraction=std::atof(argv[++i]);
 		else if(argument=="--max-levels"&&i+1<argc)max_levels=std::atoi(argv[++i]);
+		else if(argument=="--thin-y-fraction"&&i+1<argc)thin_y_fraction=std::atof(argv[++i]);
 		else if(argument=="--locate-regular-max")locate_regular_max=true;
-		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--steps N] [--physical-time seconds] [--sample-every N] [--projection-tolerance value] [--min-volume-fraction value] [--max-levels N] [--locate-regular-max]\n");return 2;}
+		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--steps N] [--physical-time seconds] [--sample-every N] [--projection-tolerance value] [--min-volume-fraction value] [--max-levels N] [--thin-y-fraction 0..1] [--locate-regular-max]\n");return 2;}
 	}
-	if(steps<0||sample_every<1||target_physical_time<0){std::fprintf(stderr,"steps and physical-time must be nonnegative and sample-every must be positive\n");return 2;}if(target_physical_time>0&&!steps_explicit)steps=std::numeric_limits<int>::max();
+	if(steps<0||sample_every<1||target_physical_time<0||(thin_y_fraction>=0&&(thin_y_fraction<0.05||thin_y_fraction>0.95))){std::fprintf(stderr,"steps and physical-time must be nonnegative, sample-every positive, and thin-Y fraction in [0.05,0.95]\n");return 2;}if(target_physical_time>0&&!steps_explicit)steps=std::numeric_limits<int>::max();
 	ParagliderConfig config;std::string error;if(!load_paraglider_config(config_path,config,&error)){std::fprintf(stderr,"[paraglider-case] %s\n",error.c_str());return 2;}if(projection_tolerance>0)config.solver.projection_tolerance=projection_tolerance;if(min_volume_fraction>0)config.amr.min_volume_fraction=min_volume_fraction;if(max_levels>0)config.amr.max_levels=max_levels;
-	const auto load_begin=std::chrono::steady_clock::now();TriMesh source=load_step_mesh(config.step_path,config.tessellation_deflection_mm,&error);if(source.empty()){std::fprintf(stderr,"[paraglider-case] STEP load failed: %s\n",error.c_str());return 2;}config.placement=frame_wing_for_external_domain(source,config.placement,config.domain.upstream_margin,config.domain.lateral_margin,config.domain.vertical_margin,config.amr.base_cell_size*config.amr.brick_size);std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config.placement.tx,config.placement.ty,config.placement.tz,config.placement.m[0],config.placement.m[1],config.placement.m[2],config.placement.m[3],config.placement.m[4],config.placement.m[5],config.placement.m[6],config.placement.m[7],config.placement.m[8]);TriMesh wing=placed_mesh(source,config.placement);TriangleBvh bvh(wing);const auto load_end=std::chrono::steady_clock::now();
+	const auto load_begin=std::chrono::steady_clock::now();TriMesh source=load_step_mesh(config.step_path,config.tessellation_deflection_mm,&error);if(source.empty()){std::fprintf(stderr,"[paraglider-case] STEP load failed: %s\n",error.c_str());return 2;}TriMesh wing;if(thin_y_fraction>=0){const int ratio=1<<std::max(0,config.amr.max_levels-1);const double h=config.amr.base_cell_size/ratio;constexpr int layers=2;ModelPlacement orientation=config.placement;orientation.tx=orientation.ty=orientation.tz=0;const TriMesh oriented=placed_mesh(source,orientation);const double centre=oriented.bbox_min[1]+thin_y_fraction*(oriented.bbox_max[1]-oriented.bbox_min[1]);TriMesh clipped=clip_mesh_to_axis_slab(oriented,1,centre-layers*h*0.5,centre+layers*h*0.5);if(clipped.empty()){std::fprintf(stderr,"[paraglider-case] thin-Y slab contains no triangles\n");return 2;}config.amr.base_cell_size=h;config.amr.max_levels=1;config.amr.brick_size=layers;config.domain.lateral_margin=0;config.reference.area=0;config.reference.length=0;config.placement=frame_wing_for_external_domain(clipped,ModelPlacement{},config.domain.upstream_margin,0,config.domain.vertical_margin,h*layers);wing=placed_mesh(clipped,config.placement);std::fprintf(stderr,"[paraglider-thin-y] station=%.6g source-y=%.6g thickness=%.6g m h=%.6g layers=%d triangles=%zu\n",thin_y_fraction,centre,layers*h,h,layers,wing.triangle_count());}else{config.placement=frame_wing_for_external_domain(source,config.placement,config.domain.upstream_margin,config.domain.lateral_margin,config.domain.vertical_margin,config.amr.base_cell_size*config.amr.brick_size);wing=placed_mesh(source,config.placement);}std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config.placement.tx,config.placement.ty,config.placement.tz,config.placement.m[0],config.placement.m[1],config.placement.m[2],config.placement.m[3],config.placement.m[4],config.placement.m[5],config.placement.m[6],config.placement.m[7],config.placement.m[8]);TriangleBvh bvh(wing);const auto load_end=std::chrono::steady_clock::now();
 	try
 	{
 		const auto build_begin=std::chrono::steady_clock::now();ExternalAeroCore core(wing,bvh,config);const auto build_end=std::chrono::steady_clock::now();ExternalAeroStepStats stats=core.initialize();

@@ -58,6 +58,7 @@ add_library(libparacfd STATIC
 	src/core/fluid/eb_pressure.cu
 	# Paraglider geometry acceleration and zero-thickness embedded boundaries.
 	src/core/geometry/triangle_bvh.cpp
+	src/core/geometry/mesh_clip.cpp
 	src/core/geometry/embedded_boundary.cpp
 )
 set_target_properties(libparacfd PROPERTIES

@@ -346,6 +346,11 @@ void main()
 		update();
 	}
 
+	void SliceViewer::frameThinYDebugView()
+	{
+		if(!have_info_)return;camera_.frameDomain((float)info_.Lx,(float)info_.Ly,(float)info_.Lz);camera_.setOrientation(90.0f,0.0f);update();
+	}
+
 	bool SliceViewer::frameWingView()
 	{
 		if(!gz_valid_)return false;
@@ -1545,6 +1550,10 @@ void main()
 				const QRect resolutionCue(18,46,270,22);p.fillRect(resolutionCue,QColor(18,20,24,170));p.setPen(QColor(220,225,232));
 				p.drawText(resolutionCue.adjusted(9,0,-5,0),Qt::AlignLeft|Qt::AlignVCenter,
 					QString("SLICE  %1 x %2   finest h=%3 m").arg(slice_nu_).arg(slice_nv_).arg(info_.finest_h,0,'g',4));
+			}
+			if(thin_debug_)
+			{
+				QFont debugFont=f;debugFont.setPointSizeF(11.0);debugFont.setBold(true);p.setFont(debugFont);const QRect debugCue(18,74,310,30);p.fillRect(debugCue,QColor(115,25,20,215));p.setPen(QColor(255,235,220));p.drawText(debugCue.adjusted(9,0,-5,0),Qt::AlignLeft|Qt::AlignVCenter,QString("THIN-Y DEBUG  %1 CELLS   STEP %2").arg(thin_debug_layers_).arg(simulation_step_));
 			}
 		}
 	}

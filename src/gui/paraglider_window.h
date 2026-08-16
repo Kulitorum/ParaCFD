@@ -39,6 +39,7 @@ namespace paracfd::gui
 		bool loadConfigFile(const QString& path,bool build_after_load=false);
 		bool saveConfigFile(const QString& path);
 		bool buildGrid();
+		void setThinYDiagnostic(double span_fraction);
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -57,6 +58,7 @@ namespace paracfd::gui
 		void updateSnapshot();
 		void applySurfaceColour();
 		void updateDebugBoxes();
+		void restoreFullWingDisplay();
 		void spawnWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core);
 		void shutdownWorker();
 
@@ -79,14 +81,16 @@ namespace paracfd::gui
 			*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
 			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
-		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr;
+		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
 		QSlider* slice_position_=nullptr;
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
-			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr;
+			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*thin_y_debug_=nullptr;
+		QDoubleSpinBox* thin_y_fraction_=nullptr;
 		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
 
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
 		std::vector<float> cp_plus_,cp_minus_,delta_cp_;
 		float delta_cp_range_=1,side_cp_range_=1;
+		bool thin_debug_display_=false;
 	};
 }

@@ -48,7 +48,10 @@ namespace paracfd::gui
 		// is upstream of the centre of its long wake domain, so fitting the domain makes
 		// a correctly placed wing look small and off-centre.
 		void frameDomainView();
+		void frameThinYDebugView();
 		bool frameWingView();
+		void setThinDebugState(bool enabled,int layers){thin_debug_=enabled;thin_debug_layers_=layers;update();}
+		void setSimulationStep(long long step){simulation_step_=step;update();}
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
@@ -285,6 +288,9 @@ namespace paracfd::gui
 		static constexpr int kMaxSliceVertices = 1024 * 1024;
 		int slice_nu_ = 65, slice_nv_ = 65;
 		int slice_buffer_nu_ = 0, slice_buffer_nv_ = 0;
+		bool thin_debug_ = false;
+		int thin_debug_layers_ = 0;
+		long long simulation_step_ = 0;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;

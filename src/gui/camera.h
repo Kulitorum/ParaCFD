@@ -18,6 +18,7 @@ namespace paracfd::gui
 		void setTarget(const QVector3D& t) { target_ = t; }
 		void setDistance(float d) { distance_ = std::max(1e-3f, d); }
 		void setViewport(int w, int h) { width_ = std::max(1, w); height_ = std::max(1, h); }
+		void setOrientation(float azimuth_degrees,float elevation_degrees){azimuth_=azimuth_degrees;elevation_=std::clamp(elevation_degrees,-89.0f,89.0f);panx_=pany_=0.0f;}
 
 		// Frame a domain [0,Lx]x[0,Ly]x[0,Lz]: target its centre, back off to fit.
 		void frameDomain(float Lx, float Ly, float Lz)
