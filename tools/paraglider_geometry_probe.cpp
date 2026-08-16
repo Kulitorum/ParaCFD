@@ -8,6 +8,7 @@
 #include "core/fluid/eb_pressure.h"
 #include "core/fluid/external_aero_core.h"
 #include "core/geometry/embedded_boundary.h"
+#include "core/geometry/model_placement.h"
 #include "core/geometry/triangle_bvh.h"
 #include "core/paraglider_config.h"
 
@@ -67,6 +68,7 @@ int main()
 	// BVH: exact cell query, two-sided segment crossing, and nearest-distance result.
 	TriMesh flat=flat_x();TriangleBvh bvh(flat);Aabb3d hitbox{{0.49,0.2,0.2},{0.51,0.8,0.8}},missbox{{0.0,0.2,0.2},{0.4,0.8,0.8}};
 	check(bvh.query_aabb(hitbox).size()==2&&bvh.query_aabb(missbox).empty(),"BVH exact AABB query");
+	TriMesh span_x;span_x.bbox_min={-5,-1,-0.5f};span_x.bbox_max={5,1,0.5f};const HorizontalWingAxes axes_x=infer_horizontal_wing_axes(span_x);TriMesh span_y;span_y.bbox_min={-1,-5,-0.5f};span_y.bbox_max={1,5,0.5f};const HorizontalWingAxes axes_y=infer_horizontal_wing_axes(span_y);TriMesh ambiguous;ambiguous.bbox_min={-1,-1,-0.5f};ambiguous.bbox_max={1,1,0.5f};check(axes_x.valid&&axes_x.span_axis==0&&axes_x.chord_axis==1&&near(axes_x.yaw_degrees,90)&&axes_y.valid&&axes_y.span_axis==1&&axes_y.chord_axis==0&&near(axes_y.yaw_degrees,180)&&!infer_horizontal_wing_axes(ambiguous).valid,"face bbox infers span/chord axes but not LE/TE polarity");
 	SegmentHit sh=bvh.intersect_segment({0,0.3,0.4},{1,0.3,0.4});check(sh.hit&&near(sh.t,0.5,1e-12),"BVH two-sided segment intersection");
 	auto np=bvh.nearest({0.2,0.3,0.4});check(np.found&&near(np.distance,0.3,1e-12),"BVH nearest surface / distance");
 	TriMesh placement_source=flat;placement_source.normals.assign(placement_source.positions.size(),0);for(std::size_t v=0;v<placement_source.vertex_count();++v)placement_source.normals[3*v]=1;placement_source.vertex_uv.assign(2*placement_source.vertex_count(),0.25f);ModelPlacement reflected;reflected.m[0]=-1;TriMesh placement_mesh=placed_mesh(placement_source,reflected);check(placement_mesh.source_face_ids==placement_source.source_face_ids&&placement_mesh.vertex_uv==placement_source.vertex_uv&&near(placement_mesh.normals[0],1.0,1e-7),"placement preserves CAD metadata and winding normal");

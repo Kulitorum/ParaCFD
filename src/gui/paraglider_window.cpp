@@ -167,12 +167,11 @@ namespace paracfd::gui
 			config_.placement=ModelPlacement{};
 			const double dx=mesh.bbox_max[0]-mesh.bbox_min[0];
 			const double dy=mesh.bbox_max[1]-mesh.bbox_min[1];
-			const double ratio=std::max(dx,dy)/std::max(1e-9,std::min(dx,dy));
-			if(ratio>=1.25)
+			const HorizontalWingAxes axes=infer_horizontal_wing_axes(mesh);
+			if(axes.valid)
 			{
-				const bool span_x=dx>dy;
-				config_.placement=left_rotation(config_.placement,span_x?90:180,{0,0,1});
-				orientation_note=span_x
+				config_.placement=left_rotation(config_.placement,axes.yaw_degrees,{0,0,1});
+				orientation_note=axes.span_axis==0
 					?"bbox: span X / chord Y; assumed forward -Y -> +X"
 					:"bbox: span Y / chord X; assumed forward -X -> +X";
 			}

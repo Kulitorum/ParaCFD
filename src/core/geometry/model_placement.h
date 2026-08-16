@@ -39,6 +39,36 @@ namespace paracfd::core
 		}
 	};
 
+	// Face-only horizontal bbox inference deliberately determines axes, not polarity.
+	// ParaCFD keeps Z as up, treats the longer of X/Y as span, and maps the assumed
+	// negative chord direction into its fixed +X freestream. `yaw_degrees` is therefore
+	// either +90 degrees for span-X/chord-Y data or 180 degrees for span-Y/chord-X data.
+	// The caller must still expose a leading/trailing-edge flip.
+	struct HorizontalWingAxes
+	{
+		bool valid = false;
+		int span_axis = -1;
+		int chord_axis = -1;
+		double aspect_ratio = 1.0;
+		double yaw_degrees = 0.0;
+	};
+
+	inline HorizontalWingAxes infer_horizontal_wing_axes(const TriMesh& mesh, double minimum_ratio = 1.25)
+	{
+		HorizontalWingAxes result;
+		const double dx = static_cast<double>(mesh.bbox_max[0]) - mesh.bbox_min[0];
+		const double dy = static_cast<double>(mesh.bbox_max[1]) - mesh.bbox_min[1];
+		const double shorter = dx < dy ? dx : dy, longer = dx > dy ? dx : dy;
+		if (!(shorter > 0.0) || !(longer > 0.0) || !(minimum_ratio > 1.0)) return result;
+		result.aspect_ratio = longer / shorter;
+		if (result.aspect_ratio < minimum_ratio) return result;
+		result.valid = true;
+		result.span_axis = dx > dy ? 0 : 1;
+		result.chord_axis = 1 - result.span_axis;
+		result.yaw_degrees = result.span_axis == 0 ? 90.0 : 180.0;
+		return result;
+	}
+
 	// Return a copy of `mesh` with the placement applied to every vertex position and the bbox
 	// recomputed. Indices and CAD provenance are preserved.
 	inline TriMesh placed_mesh(const TriMesh& mesh, const ModelPlacement& p)
