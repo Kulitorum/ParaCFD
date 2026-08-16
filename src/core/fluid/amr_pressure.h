@@ -158,10 +158,11 @@ namespace paracfd::core
 		// Refresh each 2:1 tile velocity from its collocated fine MAC face after
 		// transport. EB aperture velocities remain independent compact states.
 		void sync_coarse_fine_from_fields();
-		// First-order same-side graph transport for split EB aperture states. Only
+		// Bounded first-order same-side graph transport for split EB aperture states. Only
 		// DOFs incident to EB apertures are represented; there is no full-domain CSR.
 		// A graph-normal Smagorinsky estimate supplies the missing irregular-region
-		// eddy viscosity while preserving a uniform state exactly.
+		// eddy viscosity. The combined update obeys the local same-side stencil bounds,
+		// preserving a uniform state and preventing transport-created extrema.
 		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;

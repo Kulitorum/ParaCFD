@@ -18,7 +18,7 @@ Implemented:
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
 - bounded MacCormack/RK2 finest-brick GPU advection, minmod-limited linear transport on complete stencils of a static one-byte same-side six-link fabric graph (first-order fallback at incomplete stencils), and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
-- compact same-side EB aperture transport using structured carrier states, first-order upwinding, molecular diffusion, and a graph-normal Smagorinsky estimate without a full-domain sparse velocity graph;
+- compact same-side EB aperture transport using structured carrier states, bounded first-order upwinding, molecular diffusion, and a graph-normal Smagorinsky estimate without a full-domain sparse velocity graph; the combined update obeys its local same-side stencil extrema without imposing an absolute velocity cap;
 - adaptive one-global-step CFL control from a persistent GPU maximum reduction over regular AMR velocity fields; compact EB states retain their own bounded local update;
 - `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> compact EB transport -> coarse/fine synchronization -> composite projection without bulk per-step transfers;
 - composite surface-patch mappings to global p+/p- pressure states and pressure-only triangle/whole-wing load publication;
@@ -26,7 +26,7 @@ Implemented:
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors STEP triangles by visible-side Cp, Cp+, Cp-, or live delta-Cp;
-- a purpose-built compact grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, restored arrow/tracer tuning controls, wheel-safe editors, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
+- a purpose-built compact grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, restored arrow/tracer tuning controls, wheel-safe editors, a finest-active-brick 256x256 scalar slice, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
 
 Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 
@@ -55,11 +55,11 @@ The case probe accepts `--max-levels N` for resolution studies. A four-level cas
 
 ## Next engineering work
 
-1. Extend the limited fabric-band reconstruction to the compact EB graph, add a local compact-flux acceptance gate, and extend graph-normal EB LES to a full irregular strain tensor/wall treatment.
+1. Extend the limited fabric-band reconstruction to the compact EB graph and extend graph-normal EB LES to a full irregular strain tensor/wall treatment.
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
-5. Replace throttled host visualization snapshots with direct AMR-aware CUDA/OpenGL field sampling and add pressure-force vectors.
+5. Replace the finest-brick-aware but throttled host slice snapshot with direct CUDA/OpenGL field sampling and add pressure-force vectors.
 
 ## Important files
 
