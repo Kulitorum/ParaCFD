@@ -29,6 +29,7 @@ Implemented:
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors STEP triangles by visible-side Cp, Cp+, Cp-, or live delta-Cp;
 - a purpose-built compact grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, restored arrow/tracer tuning controls, wheel-safe editors, a finest-active-brick scalar slice sized per axis from finest cell spacing, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics;
 - a selectable cropped-Y collapse diagnostic that clips open fabric at a span station and requested physical width, snaps upward to whole finest cells, runs the real uniform solver, switches the viewer to a Y-normal 2-D presentation, and overlays the cell/timestep count. EB atlas halos are clamped at physical boundaries so stabilization cannot merge into a phantom halo cell.
+- persistent Qt recent-file state: the File menu retains ten valid STEP/config paths, ordinary startup restores the most recent wing/config placement without building CFD, and missing paths are pruned.
 
 Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 

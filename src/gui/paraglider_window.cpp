@@ -32,6 +32,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -122,7 +123,23 @@ namespace paracfd::gui
 		auto* open_step=file->addAction("Open STEP...");connect(open_step,&QAction::triggered,this,[this]{const QString path=QFileDialog::getOpenFileName(this,"Open paraglider STEP",{},"STEP files (*.step *.stp);;All files (*)");if(!path.isEmpty())loadStepFile(path,true);});
 		auto* open_config=file->addAction("Open paraglider config...");connect(open_config,&QAction::triggered,this,[this]{const QString path=QFileDialog::getOpenFileName(this,"Open ParaCFD config",{},"JSON files (*.json);;All files (*)");if(!path.isEmpty())loadConfigFile(path,false);});
 		auto* save_config=file->addAction("Save paraglider config as...");connect(save_config,&QAction::triggered,this,[this]{QString path=QFileDialog::getSaveFileName(this,"Save ParaCFD config",config_path_,"JSON files (*.json)");if(!path.isEmpty()){if(!path.endsWith(".json",Qt::CaseInsensitive))path+=".json";saveConfigFile(path);}});
+		recent_files_menu_=file->addMenu("Recent files");refreshRecentFiles();
 		file->addSeparator();auto* quit=file->addAction("Exit");connect(quit,&QAction::triggered,this,&QWidget::close);
+	}
+
+	void ParagliderWindow::rememberRecentFile(const QString& path)
+	{
+		const QFileInfo info(path);const QString absolute=info.canonicalFilePath().isEmpty()?info.absoluteFilePath():info.canonicalFilePath();if(absolute.isEmpty())return;QSettings settings;QStringList recent=settings.value("recentFiles").toStringList();recent.removeIf([&](const QString& entry){return QString::compare(QFileInfo(entry).absoluteFilePath(),absolute,Qt::CaseInsensitive)==0;});recent.prepend(absolute);while(recent.size()>10)recent.removeLast();settings.setValue("recentFiles",recent);refreshRecentFiles();
+	}
+
+	void ParagliderWindow::refreshRecentFiles()
+	{
+		if(!recent_files_menu_)return;recent_files_menu_->clear();QSettings settings;QStringList recent=settings.value("recentFiles").toStringList(),valid;for(const QString& path:recent)if(QFileInfo::exists(path)&&!valid.contains(path,Qt::CaseInsensitive))valid.push_back(QFileInfo(path).absoluteFilePath());if(valid!=recent)settings.setValue("recentFiles",valid);if(valid.empty()){auto* empty=recent_files_menu_->addAction("No recent files");empty->setEnabled(false);}else for(int index=0;index<valid.size();++index){const QFileInfo info(valid[index]);auto* action=recent_files_menu_->addAction(QString("&%1  %2 — %3").arg(index+1).arg(info.fileName(),QDir::toNativeSeparators(info.absolutePath())));action->setToolTip(QDir::toNativeSeparators(valid[index]));connect(action,&QAction::triggered,this,[this,path=valid[index]]{if(path.endsWith(".json",Qt::CaseInsensitive))loadConfigFile(path,false);else loadStepFile(path,true);});}recent_files_menu_->addSeparator();auto* clear=recent_files_menu_->addAction("Clear recent files");clear->setEnabled(!valid.empty());connect(clear,&QAction::triggered,this,[this]{QSettings{}.remove("recentFiles");refreshRecentFiles();});
+	}
+
+	bool ParagliderWindow::loadLastFile()
+	{
+		QSettings settings;const QStringList recent=settings.value("recentFiles").toStringList();for(const QString& path:recent)if(QFileInfo::exists(path)){const bool loaded=path.endsWith(".json",Qt::CaseInsensitive)?loadConfigFile(path,false):loadStepFile(path,true);if(loaded){statusBar()->showMessage(QString("Restored recent wing: %1").arg(QFileInfo(path).fileName()),6000);return true;}}refreshRecentFiles();return false;
 	}
 
 	void ParagliderWindow::buildControls()
@@ -186,7 +203,7 @@ namespace paracfd::gui
 		if(source_mesh_.empty())return;shutdownWorker();restoreFullWingDisplay();config_.placement=left_rotation(config_.placement,degrees,axis);normalizePlacementToDomain();play_button_->setChecked(false);play_button_->setEnabled(false);step_button_->setEnabled(false);amr_boxes_.clear();eb_boxes_.clear();updateDebugBoxes();viewer_->clearTriangleSurfaceColouring();statusBar()->showMessage(QString("Wing rotated %1°; rebuild the static CFD grid.").arg(degrees),5000);
 	}
 
-	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation)
+	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation,bool remember_file)
 	{
 		shutdownWorker();
 		QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -230,18 +247,19 @@ namespace paracfd::gui
 		amr_boxes_.clear();eb_boxes_.clear();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();
 		updateDebugBoxes();viewer_->clearTriangleSurfaceColouring();
 		play_button_->setChecked(false);play_button_->setEnabled(false);step_button_->setEnabled(false);
+		if(remember_file)rememberRecentFile(step_path_);
 		statusBar()->showMessage("STEP loaded and face bbox centred. Confirm leading/trailing direction, then Build CFD Grid.",8000);
 		return true;
 	}
 
 	bool ParagliderWindow::loadConfigFile(const QString& path,bool build_after_load)
 	{
-		ParagliderConfig loaded;std::string error;if(!load_paraglider_config(path.toStdString(),loaded,&error)){QMessageBox::critical(this,"Config load failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();configToUi(loaded);if(loaded.step_path.empty()){statusBar()->showMessage("Config loaded; choose its STEP wing.",6000);return true;}const QString step=resolve_step_path(config_path_,loaded.step_path);if(!loadStepFile(step,false))return false;config_.placement=loaded.placement;normalizePlacementToDomain();viewer_->setMeshPlacement(config_.placement);viewer_->frameWingView();return !build_after_load||buildGrid();
+		ParagliderConfig loaded;std::string error;if(!load_paraglider_config(path.toStdString(),loaded,&error)){QMessageBox::critical(this,"Config load failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();configToUi(loaded);if(loaded.step_path.empty()){statusBar()->showMessage("Config loaded; choose its STEP wing.",6000);return true;}const QString step=resolve_step_path(config_path_,loaded.step_path);if(!loadStepFile(step,false,false))return false;config_.placement=loaded.placement;normalizePlacementToDomain();viewer_->setMeshPlacement(config_.placement);viewer_->frameWingView();rememberRecentFile(config_path_);return !build_after_load||buildGrid();
 	}
 
 	bool ParagliderWindow::saveConfigFile(const QString& path)
 	{
-		config_=configFromUi();if(!thin_debug_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
+		config_=configFromUi();if(!thin_debug_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
 	}
 
 	void ParagliderWindow::updateGridReadout()

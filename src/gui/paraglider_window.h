@@ -13,6 +13,7 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
+class QMenu;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -35,9 +36,10 @@ namespace paracfd::gui
 		explicit ParagliderWindow(QWidget* parent=nullptr);
 		~ParagliderWindow() override;
 
-		bool loadStepFile(const QString& path,bool infer_orientation=true);
+		bool loadStepFile(const QString& path,bool infer_orientation=true,bool remember_file=true);
 		bool loadConfigFile(const QString& path,bool build_after_load=false);
 		bool saveConfigFile(const QString& path);
+		bool loadLastFile();
 		bool buildGrid();
 		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		SliceViewer* viewer() const{return viewer_;}
@@ -50,6 +52,8 @@ namespace paracfd::gui
 	private:
 		void buildMenus();
 		void buildControls();
+		void rememberRecentFile(const QString& path);
+		void refreshRecentFiles();
 		void configToUi(const paracfd::core::ParagliderConfig& config);
 		paracfd::core::ParagliderConfig configFromUi()const;
 		void normalizePlacementToDomain();
@@ -66,6 +70,7 @@ namespace paracfd::gui
 		ParagliderSimWorker* worker_=nullptr;
 		QThread* worker_thread_=nullptr;
 		QTimer* repaint_timer_=nullptr;
+		QMenu* recent_files_menu_=nullptr;
 
 		paracfd::core::ParagliderConfig config_;
 		paracfd::core::TriMesh source_mesh_;
