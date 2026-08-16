@@ -58,7 +58,7 @@ Every owned composite surface patch retains its global plus/minus pressure DOFs 
 
 ## Visualization collision
 
-The Qt/OpenGL viewer still displays the STEP surface. Flow particles and tracers can use the placed triangle BVH for segment-crossing tests and cannot pass through fabric. This does not use an inside-solid or parity classification. The mesh renderer accepts per-source-triangle delta-Cp through an OpenGL shader-storage buffer indexed by primitive ID, so shared CAD vertices do not smear results across fabric panels. The aerodynamic timestep has not yet been wired to publish that buffer automatically.
+The Qt/OpenGL viewer still displays the STEP surface. Flow particles and tracers can use the placed triangle BVH for segment-crossing tests and cannot pass through fabric. This does not use an inside-solid or parity classification. The mesh renderer accepts per-source-triangle delta-Cp through an OpenGL shader-storage buffer indexed by primitive ID, so shared CAD vertices do not smear results across fabric panels. A dedicated worker now advances `ExternalAeroCore`, throttles surface downloads, publishes delta-Cp automatically, and reports instantaneous pressure-only loads and pressure-solver timing/residuals.
 
 ## Build and test
 
@@ -91,7 +91,7 @@ The repository is in an incremental migration state and must not yet be describe
 - The composite solver has a two-level additive geometric/Galerkin preconditioner, not yet a complete recursive multigrid hierarchy. The checked-in PlanB initial projection converges at the configured global residual tolerance, but local maximum divergence remains sensitive to the very small irregular control volumes and needs a stricter local/conservation acceptance criterion.
 - The new external-aero timestep is wired end to end, but advection is first-order rather than MacCormack. Fabric-near faces use a conservative static protection fallback and interpolation/diffusion stencils clamp at brick edges; higher-order side-aware and fully consistent coarse/fine reconstruction are still required.
 - Compact coarse/fine and EB aperture velocities participate in projection but are not yet advected/diffused as independent velocity states.
-- The Qt viewer can inspect AMR bricks and owned EB cells and reports whether the composite pressure topology is ready. It deliberately refuses to run the legacy channel timestep for a loaded paraglider, but its controls remain substantially inherited from the building/channel product.
+- The Qt viewer can inspect AMR bricks and owned EB cells, run the new GPU timestep, color the mesh by delta-Cp, and show pressure-only force/convergence readouts. Its controls, flow slices, scene format, and averaging UI remain substantially inherited from the building/channel product; plus/minus side selection is not yet exposed.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
 - The opened-cavity gate currently proves pressure-graph connectivity through the missing inlet face; it does not yet measure a developed internal mass-flow rate. Longer force-convergence studies and a resolved paraglider reference case remain outstanding.
 

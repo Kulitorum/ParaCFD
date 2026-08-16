@@ -5,6 +5,7 @@
 #include "core/fluid/amr_eb.h"
 #include "core/fluid/amr_grid.h"
 #include "core/fluid/amr_pressure.h"
+#include "core/fluid/external_aero_core.h"
 #include "core/geometry/embedded_boundary.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/step_import.h"
@@ -13,6 +14,7 @@
 #include "core/paraglider_config.h"
 #include "gui/slice_viewer.h"
 #include "gui/sim_worker.h"
+#include "gui/paraglider_sim_worker.h"
 #include "gui/video_recorder.h"
 #include "gui/video_settings_dialog.h"
 
@@ -101,9 +103,11 @@ namespace paracfd::gui
 		});
 		QAction* closeStep = fileMenu->addAction("Close model");
 		connect(closeStep, &QAction::triggered, this, [this] {
+			shutdownParagliderWorker();
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
 			model_mesh_ = paracfd::core::TriMesh{};
 			if (viewer_) { viewer_->clearMesh(); viewer_->clearParagliderDebugBoxes(); }
+			if (building_group_) building_group_->setVisible(true);
 			if (start_btn_) { start_btn_->setEnabled(true); start_btn_->setText("Start Simulation"); }
 			initPlacementHistory(); // no model ⇒ clear the undo/redo history + disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
@@ -192,7 +196,7 @@ namespace paracfd::gui
 		// rate; the viewer always shows the latest device state). The same tick also captures a video
 		// frame when recording, on the fixed step cadence (maybeCaptureFrame early-returns otherwise).
 		repaint_timer_ = new QTimer(this);
-		connect(repaint_timer_, &QTimer::timeout, this, [this] { viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); updateWindLoadReadout(); updateAvgReadout(); });
+		connect(repaint_timer_, &QTimer::timeout, this, [this] { updateParagliderReadout(); viewer_->update(); maybeCaptureFrame(); updateRecordDialogStatus(); updateWindLoadReadout(); updateAvgReadout(); });
 		repaint_timer_->start(16); // widened by setDisplayThrottle when "Fast sim" is engaged
 
 		// Create + start the worker.
@@ -232,13 +236,14 @@ namespace paracfd::gui
 		playBtn->setToolTip("Play/pause the simulation stepping (available once the simulation is started).");
 		connect(playBtn, &QPushButton::toggled, this, [this, playBtn](bool on) {
 			if (worker_) worker_->setPlaying(on);
+			if (paraglider_worker_) paraglider_worker_->setPlaying(on);
 			playBtn->setText(on ? "Pause" : "Play");
 		});
 		play_btn_ = playBtn; // a rebuild (scenario load / grid Apply) honours this play/pause state
 		QPushButton* stepBtn = new QPushButton("Step");
 		stepBtn->setEnabled(false); // enabled once the sim is started
 		stepBtn->setToolTip("Advance a single step (while paused). Available once the simulation is started.");
-		connect(stepBtn, &QPushButton::clicked, this, [this] { if (worker_) worker_->stepOnce(); });
+		connect(stepBtn, &QPushButton::clicked, this, [this] { if (paraglider_worker_) paraglider_worker_->stepOnce(); else if (worker_) worker_->stepOnce(); });
 		step_btn_ = stepBtn;
 		runRow->addWidget(playBtn);
 		runRow->addWidget(stepBtn);
@@ -387,6 +392,7 @@ namespace paracfd::gui
 		// rebuilt through the SAME path as Apply, and a solid building is voxelized + injected as the flow
 		// obstacle. Re-runs on the STORED centerline — no reload. Spin boxes seed from BuildingParams.
 		QGroupBox* buildingGroup = new QGroupBox("Building (centerline → solid)");
+		building_group_ = buildingGroup;
 		QVBoxLayout* buildingCol = new QVBoxLayout(buildingGroup);
 		QFormLayout* buildingForm = new QFormLayout;
 		buildingForm->setLabelAlignment(Qt::AlignLeft);
@@ -472,14 +478,13 @@ namespace paracfd::gui
 		// Live wind-load readout: force coefficients integrated from the pressure field over the building
 		// surface (worker-side, ~every 30 steps). Dimensionless; updated on the repaint tick. Blank until a
 		// building exists. Monospaced so the columns line up.
-		load_readout_ = new QLabel("Wind loads: (build a building)");
+		load_readout_ = new QLabel("Aerodynamic pressure loads: (open a STEP wing)");
 		load_readout_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 		load_readout_->setWordWrap(true); // wrap instead of forcing the dock wider than the viewport
 		load_readout_->setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color:#1a4d7a;"); // dark blue: readable on the light dock
-		load_readout_->setToolTip("INSTANTANEOUS wind-load coefficients from the live pressure field (dimensionless): "
-			"Cd = drag (+x, along wind), Cl = lift/uplift (+z), Cs = side (+y); Cp = surface pressure-coefficient range. "
-			"On a turbulent (LES) flow these fluctuate every frame — press Start averaging for the converged values.");
-		buildingCol->addWidget(load_readout_);
+		load_readout_->setToolTip("Instantaneous aerodynamic pressure force from the paraglider solver. "
+			"Axes are drag +X, side +Y, and lift +Z. Coefficients are shown only when a reference area is supplied; "
+			"skin-friction force is not implemented yet.");
 
 		// --- Converged time-averaged loads --------------------------------------------------------------
 		// A single snapshot off an unsettled, turbulent flow is one random draw. Watch the flow spin up (the
@@ -521,6 +526,10 @@ namespace paracfd::gui
 			"RMS (fluctuation), peak (min…max, design-critical), the averaged Cp range, and a convergence-drift hint "
 			"(how far the running mean still moves — small ⇒ converged).");
 		buildingCol->addWidget(avg_readout_);
+		QGroupBox* aeroGroup = new QGroupBox("Paraglider aerodynamics");
+		QVBoxLayout* aeroCol = new QVBoxLayout(aeroGroup);
+		aeroCol->addWidget(load_readout_);
+		col->addWidget(aeroGroup);
 		col->addWidget(buildingGroup);
 
 		// --- Visualization group ---------------------------------------------------------------
@@ -898,8 +907,26 @@ namespace paracfd::gui
 	{
 		if (!model_mesh_.empty() && centerline_mesh_.empty())
 		{
-			statusBar()->showMessage("paraglider AMR/EB pressure topology is ready; the external-aero velocity timestep is not wired yet", 8000);
-			std::fprintf(stderr,"[paraglider] start refused: the legacy channel timestep is not a valid solver for zero-thickness fabric\n");
+			if (!paraglider_worker_)
+			{
+				statusBar()->showMessage("build the paraglider CFD grid before starting", 5000);
+				return;
+			}
+			if (sim_started_) return;
+			sim_started_ = true;
+			paraglider_worker_->setPlaying(true);
+			if (play_btn_)
+			{
+				play_btn_->setEnabled(true);
+				if (!play_btn_->isChecked()) play_btn_->setChecked(true);
+			}
+			if (step_btn_) step_btn_->setEnabled(true);
+			if (start_btn_)
+			{
+				start_btn_->setEnabled(false);
+				start_btn_->setText("Simulation running");
+			}
+			statusBar()->showMessage("paraglider GPU simulation started", 3000);
 			return;
 		}
 		if (sim_started_) return; // idempotent
@@ -1598,11 +1625,13 @@ namespace paracfd::gui
 
 	MainWindow::~MainWindow()
 	{
+		shutdownParagliderWorker();
 		shutdownWorker();
 	}
 
 	bool MainWindow::loadStepFile(const QString& path, bool noslip)
 	{
+		shutdownParagliderWorker();
 		(void)noslip; // legacy CLI compatibility; zero-thickness fabric has no solid-wall mode here
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
@@ -1617,6 +1646,9 @@ namespace paracfd::gui
 			statusBar()->showMessage(QString("STEP load failed: %1").arg(QString::fromStdString(err)), 6000);
 			return false;
 		}
+		// The paraglider core owns its own pooled AMR fields. Release the legacy channel
+		// core before allocating them so a model load does not retain two full GPU solvers.
+		teardownWorkerForReload();
 
 		const auto& lo = mesh.bbox_min;
 		const auto& hi = mesh.bbox_max;
@@ -1628,6 +1660,7 @@ namespace paracfd::gui
 			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 8000);
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
+		if (building_group_) building_group_->setVisible(false);
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
 		centerline_mesh_ = paracfd::core::TriMesh{}; // a plain STEP is the mesh obstacle, not a centerline
 		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the mesh on load)
@@ -1658,9 +1691,20 @@ namespace paracfd::gui
 		if (model_injected_) setModelAsObstacle(false);
 		if (viewer_) viewer_->clearVoxelOverlay();
 		model_injected_ = false;
-		// Never let the legacy channel worker appear to simulate this surface. Keep it held until
-		// the AMR external-aero velocity/advection path consumes the composite EB projection.
-		sim_started_=false;if(worker_)worker_->setStarted(false);if(play_btn_)play_btn_->setEnabled(false);if(step_btn_)step_btn_->setEnabled(false);if(start_btn_){start_btn_->setEnabled(false);start_btn_->setText("CFD timestep not yet wired");}
+		// Never let the legacy channel path appear to simulate this surface. The old core was
+		// released above; Start is enabled only after the external-aero topology is ready.
+		sim_started_ = false;
+		if (play_btn_)
+		{
+			play_btn_->setChecked(false);
+			play_btn_->setEnabled(false);
+		}
+		if (step_btn_) step_btn_->setEnabled(false);
+		if (start_btn_)
+		{
+			start_btn_->setEnabled(false);
+			start_btn_->setText("Building CFD grid...");
+		}
 		buildParagliderPreviewGrid();
 		updateGizmoUi(); // enable the placement gizmo for the freshly loaded model
 		return true;
@@ -1669,13 +1713,13 @@ namespace paracfd::gui
 	void MainWindow::buildParagliderPreviewGrid()
 	{
 		using namespace paracfd::core;if(model_mesh_.empty()||!viewer_)return;
-		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());TriangleBvh bvh(wing);ParagliderConfig cfg;const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);AmrHierarchy amr=AmrHierarchy::build_static(requested,wing,bvh,cfg.amr);
-		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0,pressure_static=0;EmbeddedBoundaryBuildOptions options;options.min_volume_fraction=cfg.amr.min_volume_fraction;options.complex_subdivisions=cfg.amr.complex_subdivisions;
+		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());TriangleBvh bvh(wing);ParagliderConfig cfg;if(u_spin_)cfg.freestream.speed=u_spin_->value();const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);std::unique_ptr<ExternalAeroCore> external_core;try{external_core=std::make_unique<ExternalAeroCore>(wing,bvh,cfg);}catch(const std::exception& e){statusBar()->showMessage(QString("paraglider CFD grid failed: %1").arg(e.what()),12000);std::fprintf(stderr,"[paraglider-preview] external core failed: %s\n",e.what());if(start_btn_){start_btn_->setEnabled(false);start_btn_->setText("CFD grid failed");}return;}const AmrHierarchy& amr=external_core->hierarchy();
+		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0,pressure_static=0;
 		for(const AmrLevel& level:amr.levels())for(int brick_id=0;brick_id<(int)level.bricks.size();++brick_id)
 		{
 			const BrickMetadata& brick=level.bricks[brick_id];if(!brick.active())continue;const float width=amr.brick_size()*brick.h;brick_boxes.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});
 		}
-		const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(amr,wing,bvh,options);
+		const AmrEmbeddedBoundaryAtlas& atlas=external_core->embedded_boundary();
 		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
 		{
 			const EmbeddedBoundary& eb=level_atlas.topology;const UniformEbGrid& grid=eb.grid;
@@ -1685,13 +1729,16 @@ namespace paracfd::gui
 			for(int cell:eb.irregular_cells)if(level_atlas.owned_cell[cell]){const auto q=grid.cell_coord(cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
 			for(const UnresolvedEbCell& problem:eb.unresolved)if(level_atlas.owned_cell[problem.parent_cell]){++unresolved;const auto q=grid.cell_coord(problem.parent_cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
 		}
-		bool pressure_ready=false;std::size_t pressure_dofs=0,pressure_edges=0;if(atlas.ready_for_flow())try{const CompositeAmrPressureSystem pressure=build_composite_amr_pressure_system(amr,atlas);pressure_ready=true;pressure_dofs=pressure.storage_size;pressure_edges=pressure.coarse_fine.size()+pressure.embedded.size();}catch(const std::exception& e){std::fprintf(stderr,"[paraglider-preview] composite pressure rejected topology: %s\n",e.what());}
+		const CompositeAmrPressureSystem& pressure=external_core->pressure_system();const bool pressure_ready=true;const std::size_t pressure_dofs=pressure.storage_size,pressure_edges=pressure.coarse_fine.size()+pressure.embedded.size();
 		viewer_->setShowSlice(false);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;const Vec3d padded_size=amr.domain().hi-amr.domain().lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8, static pockets %9; pressure topology %10").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved).arg(pressure_static).arg(pressure_ready?QString("ready (%1 DOFs/%2 edges)").arg(pressure_dofs).arg(pressure_edges):QString("not ready")),15000);
 		std::fprintf(stderr,"[paraglider-preview] face-only requested domain %.3f x %.3f x %.3f m; padded AMR %.3f x %.3f x %.3f m, %zu bricks; EB fragments=%zu apertures=%zu patches=%zu unresolved=%zu static=%zu pressure=%s (%zu DOFs, %zu special edges)\n",requested_size.x,requested_size.y,requested_size.z,padded_size.x,padded_size.y,padded_size.z,amr.active_brick_count(),fragments,apertures,patches,unresolved,pressure_static,pressure_ready?"ready":"not-ready",pressure_dofs,pressure_edges);
+		spawnParagliderWorker(std::move(external_core));if(start_btn_){start_btn_->setEnabled(true);start_btn_->setText("Start Simulation");}
 	}
 
 	bool MainWindow::loadCenterlineFile(const QString& path, bool noslip)
 	{
+		shutdownParagliderWorker();
+		if (building_group_) building_group_->setVisible(true);
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
 		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
@@ -1845,7 +1892,7 @@ namespace paracfd::gui
 	// until a building is present and its first loads have been integrated.
 	void MainWindow::updateWindLoadReadout()
 	{
-		if (!load_readout_) return;
+		if (!load_readout_ || paraglider_worker_) return;
 		paracfd::core::WindLoads L;
 		if (worker_ && worker_->latestLoads(L) && L.exposed_faces > 0)
 		{
@@ -1869,6 +1916,7 @@ namespace paracfd::gui
 	// the repaint tick alongside updateWindLoadReadout; cheap (atomics + one small struct copy).
 	void MainWindow::updateAvgReadout()
 	{
+		if (paraglider_worker_) return;
 		if (!avg_readout_ || !worker_) return;
 		using AvgPhase = SimWorker::AvgPhase;
 		const AvgPhase ph = worker_->avgPhase();
@@ -2114,14 +2162,105 @@ namespace paracfd::gui
 	void MainWindow::finalize()
 	{
 		if (recorder_) recorder_->finish(); // close the MP4 (idempotent) however the app exits
+		shutdownParagliderWorker();
 		shutdownWorker();
 	}
 
 	void MainWindow::closeEvent(QCloseEvent* e)
 	{
 		if (recorder_) recorder_->finish();
+		shutdownParagliderWorker();
 		shutdownWorker();
 		QMainWindow::closeEvent(e);
+	}
+
+	void MainWindow::spawnParagliderWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core)
+	{
+		shutdownParagliderWorker();
+		paraglider_snapshot_generation_ = 0;
+		paraglider_surface_generation_ = 0;
+		paraglider_worker_ = new ParagliderSimWorker(std::move(core));
+		paraglider_worker_->setPlaying(sim_started_ && play_btn_ && play_btn_->isChecked());
+		paraglider_thread_ = new QThread(this);
+		paraglider_worker_->moveToThread(paraglider_thread_);
+		connect(paraglider_thread_, &QThread::started,
+			paraglider_worker_, &ParagliderSimWorker::run);
+		connect(paraglider_worker_, &ParagliderSimWorker::finished,
+			paraglider_thread_, &QThread::quit);
+		paraglider_thread_->start();
+	}
+
+	void MainWindow::shutdownParagliderWorker()
+	{
+		if (paraglider_worker_) paraglider_worker_->stop();
+		if (paraglider_thread_)
+		{
+			paraglider_thread_->quit();
+			paraglider_thread_->wait();
+		}
+		delete paraglider_worker_;
+		paraglider_worker_ = nullptr;
+		delete paraglider_thread_;
+		paraglider_thread_ = nullptr;
+		paraglider_snapshot_generation_ = 0;
+		paraglider_surface_generation_ = 0;
+	}
+
+	void MainWindow::updateParagliderReadout()
+	{
+		if (!paraglider_worker_) return;
+		ParagliderDisplaySnapshot snapshot;
+		if (!paraglider_worker_->latestSnapshot(paraglider_snapshot_generation_,
+			paraglider_surface_generation_, snapshot)) return;
+		if (!snapshot.error.empty())
+		{
+			if (status_) status_->setText(QString("paraglider CFD stopped: %1")
+				.arg(QString::fromStdString(snapshot.error)));
+			statusBar()->showMessage(QString("paraglider CFD error: %1")
+				.arg(QString::fromStdString(snapshot.error)), 15000);
+			if (play_btn_ && play_btn_->isChecked()) play_btn_->setChecked(false);
+			return;
+		}
+		if (!snapshot.initialized)
+		{
+			if (status_) status_->setText("initializing paraglider pressure field on GPU...");
+			return;
+		}
+		if (!snapshot.delta_cp.empty() && viewer_)
+			viewer_->setTriangleDeltaCp(snapshot.delta_cp, snapshot.cp_min, snapshot.cp_max);
+		if (status_)
+		{
+			status_->setText(QString("step %1   t = %2 s   dt = %3 ms   GPU %4 ms   pressure %5 ms / %6 it / r=%7%8")
+				.arg(snapshot.steps).arg(snapshot.physical_time, 0, 'f', 3)
+				.arg(snapshot.dt * 1e3, 0, 'f', 2).arg(snapshot.step_ms, 0, 'f', 1)
+				.arg(snapshot.projection_ms, 0, 'f', 1).arg(snapshot.pressure_iterations)
+				.arg(snapshot.residual, 0, 'g', 3)
+				.arg(snapshot.converged ? "" : "  NOT CONVERGED"));
+		}
+		last_steps_ = snapshot.steps;
+		last_sim_time_ = snapshot.physical_time;
+		if (load_readout_)
+		{
+			QString text = QString(
+				"Paraglider pressure loads (instantaneous)\n"
+				"  drag  Fx (+x): %1 N\n"
+				"  side  Fy (+y): %2 N\n"
+				"  lift  Fz (+z): %3 N\n"
+				"  delta-Cp range: %4 ... %5")
+				.arg(snapshot.pressure_force.x, 0, 'f', 3)
+				.arg(snapshot.pressure_force.y, 0, 'f', 3)
+				.arg(snapshot.pressure_force.z, 0, 'f', 3)
+				.arg(snapshot.cp_min, 0, 'f', 3).arg(snapshot.cp_max, 0, 'f', 3);
+			if (snapshot.coefficients_valid)
+				text += QString("\n  Cd,p %1   Cs,p %2   Cl,p %3")
+					.arg(snapshot.cd_pressure, 0, 'f', 4)
+					.arg(snapshot.cs_pressure, 0, 'f', 4)
+					.arg(snapshot.cl_pressure, 0, 'f', 4);
+			else
+				text += "\n  coefficients withheld: reference area not set";
+			text += "\n  pressure-only: skin friction is not implemented";
+			load_readout_->setText(text);
+		}
 	}
 
 	void MainWindow::shutdownWorker()

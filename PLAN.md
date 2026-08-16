@@ -35,7 +35,7 @@ The cross-brick atlas and deterministic multi-fragment fallback are implemented.
 - CPU-double reference/PCG and CUDA `Real` operator/CG.
 - Manufactured independent-side pressure/load and projection tests.
 
-The composite CPU reference and persistent GPU projection now cover EB divergence, RHS, pressure, regular/special-flux correction, and post-projection divergence. Disconnected active fluid components receive deterministic gauges. Remaining: integrate the projection into the external-aero timestep.
+The composite CPU reference and persistent GPU projection now cover EB divergence, RHS, pressure, regular/special-flux correction, and post-projection divergence. Disconnected active fluid components receive deterministic gauges. `ExternalAeroCore` integrates this projection into a persistent GPU timestep.
 
 ## E. Static AMR — composite pressure foundation implemented
 
@@ -54,7 +54,7 @@ Pending:
 
 - aperture-aware cross-level EB topology when fabric reaches a 2:1 interface;
 - recursive multigrid/V-cycle acceleration beyond the present two-level preconditioner;
-- AMR-versus-uniform flow validation.
+- tighter AMR-versus-uniform force convergence beyond the current 15% inclined-plate difference.
 
 ## F. FP32 production — storage/operator foundation implemented
 
@@ -71,11 +71,11 @@ The first-order AMR advection/Smagorinsky/external-BC/composite-projection path 
 - CL/CD/CS only with explicit positive reference area.
 - Pressure drag is labelled pressure-only.
 
-Composite patches now retain global plus/minus pressure DOFs and publish triangle/whole-wing pressure-only loads. Pending: establish a converged validated paraglider flow and add automatic surface field transfer/rendering.
+Composite patches now retain global plus/minus pressure DOFs and publish triangle/whole-wing pressure-only loads. The GUI worker automatically transfers throttled per-triangle delta-Cp and pressure-force summaries. Pending: establish a converged validated paraglider flow and add selectable plus/minus surface rendering.
 
-## H. GUI migration — preview foundation implemented
+## H. GUI migration — live solver foundation implemented
 
-The STEP viewer and CUDA/OpenGL infrastructure remain useful. Particle/tracer fabric collision uses the triangle BVH. The viewer displays static AMR/owned-EB debug boxes and reports the composite pressure readiness/counts. It refuses to run the legacy timestep for a paraglider. Primary controls, scene schema, per-side surface colouring, and the aerodynamic dashboard still require migration.
+The STEP viewer and CUDA/OpenGL infrastructure remain useful. Particle/tracer fabric collision uses the triangle BVH. The viewer displays static AMR/owned-EB debug boxes and reports the composite pressure readiness/counts. Loading a STEP releases the legacy channel GPU core, builds `ExternalAeroCore`, and hands that exact topology to a dedicated simulation thread. Start/Play/Step now advance the GPU external-aero solver; the status bar reports pressure convergence/timing, the load panel labels pressure-only force, and the STEP mesh is colored by live delta-Cp. Primary paraglider controls, config/scene integration, velocity/pressure slices, plus/minus side selection, and full removal of building UI still require migration.
 
 ## I. Obsolete-code removal — intentionally pending
 

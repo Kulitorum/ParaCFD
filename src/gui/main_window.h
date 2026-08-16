@@ -1,8 +1,6 @@
-// main_window.h — G1 top-level window. Hosts the SliceViewer (all GL on this, the main
-// thread) and drives a SimWorker on a dedicated QThread (queued-connection hand-off,
-// cobod-slicer mainwindow.cpp:1691 pattern). Controls live in the left settings dock;
-// status bar: steps / sim-time / fps. Loading a STEP model auto-voxelizes it as the flow
-// obstacle (no separate toggle).
+// Main ParaCFD window. OpenGL remains on the main thread; numerical cores run on
+// dedicated QThreads. Ordinary STEP models use ExternalAeroCore's zero-thickness
+// fabric/AMR path. The legacy channel worker remains temporarily for reference cases.
 #pragma once
 
 #include "core/geometry/model_placement.h"
@@ -30,11 +28,12 @@ class QPushButton;
 class QThread;
 class QTimer;
 
-namespace paracfd::core { class ChannelFluidCore; }
+namespace paracfd::core { class ChannelFluidCore; class ExternalAeroCore; }
 
 namespace paracfd::gui
 {
 	class SliceViewer;
+	class ParagliderSimWorker;
 	class VideoRecorder;
 	class VideoSettingsDialog;
 
@@ -166,8 +165,11 @@ namespace paracfd::gui
 		// Refresh the Building-group live wind-load coefficient readout from the worker's latest WindLoads
 		// (Cd/Cl/Cs + Cp range). Called on the repaint tick; no-op until a building's loads are published.
 		void updateWindLoadReadout();
+		void updateParagliderReadout();
 
 		void shutdownWorker();
+		void shutdownParagliderWorker();
+		void spawnParagliderWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core);
 		// `steps0`/`t0` prime the worker's counters (a scene restore resumes from the saved step).
 		void spawnWorker(std::unique_ptr<paracfd::core::ChannelFluidCore> core,
 			long long steps0 = 0, double t0 = 0.0);
@@ -307,6 +309,10 @@ namespace paracfd::gui
 		SliceViewer* viewer_ = nullptr;
 		SimWorker* worker_ = nullptr;
 		QThread* worker_thread_ = nullptr;
+		ParagliderSimWorker* paraglider_worker_ = nullptr;
+		QThread* paraglider_thread_ = nullptr;
+		std::uint64_t paraglider_snapshot_generation_ = 0;
+		std::uint64_t paraglider_surface_generation_ = 0;
 		QLabel* status_ = nullptr;
 		QLabel* fps_label_ = nullptr;
 		SimRecipe recipe_;
@@ -331,7 +337,8 @@ namespace paracfd::gui
 		QCheckBox* roof_chk_ = nullptr; // cap the walls with a roof slab (default on); off => wall/surface band only (wing profile)
 		QPushButton* build_btn_ = nullptr;
 		QCheckBox* fill_interior_chk_ = nullptr; // solidify the building's sealed interior on Build/Apply (default on)
-		QLabel* load_readout_ = nullptr; // live INSTANTANEOUS wind-load coefficient readout (Cd/Cl/Cs + Cp range)
+		QLabel* load_readout_ = nullptr; // live aerodynamic pressure-force/coefficient readout
+		QGroupBox* building_group_ = nullptr; // legacy reference UI; hidden while a paraglider is active
 
 		// --- Converged, time-averaged loads (the trustworthy statistics) -------------------------
 		// Instantaneous loads read off a turbulent, unsettled flow are one random sample. The user watches

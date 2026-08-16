@@ -257,6 +257,7 @@ if(PARACFD_ENABLE_QT)
 		src/gui/main_window.cpp
 		src/gui/slice_viewer.cpp
 		src/gui/sim_worker.cpp
+		src/gui/paraglider_sim_worker.cpp
 		src/gui/sim_setup.cpp
 		src/gui/scene_io.cpp
 		src/gui/flow_particles.cpp
