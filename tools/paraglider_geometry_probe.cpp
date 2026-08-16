@@ -147,6 +147,11 @@ int main()
 	AmrHostFields cross_brick_advect_host(uh);auto& cross_advect_level=cross_brick_advect_host.levels()[0];
 	for(int brick=0;brick<2;++brick){const double ox=uh.levels()[0].bricks[brick].origin.x;for(int k=0;k<4;++k)for(int j=0;j<4;++j){for(int i=0;i<=4;++i)cross_advect_level.u[cross_advect_level.layout.u_index(brick,i,j,k)]=Real(1);for(int i=0;i<4;++i)cross_advect_level.v[cross_advect_level.layout.v_index(brick,i,j,k)]=Real(ox+i+0.5);}}
 	DeviceAmrFields cross_brick_advect_fields(uh);cross_brick_advect_fields.upload(cross_brick_advect_host);DeviceAmrAdvection cross_brick_advection(uh,no_fabric_bvh);cross_brick_advection.advect(cross_brick_advect_fields,Real(0.25));cross_brick_advect_fields.download(cross_brick_advect_host);const double cross_advected_v=cross_advect_level.v[cross_advect_level.layout.v_index(1,0,1,1)];check(near(cross_advected_v,4.25,sizeof(Real)==4?2e-6:1e-12),"AMR backtrace interpolates across a same-level brick boundary");
+	// A quadratic profile distinguishes bounded MacCormack from the diffusive first-order
+	// sweep: at x=4.5 after a 0.25 m translation, its exact value is 4.25^2.
+	AmrHostFields maccormack_host(uh);auto& maccormack_level=maccormack_host.levels()[0];
+	for(int brick=0;brick<2;++brick){const double ox=uh.levels()[0].bricks[brick].origin.x;for(int k=0;k<4;++k)for(int j=0;j<=4;++j){for(int i=0;i<=4&&j<4;++i)maccormack_level.u[maccormack_level.layout.u_index(brick,i,j,k)]=Real(1);for(int i=0;i<4;++i){const double x=ox+i+0.5;maccormack_level.v[maccormack_level.layout.v_index(brick,i,j,k)]=Real(x*x);}}}
+	DeviceAmrFields maccormack_fields(uh);maccormack_fields.upload(maccormack_host);DeviceAmrAdvection maccormack_advection(uh,no_fabric_bvh);maccormack_advection.advect(maccormack_fields,Real(0.25));maccormack_fields.download(maccormack_host);const double maccormack_v=maccormack_level.v[maccormack_level.layout.v_index(1,0,1,1)],quadratic_exact=4.25*4.25;check(std::abs(maccormack_v-quadratic_exact)<0.08,"bounded MacCormack improves a nonlinear profile across a brick boundary");
 	// The Laplacian of u=x is exactly zero at the same interface. Brick-local
 	// clamping used to create equal and opposite artificial diffusion there.
 	AmrHostFields cross_brick_diffuse_host(uh);auto& cross_diffuse_level=cross_brick_diffuse_host.levels()[0];

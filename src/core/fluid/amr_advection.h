@@ -8,13 +8,14 @@
 
 namespace paracfd::core
 {
-	// First production AMR advection layer. Backtraces locate the finest active brick
+	// Production AMR advection layer. Backtraces locate the finest active brick
 	// through the integer-coordinate GPU hash. A static protection mask covers every
-	// face centre within `protection_cells * h` of fabric; those values use a local
-	// first-order fallback, so no sample can jump to the opposite side of a sheet.
+	// face centre within `protection_cells * h` of fabric; those values retain their
+	// local state, so no sample can jump to the opposite side of a sheet. Away from
+	// that band, bounded MacCormack advection uses RK2 characteristics.
 	// Trilinear and diffusion stencils resolve same-level brick crossings through the
 	// GPU coordinate hash. Coarse/fine samples are interpolated but are not yet the
-	// final conservative face reconstruction. This remains first-order, not MacCormack.
+	// final conservative face reconstruction.
 	class DeviceAmrAdvection
 	{
 	public:
@@ -36,10 +37,11 @@ namespace paracfd::core
 			BrickFieldLayout layout;
 			int brick_count = 0;
 			Real *u = nullptr, *v = nullptr, *w = nullptr;
+			Real *forward_u = nullptr, *forward_v = nullptr, *forward_w = nullptr;
 			unsigned char *protect_u = nullptr, *protect_v = nullptr, *protect_w = nullptr;
 		};
 		DeviceAmrLocator locator_;
-		DeviceAmrFieldLevelView* device_views_ = nullptr;
+		DeviceAmrFieldLevelView *device_views_ = nullptr, *device_forward_views_ = nullptr;
 		std::vector<Level> levels_;
 		std::size_t protected_faces_ = 0, active_faces_ = 0, bytes_ = 0;
 	};
