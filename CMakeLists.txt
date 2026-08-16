@@ -188,6 +188,12 @@ add_executable(paraglider_probe tools/paraglider_probe.cpp)
 target_link_libraries(paraglider_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(paraglider_probe)
 
+# Full imported-wing convergence/performance diagnostic. This is intentionally not a
+# CTest because realistic STEP preprocessing and multi-step GPU runs are comparatively slow.
+add_executable(paraglider_case_probe tools/paraglider_case_probe.cpp)
+target_link_libraries(paraglider_case_probe PRIVATE libparacfd paracfd_geometry)
+paracfd_deploy_occ_dlls(paraglider_case_probe)
+
 # --- parity_probe (Phase-0 migration oracle for the graded-structured-grid change) ---
 # Restores the CLAUDE.md "1e-5 GPU-vs-CPU parity per kernel" invariant (no test target had
 # existed — the CPU twins were defined but never run) AND adds the behaviour-preservation

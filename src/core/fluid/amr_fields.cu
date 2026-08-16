@@ -53,6 +53,15 @@ namespace paracfd::core
 		void check(cudaError_t e,const char* what){if(e!=cudaSuccess) throw std::runtime_error(std::string(what)+": "+cudaGetErrorString(e));}
 		template<class T> T* alloc(std::size_t n){T* p=nullptr;check(cudaMalloc(&p,n*sizeof(T)),"cudaMalloc AMR pool");check(cudaMemset(p,0,n*sizeof(T)),"cudaMemset AMR pool");return p;}
 		__global__ void fill_kernel(Real* p,std::size_t n,Real v){std::size_t i=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;if(i<n)p[i]=v;}
+		__device__ void atomic_max_positive(Real* destination,Real value)
+		{
+			if constexpr(sizeof(Real)==sizeof(float))atomicMax(reinterpret_cast<unsigned int*>(destination),__float_as_uint(static_cast<float>(value)));
+			else atomicMax(reinterpret_cast<unsigned long long*>(destination),static_cast<unsigned long long>(__double_as_longlong(static_cast<double>(value))));
+		}
+		__global__ void max_abs_kernel(const Real* values,std::size_t count,Real* maximum)
+		{
+			const std::size_t q=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;if(q<count)atomic_max_positive(maximum,abs(values[q]));
+		}
 		__global__ void initialize_velocity_kernel(Real* u,Real* v,Real* w,BrickFieldLayout layout,int bricks,Real speed)
 		{
 			std::size_t q=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -165,8 +174,9 @@ namespace paracfd::core
 			std::vector<int> nb(static_cast<std::size_t>(d.brick_count)*6,-1); for(int b=0;b<d.brick_count;++b)for(int f=0;f<6;++f){int n=h.levels()[l].bricks[b].same_level_neighbor[f];if(n>=0&&h.levels()[l].bricks[n].active())nb[b*6+f]=n;}
 			d.neighbors=alloc<int>(nb.size());check(cudaMemcpy(d.neighbors,nb.data(),nb.size()*sizeof(int),cudaMemcpyHostToDevice),"upload AMR neighbors");std::vector<std::uint32_t> flags(d.brick_count);for(int b=0;b<d.brick_count;++b)flags[b]=h.levels()[l].bricks[b].flags;d.flags=alloc<std::uint32_t>(flags.size());check(cudaMemcpy(d.flags,flags.data(),flags.size()*sizeof(std::uint32_t),cudaMemcpyHostToDevice),"upload AMR brick flags"); bytes_+=(d.brick_count*(d.layout.u_stride+d.layout.v_stride+d.layout.w_stride+3*d.layout.cell_stride))*sizeof(Real)+nb.size()*sizeof(int)+flags.size()*sizeof(std::uint32_t);
 		}
+		max_abs_scratch_=alloc<Real>(1);bytes_+=sizeof(Real);
 	}
-	DeviceAmrFields::~DeviceAmrFields(){for(auto& d:levels_)for(void* p:{(void*)d.u,(void*)d.v,(void*)d.w,(void*)d.p,(void*)d.nut,(void*)d.temp,(void*)d.neighbors,(void*)d.flags})if(p)cudaFree(p);}
+	DeviceAmrFields::~DeviceAmrFields(){for(auto& d:levels_)for(void* p:{(void*)d.u,(void*)d.v,(void*)d.w,(void*)d.p,(void*)d.nut,(void*)d.temp,(void*)d.neighbors,(void*)d.flags})if(p)cudaFree(p);if(max_abs_scratch_)cudaFree(max_abs_scratch_);}
 	void DeviceAmrFields::upload(const AmrHostFields& h){for(std::size_t l=0;l<levels_.size();++l){auto& d=levels_[l];if(!d.brick_count)continue;const auto& s=h.levels()[l];check(cudaMemcpy(d.u,s.u.data(),s.u.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload u");check(cudaMemcpy(d.v,s.v.data(),s.v.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload v");check(cudaMemcpy(d.w,s.w.data(),s.w.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload w");check(cudaMemcpy(d.p,s.p.data(),s.p.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload p");check(cudaMemcpy(d.nut,s.nut.data(),s.nut.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload nut");check(cudaMemcpy(d.temp,s.temp.data(),s.temp.size()*sizeof(Real),cudaMemcpyHostToDevice),"upload temp");}}
 	void DeviceAmrFields::download(AmrHostFields& h)const{for(std::size_t l=0;l<levels_.size();++l){const auto& d=levels_[l];if(!d.brick_count)continue;auto& s=h.levels()[l];check(cudaMemcpy(s.u.data(),d.u,s.u.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download u");check(cudaMemcpy(s.v.data(),d.v,s.v.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download v");check(cudaMemcpy(s.w.data(),d.w,s.w.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download w");check(cudaMemcpy(s.p.data(),d.p,s.p.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download p");check(cudaMemcpy(s.nut.data(),d.nut,s.nut.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download nut");check(cudaMemcpy(s.temp.data(),d.temp,s.temp.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download temp");}}
 	void DeviceAmrFields::download_pressure(AmrHostFields& h)const{for(std::size_t l=0;l<levels_.size();++l){const auto& d=levels_[l];if(d.brick_count)check(cudaMemcpy(h.levels()[l].p.data(),d.p,h.levels()[l].p.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download p");}}
@@ -174,6 +184,14 @@ namespace paracfd::core
 	void DeviceAmrFields::initialize_freestream(Real speed){for(auto& d:levels_)if(d.brick_count){const std::size_t n=static_cast<std::size_t>(d.brick_count)*(d.layout.u_stride+d.layout.v_stride+d.layout.w_stride);initialize_velocity_kernel<<<static_cast<unsigned>((n+255)/256),256>>>(d.u,d.v,d.w,d.layout,d.brick_count,speed);fill_kernel<<<static_cast<unsigned>((static_cast<std::size_t>(d.brick_count)*d.layout.cell_stride+255)/256),256>>>(d.p,static_cast<std::size_t>(d.brick_count)*d.layout.cell_stride,Real(0));}check(cudaDeviceSynchronize(),"initialize AMR freestream");}
 	void DeviceAmrFields::apply_external_aero_boundaries(Real speed){for(auto& d:levels_)if(d.brick_count){const int n=d.brick_count*6*(d.layout.brick_size+1)*(d.layout.brick_size+1);external_boundary_kernel<<<(n+255)/256,256>>>(d.u,d.v,d.w,d.p,d.layout,d.flags,d.brick_count,speed);}check(cudaDeviceSynchronize(),"external aerodynamic boundaries");}
 	void DeviceAmrFields::exchange_same_level_pressure_halos(){for(auto& d:levels_)if(d.brick_count){int n=d.brick_count*6*d.layout.brick_size*d.layout.brick_size;halo_kernel<<<(n+255)/256,256>>>(d.p,d.layout,d.neighbors,d.brick_count);}check(cudaDeviceSynchronize(),"AMR halo exchange");}
+	double max_abs_device_values(const Real* values,std::size_t count,Real* scratch)
+	{
+		if(!scratch)throw std::invalid_argument("max-absolute reduction has no scratch scalar");check(cudaMemset(scratch,0,sizeof(Real)),"clear max-absolute scalar");if(values&&count)max_abs_kernel<<<static_cast<unsigned>((count+255)/256),256>>>(values,count,scratch);Real host=0;check(cudaMemcpy(&host,scratch,sizeof(Real),cudaMemcpyDeviceToHost),"download max-absolute scalar");return static_cast<double>(host);
+	}
+	double DeviceAmrFields::max_abs_velocity() const
+	{
+		check(cudaMemset(max_abs_scratch_,0,sizeof(Real)),"clear pooled velocity maximum");for(const auto& d:levels_)if(d.brick_count){const std::size_t un=static_cast<std::size_t>(d.brick_count)*d.layout.u_stride,vn=static_cast<std::size_t>(d.brick_count)*d.layout.v_stride,wn=static_cast<std::size_t>(d.brick_count)*d.layout.w_stride;max_abs_kernel<<<static_cast<unsigned>((un+255)/256),256>>>(d.u,un,max_abs_scratch_);max_abs_kernel<<<static_cast<unsigned>((vn+255)/256),256>>>(d.v,vn,max_abs_scratch_);max_abs_kernel<<<static_cast<unsigned>((wn+255)/256),256>>>(d.w,wn,max_abs_scratch_);}Real host=0;check(cudaMemcpy(&host,max_abs_scratch_,sizeof(Real),cudaMemcpyDeviceToHost),"download pooled velocity maximum");return static_cast<double>(host);
+	}
 
 	DeviceAmrLocator::DeviceAmrLocator(const AmrHierarchy& hierarchy)
 	{

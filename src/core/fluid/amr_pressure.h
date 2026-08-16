@@ -162,6 +162,7 @@ namespace paracfd::core
 		void transport_embedded_apertures(Real dt, Real molecular_nu);
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
+		double max_abs_special_velocity() const;
 		void compute_divergence();
 		void build_projection_rhs(Real rho, Real dt);
 		void correct_fluxes(Real rho, Real dt);
@@ -182,7 +183,7 @@ namespace paracfd::core
 		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr, *pressure_ = nullptr;
 		int *first_dof_ = nullptr, *second_dof_ = nullptr;
 		std::int8_t *direction_ = nullptr, *axis_ = nullptr;
-		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *special_velocity_ = nullptr;
+		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *special_velocity_ = nullptr, *max_abs_scratch_ = nullptr;
 		int *cf_fine_level_ = nullptr, *cf_group_ = nullptr, *cf_group_level_ = nullptr;
 		std::uint64_t *cf_fine_index_ = nullptr, *cf_group_index_ = nullptr;
 		std::int8_t* cf_group_axis_ = nullptr;

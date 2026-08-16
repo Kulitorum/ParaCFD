@@ -20,10 +20,24 @@ namespace paracfd::core
 		double embedded_transport_ms = 0.0;
 		double projection_ms = 0.0;
 		double gpu_step_ms = 0.0;
+		double max_abs_velocity = 0.0;
+		double max_abs_regular_velocity = 0.0;
+		double max_abs_special_velocity = 0.0;
+		double cfl_velocity = 0.0;
+		double effective_cfl = 0.0;
 		AmrGpuSolveResult pressure;
 		bool first_order_fabric_protection = true;
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
+	};
+	struct ExternalAeroConservationStats
+	{
+		double max_abs_divergence = 0.0;            // 1/s
+		double volume_weighted_rms_divergence = 0.0; // 1/s
+		double worst_control_volume = 0.0;          // m^3 at max_abs_divergence
+		double max_integrated_flux_error = 0.0;     // m^3/s for one control volume
+		double absolute_integrated_flux_error = 0.0; // sum |divergence * volume|, m^3/s
+		double net_integrated_flux_error = 0.0;     // sum divergence * volume, m^3/s
 	};
 
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
@@ -43,6 +57,7 @@ namespace paracfd::core
 		AerodynamicLoads pressure_loads(double pressure_reference = 0.0) const;
 		void download_fields(AmrHostFields& host) const;
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
+		ExternalAeroConservationStats conservation_stats() const; // throttled validation/statistics download
 		double max_abs_divergence() const; // throttled validation/statistics download
 
 		const AmrHierarchy& hierarchy() const { return hierarchy_; }
@@ -55,7 +70,7 @@ namespace paracfd::core
 		std::size_t active_face_count() const;
 
 	private:
-		ExternalAeroStepStats project(bool warm_start);
+		ExternalAeroStepStats project(bool warm_start, double dt);
 
 		ParagliderConfig config_;
 		std::size_t source_triangle_count_ = 0;

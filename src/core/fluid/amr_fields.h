@@ -79,6 +79,7 @@ namespace paracfd::core
 		// There is deliberately no ground-plane branch.
 		void apply_external_aero_boundaries(Real freestream_speed);
 		void exchange_same_level_pressure_halos();
+		double max_abs_velocity() const; // one scalar D2H reduction, used for the global CFL step
 		std::size_t bytes() const { return bytes_; }
 		Real* pressure(int level) { return levels_[level].p; }
 		const Real* pressure(int level) const { return levels_[level].p; }
@@ -98,8 +99,13 @@ namespace paracfd::core
 			std::uint32_t* flags = nullptr; // [brick]
 		};
 		std::vector<Level> levels_;
+		Real* max_abs_scratch_ = nullptr;
 		std::size_t bytes_ = 0;
 	};
+
+	// Shared positive max-absolute reduction for persistent Real device arrays. `scratch`
+	// is one persistent device Real owned by the caller; only the scalar result is copied.
+	double max_abs_device_values(const Real* values, std::size_t count, Real* scratch);
 
 	// Compact device-side finest-brick locator. Each AMR level owns an open-addressed
 	// integer-coordinate table; a point probes levels finest-to-coarsest. Normal sampling

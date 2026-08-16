@@ -40,7 +40,7 @@ namespace paracfd::core
 	{
 		double cfl = 0.7;
 		double smagorinsky_cs = 0.10;
-		double projection_tolerance = 1e-4;
+		double projection_tolerance = 1e-5;
 		int projection_max_iterations = 300;
 	};
 

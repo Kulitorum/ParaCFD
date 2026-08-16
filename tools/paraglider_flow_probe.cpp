@@ -35,11 +35,11 @@ namespace
 	{
 		TriangleBvh bvh(mesh);const ParagliderConfig config=flow_config();const AmrHierarchy hierarchy=AmrHierarchy::build_static(automatic_flow_domain(mesh,config.domain),mesh,bvh,config.amr);EmbeddedBoundaryBuildOptions options;options.complex_subdivisions=config.amr.complex_subdivisions;options.min_volume_fraction=config.amr.min_volume_fraction;const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(hierarchy,mesh,bvh,options);if(!atlas.ready_for_flow())return static_cast<std::size_t>(-1);return build_composite_amr_pressure_system(hierarchy,atlas,true).gauges.size();
 	}
-	struct CaseResult{bool converged=false;AerodynamicLoads loads;double max_divergence=0,last_step_ms=0;int iterations=0;};
+	struct CaseResult{bool converged=false;AerodynamicLoads loads;double max_divergence=0,last_step_ms=0,effective_cfl=0;int iterations=0;};
 	struct OpeningFluxResult{bool converged=false;double positive_flux=0,absolute_flux=0;};
 	CaseResult run_case(const char* name,const TriMesh& mesh,int steps=8,ParagliderConfig config=flow_config())
 	{
-		TriangleBvh bvh(mesh);ExternalAeroCore core(mesh,bvh,config);ExternalAeroStepStats stats=core.initialize();bool converged=stats.pressure.converged;for(int step=0;step<steps&&converged;++step){stats=core.step();converged=stats.pressure.converged;}CaseResult result{converged,core.pressure_loads(),core.max_abs_divergence(),stats.gpu_step_ms,stats.pressure.iterations};std::printf("[paraglider-flow] %s: converged=%d F=[%.6g %.6g %.6g] Cd_p=%.6g Cl_p=%.6g maxDiv=%.3e step=%.3f ms it=%d\n",name,converged?1:0,result.loads.pressure_force.x,result.loads.pressure_force.y,result.loads.pressure_force.z,result.loads.cd_pressure,result.loads.cl_pressure,result.max_divergence,result.last_step_ms,result.iterations);return result;
+		TriangleBvh bvh(mesh);ExternalAeroCore core(mesh,bvh,config);ExternalAeroStepStats stats=core.initialize();bool converged=stats.pressure.converged;for(int step=0;step<steps&&converged;++step){stats=core.step();converged=stats.pressure.converged;}CaseResult result{converged,core.pressure_loads(),core.max_abs_divergence(),stats.gpu_step_ms,stats.effective_cfl,stats.pressure.iterations};std::printf("[paraglider-flow] %s: converged=%d F=[%.6g %.6g %.6g] Cd_p=%.6g Cl_p=%.6g maxDiv=%.3e CFL=%.3f step=%.3f ms it=%d\n",name,converged?1:0,result.loads.pressure_force.x,result.loads.pressure_force.y,result.loads.pressure_force.z,result.loads.cd_pressure,result.loads.cl_pressure,result.max_divergence,result.effective_cfl,result.last_step_ms,result.iterations);return result;
 	}
 	OpeningFluxResult run_opening_flux_case(bool upstream_open,int steps=12)
 	{
@@ -60,6 +60,7 @@ int main()
 	const CaseResult normal_result=run_case("normal plate",normal,16),parallel_result=run_case("parallel plate",parallel),inclined_result=run_case("inclined plate",inclined);
 	ParagliderConfig uniform_fine=flow_config();uniform_fine.domain={3,4,3,3};uniform_fine.amr.base_cell_size=0.125;ParagliderConfig refined=uniform_fine;refined.amr.base_cell_size=0.25;refined.amr.max_levels=2;refined.amr.wing_refinement_distance=0.1;refined.amr.surface_refinement_distance=0.1;refined.amr.wake_length=0;refined.amr.wake_radius=0;const CaseResult uniform_fine_result=run_case("uniform-fine inclined plate",inclined,8,uniform_fine),refined_result=run_case("2:1 AMR inclined plate",inclined,8,refined);
 	check(normal_result.converged&&parallel_result.converged&&inclined_result.converged,"all manufactured plate timesteps converge");
+	check(normal_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9)&&parallel_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9)&&inclined_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9),"global timestep obeys configured CFL using current regular velocity");
 	check(std::isfinite(normal_result.loads.pressure_force.x)&&std::isfinite(parallel_result.loads.pressure_force.x)&&std::isfinite(inclined_result.loads.pressure_force.z),"plate pressure loads are finite");
 	check(normal_result.loads.pressure_force.x>0&&normal_result.max_divergence<2e-4,"normal plate has downstream pressure force and projected flow");
 	check(std::abs(parallel_result.loads.pressure_force.x)<0.05*normal_result.loads.pressure_force.x,"parallel plate avoids large stair-step pressure drag");

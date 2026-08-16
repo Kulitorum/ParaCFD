@@ -19,6 +19,7 @@ Implemented:
 - bounded MacCormack/RK2 finest-brick GPU advection, a static no-cross-fabric protection band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
 - compact same-side EB aperture transport using structured carrier states, first-order upwinding, and molecular diffusion without a full-domain sparse velocity graph;
+- adaptive one-global-step CFL control from a persistent GPU maximum reduction over regular AMR velocity fields; compact EB states retain their own bounded local update;
 - `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> compact EB transport -> coarse/fine synchronization -> composite projection without bulk per-step transfers;
 - composite surface-patch mappings to global p+/p- pressure states and pressure-only triangle/whole-wing load publication;
 - deterministic dynamic normal/parallel/inclined plate gates, developed opened/closed cavity flux validation, and an equal-finest AMR-versus-uniform inclined-plate comparison;
@@ -40,15 +41,17 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - zero unresolved cells and 294 pressure-static isolated pockets;
 - 4,484,367 composite pressure slots with 81,920 coarse/fine and 112,563 EB connections;
 - 124.14 MiB pooled FP32 field estimate;
-- an initial +X freestream projection converging in 168 PCG iterations to a 9.37e-5 global relative residual in about 138 ms on the RTX 4090;
+- an initial +X freestream projection converging in about 189 PCG iterations to the tightened 1e-5 global relative residual in roughly 130-170 ms on the RTX 4090;
 - 348.68 MiB estimated persistent GPU storage for fields, projection, and conservative 2:1 velocity synchronization (CUDA context/driver allocations excluded).
 - 135,577 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
-- about 27.1 ms bounded MacCormack advection, 8.5 ms LES/diffusion, 0.6 ms compact EB transport, and 141 ms projection (169 iterations) for a measured first post-initialization step (individual timings vary);
+- about 25-30 ms bounded MacCormack advection, 8-10 ms LES/diffusion, 0.1-0.6 ms compact EB transport, and typically 40-140 ms projection as the warm solve evolves (individual timings vary);
 - 494.39 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
+
+`paraglider_case_probe` now records long imported-wing histories. With regular-flow adaptive CFL and a 1e-5 projection tolerance, a 500-step PlanB run reached 0.902 s: regular max velocity remained about 29 m/s, pressure-only force had decayed to approximately `[30.7, -0.02, -5.0]` N, and max/RMS-volume divergence were about `7.3e-4 / 4.0e-6 s^-1`. This is not a converged aerodynamic result. A compact micro-aperture state reached about 231 m/s while its surrounding regular field remained bounded; resolving that EB transport defect is the current trustworthiness blocker.
 
 ## Next engineering work
 
-1. Replace the static fabric protection and first-order compact-aperture fallbacks with higher-order same-side reconstruction, including Smagorinsky treatment on the EB graph.
+1. Stabilize/reconstruct compact micro-aperture velocities without closing real openings or globally throttling on negligible slivers; then replace the first-order graph update with higher-order same-side transport and Smagorinsky treatment.
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and tighten force/conservation convergence gates.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
