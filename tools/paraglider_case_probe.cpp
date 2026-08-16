@@ -45,7 +45,8 @@ int main(int argc,char** argv)
 	try
 	{
 		const auto build_begin=std::chrono::steady_clock::now();ExternalAeroCore core(wing,bvh,config);const auto build_end=std::chrono::steady_clock::now();ExternalAeroStepStats stats=core.initialize();
-		std::printf("[paraglider-case] triangles=%zu bricks=%zu DOFs=%d EB-edges=%zu patches=%zu load=%.2f ms preprocess=%.2f ms GPU=%.2f MiB tolerance=%.3e\n",wing.triangle_count(),core.hierarchy().active_brick_count(),core.pressure_system().storage_size,core.pressure_system().embedded.size(),core.pressure_system().surface_patches.size(),elapsed_ms(load_begin,load_end),elapsed_ms(build_begin,build_end),core.gpu_bytes()/(1024.0*1024.0),config.solver.projection_tolerance);
+		std::size_t discarded_apertures=0;double discarded_area=0;for(const AmrEbLevelAtlas& level:core.embedded_boundary().levels){discarded_apertures+=level.topology.discarded_subgrid_apertures;discarded_area+=level.topology.discarded_subgrid_aperture_area;}
+		std::printf("[paraglider-case] triangles=%zu bricks=%zu DOFs=%d EB-edges=%zu patches=%zu discarded-apertures=%zu/%.6g-m2 load=%.2f ms preprocess=%.2f ms GPU=%.2f MiB tolerance=%.3e\n",wing.triangle_count(),core.hierarchy().active_brick_count(),core.pressure_system().storage_size,core.pressure_system().embedded.size(),core.pressure_system().surface_patches.size(),discarded_apertures,discarded_area,elapsed_ms(load_begin,load_end),elapsed_ms(build_begin,build_end),core.gpu_bytes()/(1024.0*1024.0),config.solver.projection_tolerance);
 		if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] initialization did not converge: iterations=%d residual=%.3e\n",stats.pressure.iterations,stats.pressure.relative_residual);return 3;}report(0,core,stats,config.freestream.rho);
 		for(int step=1;step<=steps;++step)
 		{

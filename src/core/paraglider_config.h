@@ -33,7 +33,8 @@ namespace paracfd::core
 		double wake_length = 8.0;                 // m, +X from wing bbox
 		double wake_radius = 2.0;                 // m around wing bbox y/z centre
 		int complex_subdivisions = 4;             // finest-cell N^3 fluid-connectivity fallback
-		double min_volume_fraction = 0.05;
+		double min_volume_fraction = 0.25;         // conservative same-side merge threshold
+		double min_aperture_area_fraction = 1e-4; // discard/report numerical face slivers below this h^2 fraction
 	};
 
 	struct ExternalSolverConfig

@@ -33,7 +33,7 @@ namespace
 	}
 	std::size_t pressure_gauges(const TriMesh& mesh)
 	{
-		TriangleBvh bvh(mesh);const ParagliderConfig config=flow_config();const AmrHierarchy hierarchy=AmrHierarchy::build_static(automatic_flow_domain(mesh,config.domain),mesh,bvh,config.amr);EmbeddedBoundaryBuildOptions options;options.complex_subdivisions=config.amr.complex_subdivisions;options.min_volume_fraction=config.amr.min_volume_fraction;const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(hierarchy,mesh,bvh,options);if(!atlas.ready_for_flow())return static_cast<std::size_t>(-1);return build_composite_amr_pressure_system(hierarchy,atlas,true).gauges.size();
+		TriangleBvh bvh(mesh);const ParagliderConfig config=flow_config();const AmrHierarchy hierarchy=AmrHierarchy::build_static(automatic_flow_domain(mesh,config.domain),mesh,bvh,config.amr);EmbeddedBoundaryBuildOptions options;options.complex_subdivisions=config.amr.complex_subdivisions;options.min_volume_fraction=config.amr.min_volume_fraction;options.min_aperture_area_fraction=config.amr.min_aperture_area_fraction;const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(hierarchy,mesh,bvh,options);if(!atlas.ready_for_flow())return static_cast<std::size_t>(-1);return build_composite_amr_pressure_system(hierarchy,atlas,true).gauges.size();
 	}
 	struct CaseResult{bool converged=false;AerodynamicLoads loads;double max_divergence=0,last_step_ms=0,effective_cfl=0;int iterations=0;};
 	struct OpeningFluxResult{bool converged=false;double positive_flux=0,absolute_flux=0;};

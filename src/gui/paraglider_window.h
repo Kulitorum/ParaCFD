@@ -76,7 +76,8 @@ namespace paracfd::gui
 		QPushButton *build_button_=nullptr,*start_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
 		QDoubleSpinBox *speed_=nullptr,*rho_=nullptr,*nu_=nullptr,*upstream_=nullptr,*downstream_=nullptr,
 			*lateral_=nullptr,*vertical_=nullptr,*base_h_=nullptr,*wing_refine_=nullptr,*surface_refine_=nullptr,
-			*wake_length_=nullptr,*wake_radius_=nullptr,*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
+			*wake_length_=nullptr,*wake_radius_=nullptr,*min_volume_fraction_=nullptr,*min_aperture_area_fraction_=nullptr,
+			*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
 			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr;

@@ -5,6 +5,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <stdexcept>
 
 namespace paracfd::core
 {
@@ -107,7 +108,9 @@ namespace paracfd::core
 
 	EmbeddedBoundary build_embedded_boundary(const TriMesh& mesh,const TriangleBvh& bvh,const UniformEbGrid& grid,const EmbeddedBoundaryBuildOptions& opt)
 	{
-		EmbeddedBoundary eb;eb.grid=grid;eb.min_volume_fraction=opt.min_volume_fraction;eb.cells.resize(grid.cell_count());eb.cut_face_mask.assign(grid.cell_count(),0);const double cell_volume=grid.h*grid.h*grid.h;
+		if(!(grid.h>0)||grid.nx<=0||grid.ny<=0||grid.nz<=0||!(opt.min_volume_fraction>0&&opt.min_volume_fraction<0.5)||!(opt.min_aperture_area_fraction>=0&&opt.min_aperture_area_fraction<0.5))
+			throw std::invalid_argument("invalid embedded-boundary grid or stabilization fraction");
+		EmbeddedBoundary eb;eb.grid=grid;eb.min_volume_fraction=opt.min_volume_fraction;eb.min_aperture_area_fraction=opt.min_aperture_area_fraction;eb.cells.resize(grid.cell_count());eb.cut_face_mask.assign(grid.cell_count(),0);const double cell_volume=grid.h*grid.h*grid.h;
 		for(int k=0;k<grid.nz;++k)for(int j=0;j<grid.ny;++j)for(int i=0;i<grid.nx;++i)
 		{
 			const int cell=grid.cell_index(i,j,k);const Aabb3d box=grid.cell_box(i,j,k);std::vector<std::uint32_t> ids=bvh.query_aabb(box);if(ids.empty())continue;
@@ -252,6 +255,20 @@ namespace paracfd::core
 					auto [area,cent]=planar_polygon_measure(poly,axis);if(area<=1e-14*grid.h*grid.h)continue;FaceAperture ap{ca,static_cast<std::int8_t>(axis),area,cent,a,b};eb.apertures.push_back(ap);eb.connections.push_back({a,b,area,cent,std::max(1e-12,length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))>0?std::sqrt(length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))):grid.h),static_cast<std::int8_t>(axis)});
 				}
 			}
+		}
+
+		// Finite-resolution aperture policy. Analytic clipping occasionally produces
+		// positive-area slivers many orders below a face that have negligible mass flux,
+		// but their independent velocity DOF can dominate CFL. The aperture and its
+		// one-to-one pressure connection are removed together. This does not close a
+		// resolved STEP opening: the threshold is a configurable fraction of h^2 and the
+		// discarded count/area remain visible in preprocessing telemetry.
+		const double minimum_aperture_area=opt.min_aperture_area_fraction*grid.h*grid.h;
+		if(minimum_aperture_area>0)
+		{
+			for(const FaceAperture& aperture:eb.apertures)if(aperture.area<minimum_aperture_area){++eb.discarded_subgrid_apertures;eb.discarded_subgrid_aperture_area+=aperture.area;}
+			std::erase_if(eb.apertures,[&](const FaceAperture& aperture){return aperture.area<minimum_aperture_area;});
+			std::erase_if(eb.connections,[&](const FragmentConnection& connection){return connection.open_area<minimum_aperture_area;});
 		}
 
 		// Conservative small-fragment stabilization. First union adjacent tiny fragments

@@ -117,7 +117,10 @@ namespace paracfd::core
 		std::vector<SurfacePatch> patches;
 		std::vector<FragmentRef> sampled_voxel_fragments;
 		std::vector<UnresolvedEbCell> unresolved;
-		double min_volume_fraction = 0.05;
+		double min_volume_fraction = 0.25;
+		double min_aperture_area_fraction = 1e-4;
+		std::size_t discarded_subgrid_apertures = 0;
+		double discarded_subgrid_aperture_area = 0.0;
 
 		FragmentRef fragment_for_side(int cell, int side) const;
 		Vec3d fragment_centroid(FragmentRef ref) const;
@@ -140,7 +143,12 @@ namespace paracfd::core
 		// or multiple surfaces. It reconstructs fluid connectivity (never solid fill)
 		// on an N^3 local graph whose edges are blocked by exact BVH intersections.
 		int complex_subdivisions = 0;
-		double min_volume_fraction = 0.05;
+		double min_volume_fraction = 0.25;
+		// A clipping result below this fraction of one Cartesian face is below the
+		// represented grid resolution. Remove it from both the flux graph and its
+		// matching connection, and report its count/area rather than allowing a
+		// zero-measure numerical sliver to control the global timestep.
+		double min_aperture_area_fraction = 1e-4;
 	};
 
 	EmbeddedBoundary build_embedded_boundary(const TriMesh& mesh, const TriangleBvh& bvh,

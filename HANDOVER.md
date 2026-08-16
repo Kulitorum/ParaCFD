@@ -12,7 +12,7 @@ Implemented:
 - a sparse cross-brick EB atlas, so brick boundaries are not walls and covered coarse cells are excluded by finest-owner selection;
 - smooth-sheet fitting plus a configurable finest-cell fluid-connectivity fallback supporting arbitrary fragment counts without solid/parity classification;
 - split face apertures, including multiple disconnected openings on a partially covered aligned Cartesian face;
-- conservative same-fluid small-fragment merging and explicitly retained/counted pressure-static pockets;
+- conservative same-fluid small-fragment merging, a configurable/reportable sub-grid aperture cutoff, and explicitly retained/counted pressure-static pockets;
 - a composite matrix-free pressure operator containing implicit regular faces plus compact EB and coarse/fine connections;
 - CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
@@ -38,23 +38,24 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 
 - 49,673 triangles / 176 CAD faces;
 - 120 active bricks / 3,932,160 active cells;
-- 32,338 owned EB fragments, 117,040 face apertures, and 155,324 surface patches;
-- zero unresolved cells and 294 pressure-static isolated pockets;
-- 4,484,367 composite pressure slots with 81,920 coarse/fine and 112,563 EB connections;
+- 32,338 owned EB fragments, 114,042 face apertures, and 155,324 surface patches;
+- zero unresolved cells and 348 pressure-static isolated pockets;
+- 2,998 numerical aperture slivers discarded during level-atlas construction, totalling 0.000311495 m^2 of cumulative atlas area at the configurable `1e-4 h^2` cutoff;
+- 4,478,434 composite pressure slots with 81,920 coarse/fine and 102,227 EB connections;
 - 124.14 MiB pooled FP32 field estimate;
 - an initial +X freestream projection converging in about 189 PCG iterations to the tightened 1e-5 global relative residual in roughly 130-170 ms on the RTX 4090;
 - 348.68 MiB estimated persistent GPU storage for fields, projection, and conservative 2:1 velocity synchronization (CUDA context/driver allocations excluded).
 - 135,577 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
 - about 25-30 ms bounded MacCormack advection, 8-10 ms LES/diffusion, 0.1-0.6 ms compact EB transport, and typically 40-140 ms projection as the warm solve evolves (individual timings vary);
-- 494.39 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
+- 493.55 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
 
-`paraglider_case_probe` now records long imported-wing histories. With regular-flow adaptive CFL and a 1e-5 projection tolerance, a 500-step PlanB run reached 0.902 s: regular max velocity remained about 29 m/s, pressure-only force had decayed to approximately `[30.7, -0.02, -5.0]` N, and max/RMS-volume divergence were about `7.3e-4 / 4.0e-6 s^-1`. This is not a converged aerodynamic result. A compact micro-aperture state reached about 231 m/s while its surrounding regular field remained bounded; resolving that EB transport defect is the current trustworthiness blocker.
+`paraglider_case_probe` records long imported-wing histories. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reached 0.552 s. The compact peak was 50.6 m/s versus 56.1 m/s in the regular field, so the former 231 m/s compact-state runaway is gone. Pressure-only force was still evolving at `[38.7, -0.72, -1.64]` N; max/RMS-volume divergence were `2.95e-4 / 3.82e-6 s^-1`, and net integrated flux error was `2.71e-5 m^3/s`. The last measured step was 78.0 ms, including 42.8 ms projection and 0.14 ms compact EB transport. This is a stability/conservation result, not a converged aerodynamic result.
 
 ## Next engineering work
 
-1. Stabilize/reconstruct compact micro-aperture velocities without closing real openings or globally throttling on negligible slivers; then replace the first-order graph update with higher-order same-side transport and Smagorinsky treatment.
-2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and tighten force/conservation convergence gates.
-3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
+1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport and consistent EB Smagorinsky treatment; quantify why the regular PlanB peak continues growing.
+2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
+3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
 5. Replace throttled host visualization snapshots with direct AMR-aware CUDA/OpenGL field sampling and add pressure-force vectors.
 
