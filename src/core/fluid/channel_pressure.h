@@ -12,7 +12,7 @@
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	class ChannelMgpcg
 	{

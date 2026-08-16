@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <string>
 
-using namespace windcfd::core;
+using namespace paracfd::core;
 
 int main(int argc, char** argv)
 {

@@ -19,7 +19,7 @@
 
 #include <cmath>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	enum InletMode : int
 	{
@@ -68,7 +68,7 @@ namespace windcfd::core
 	// Inlet u on the x-face plane i=0, at vertical node z=(k+0.5)h. For loglaw the height is taken
 	// ABOVE the inlet bed top (bed_datum), so the profile rises from ~0 at the sand surface — this is
 	// what prevents the top-hat's full-U-at-the-bed spurious leading-edge scour (a developed BL inflow).
-	WINDCFD_HD inline double channel_inlet_u(ChannelBC bc, MacGrid g, int k)
+	PARACFD_HD inline double channel_inlet_u(ChannelBC bc, MacGrid g, int k)
 	{
 		double up;
 		if (bc.inlet_mode == INLET_UNIFORM) up = bc.U_inlet;
@@ -83,7 +83,7 @@ namespace windcfd::core
 
 	// Pick u* so the log-law u(z)=(u*/κ)ln(z/z0) is FLUX-matched to a target depth-averaged current U
 	// over a fluid depth H above the bed: U = (u*/κ)(ln(H/z0) − 1 + z0/H). Guards a thin/invalid depth.
-	WINDCFD_HD inline double loglaw_ustar_for_U(double U, double H, double z0, double kappa)
+	PARACFD_HD inline double loglaw_ustar_for_U(double U, double H, double z0, double kappa)
 	{
 		if (z0 <= 0.0 || H <= z0 * 2.718281828459045) return kappa * U; // degenerate: safe fallback
 		double denom = log(H / z0) - 1.0 + z0 / H;
@@ -95,7 +95,7 @@ namespace windcfd::core
 	// Normal x-ghosts: i<0 -> inlet (u=profile; v,w=0), i>range -> outlet (zero-gradient
 	// copy). Tangential y/z-ghosts: free-slip mirror (or no-slip reflection).
 
-	WINDCFD_HD inline double ch_fetch_u(const double* u, MacGrid g, ChannelBC bc, int i, int j, int k)
+	PARACFD_HD inline double ch_fetch_u(const double* u, MacGrid g, ChannelBC bc, int i, int j, int k)
 	{
 		double factor = 1.0;
 		if (j < 0) { if (bc.ymin == WALL_NOSLIP) factor = -factor; j = 0; }
@@ -115,7 +115,7 @@ namespace windcfd::core
 		return factor * u[g.uidx(i, j, k)];
 	}
 
-	WINDCFD_HD inline double ch_fetch_v(const double* v, MacGrid g, ChannelBC bc, int i, int j, int k)
+	PARACFD_HD inline double ch_fetch_v(const double* v, MacGrid g, ChannelBC bc, int i, int j, int k)
 	{
 		double factor = 1.0;
 		bool inlet_ghost = false;
@@ -136,7 +136,7 @@ namespace windcfd::core
 		return factor * v[g.vidx(i, j, k)];
 	}
 
-	WINDCFD_HD inline double ch_fetch_w(const double* w, MacGrid g, ChannelBC bc, int i, int j, int k)
+	PARACFD_HD inline double ch_fetch_w(const double* w, MacGrid g, ChannelBC bc, int i, int j, int k)
 	{
 		double factor = 1.0;
 		bool inlet_ghost = false;
@@ -158,7 +158,7 @@ namespace windcfd::core
 	}
 
 	// ---- Trilinear samplers (component node spaces identical to mac_grid.h) ------
-	WINDCFD_HD inline double ch_trilerp_u(const double* u, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
+	PARACFD_HD inline double ch_trilerp_u(const double* u, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = grid_fx(g, x), gy = grid_cy(g, y), gz = grid_cz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
@@ -178,7 +178,7 @@ namespace windcfd::core
 		double c0 = c00 * (1 - fy) + c10 * fy, c1 = c01 * (1 - fy) + c11 * fy;
 		return c0 * (1 - fz) + c1 * fz;
 	}
-	WINDCFD_HD inline double ch_trilerp_v(const double* v, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
+	PARACFD_HD inline double ch_trilerp_v(const double* v, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = grid_cx(g, x), gy = grid_fy(g, y), gz = grid_cz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
@@ -198,7 +198,7 @@ namespace windcfd::core
 		double c0 = c00 * (1 - fy) + c10 * fy, c1 = c01 * (1 - fy) + c11 * fy;
 		return c0 * (1 - fz) + c1 * fz;
 	}
-	WINDCFD_HD inline double ch_trilerp_w(const double* w, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
+	PARACFD_HD inline double ch_trilerp_w(const double* w, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 	{
 		double gx = grid_cx(g, x), gy = grid_cy(g, y), gz = grid_fz(g, z);
 		int i0 = (int)floor(gx), j0 = (int)floor(gy), k0 = (int)floor(gz);
@@ -220,16 +220,16 @@ namespace windcfd::core
 	}
 
 	// ---- Solid-mask helpers (mask is a cell field: 1=solid, 0=fluid) -------------
-	WINDCFD_HD inline bool ch_is_solid(const unsigned char* solid, MacGrid g, int i, int j, int k)
+	PARACFD_HD inline bool ch_is_solid(const unsigned char* solid, MacGrid g, int i, int j, int k)
 	{
 		if (i < 0 || i > g.nx - 1 || j < 0 || j > g.ny - 1 || k < 0 || k > g.nz - 1) return false;
 		return solid[g.pidx(i, j, k)] != 0;
 	}
 	// A u-face is "solid" (interior to the obstacle, x-normal) when both x-cells solid.
-	WINDCFD_HD inline bool ch_usolid(const unsigned char* s, MacGrid g, int i, int j, int k)
+	PARACFD_HD inline bool ch_usolid(const unsigned char* s, MacGrid g, int i, int j, int k)
 	{ return ch_is_solid(s, g, i - 1, j, k) && ch_is_solid(s, g, i, j, k); }
-	WINDCFD_HD inline bool ch_vsolid(const unsigned char* s, MacGrid g, int i, int j, int k)
+	PARACFD_HD inline bool ch_vsolid(const unsigned char* s, MacGrid g, int i, int j, int k)
 	{ return ch_is_solid(s, g, i, j - 1, k) && ch_is_solid(s, g, i, j, k); }
-	WINDCFD_HD inline bool ch_wsolid(const unsigned char* s, MacGrid g, int i, int j, int k)
+	PARACFD_HD inline bool ch_wsolid(const unsigned char* s, MacGrid g, int i, int j, int k)
 	{ return ch_is_solid(s, g, i, j, k - 1) && ch_is_solid(s, g, i, j, k); }
 }

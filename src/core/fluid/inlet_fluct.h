@@ -7,7 +7,7 @@
 
 #include "core/fluid/mac_grid.h"
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	class InletFluct
 	{

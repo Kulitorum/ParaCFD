@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	ChannelEmptyResult run_channel_empty(const ChannelEmptyConfig& cfg)
 	{

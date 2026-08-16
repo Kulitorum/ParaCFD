@@ -22,7 +22,7 @@
 #include <random>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// A borrowed, read-only view of the live host velocity + solid snapshot (owned by the
 	// SimWorker, valid only under its flow lock). Cell-centred sampling reconstructs velocity
@@ -33,7 +33,7 @@ namespace windcfd::gui
 		const double* v = nullptr;
 		const double* w = nullptr;
 		const unsigned char* solid = nullptr;
-		windcfd::core::MacGrid grid;
+		paracfd::core::MacGrid grid;
 		// Current flow direction (ChannelBC::flow_sign): +1 ⇒ inlet at x-min (default), -1 ⇒ inlet at
 		// x-max (reversed tide). The tracers seed from whichever face is the inlet.
 		int flow_sign = 1;

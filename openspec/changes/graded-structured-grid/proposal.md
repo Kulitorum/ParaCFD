@@ -1,6 +1,6 @@
 ## Why
 
-WindCFD's motivating question — how **rounded vs sharp building corners** change the wind loads —
+ParaCFD's motivating question — how **rounded vs sharp building corners** change the wind loads —
 is currently **undetectable at the grid resolution the tool runs**. The uniform MAC grid welds
 feature resolution to domain size (`feature_h ≡ domain / N`), so a domain large enough for free
 flow forces cells too coarse to see a corner. Concretely: `configs/building.json` runs at
@@ -60,7 +60,7 @@ octree/AMR rewrite (which solves a *dynamic/unknown-refinement* problem we do no
 
 - **⚠ Prerequisite (no existing test oracle)**: CLAUDE.md advertises a "1e-5 GPU-vs-CPU parity
   test per kernel" invariant, but **no test target exists** (CMake builds only `building_probe` +
-  `windcfd-gui`; the CPU twins are defined but never run). A parity harness **or** a golden-master
+  `paracfd-gui`; the CPU twins are defined but never run). A parity harness **or** a golden-master
   snapshot must be built as **Phase 0** before the operator rewrite, or "zero behaviour change" is
   unfalsifiable. See `design.md` D4.
 - **Core solver** (`src/core/fluid/`): `mac_grid.h` (representation), `advect.cu`,

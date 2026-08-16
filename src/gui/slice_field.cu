@@ -9,19 +9,19 @@
 #include <cfloat>
 #include <cmath>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
-	using windcfd::core::MacGrid;
+	using paracfd::core::MacGrid;
 
 	namespace
 	{
-		WINDCFD_HD inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
-		WINDCFD_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
+		PARACFD_HD inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+		PARACFD_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 		// Perceptual 5-stop gradient blue->cyan->green->yellow->red over t in [0,1]. Delegates to
 		// the SHARED ramp (gui/colormap.h) so the slice, the flow arrows and the legend agree, and
 		// so the GPU kernel and its CPU reference stay bit-for-bit identical (plain float lerps).
-		WINDCFD_HD inline float4 colormap(float t)
+		PARACFD_HD inline float4 colormap(float t)
 		{
 			float4 c;
 			scour_colormap(t, c.x, c.y, c.z);
@@ -30,7 +30,7 @@ namespace windcfd::gui
 		}
 
 		// Cell-centred scalar of the chosen field at MAC cell (i,j,k).
-		WINDCFD_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
+		PARACFD_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
 			MacGrid g, Field field, int i, int j, int k)
 		{
 			switch (field)
@@ -56,7 +56,7 @@ namespace windcfd::gui
 
 		// Cell-centred speed magnitude |(u,v,w)| at MAC cell (i,j,k). Shared by the auto-range
 		// reduction's GPU kernel and CPU reference so the arrow colour scale matches exactly.
-		WINDCFD_HD inline float cell_speed(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline float cell_speed(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
 			double uc = 0.5 * (u[g.uidx(i, j, k)] + u[g.uidx(i + 1, j, k)]);
 			double vc = 0.5 * (v[g.vidx(i, j, k)] + v[g.vidx(i, j + 1, k)]);
@@ -65,7 +65,7 @@ namespace windcfd::gui
 		}
 
 		// Full per-vertex evaluation: world position -> nearest cell -> scalar -> colour.
-		WINDCFD_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p,
+		PARACFD_HD inline float4 eval_vertex(const double* u, const double* v, const double* w, const double* p,
 			const SliceParams& sp, int a, int b)
 		{
 			float x, y, z;
@@ -73,9 +73,9 @@ namespace windcfd::gui
 			MacGrid g = sp.grid;
 			// World → cell index via the grid's world↔index map (graded-aware; floor(x/h) uniform). On a
 			// graded grid sp.grid is the DEVICE view, so grid_fx reads device metric arrays on the device.
-			int i = clampi((int)floor(windcfd::core::grid_fx(g, (double)x)), 0, g.nx - 1);
-			int j = clampi((int)floor(windcfd::core::grid_fy(g, (double)y)), 0, g.ny - 1);
-			int k = clampi((int)floor(windcfd::core::grid_fz(g, (double)z)), 0, g.nz - 1);
+			int i = clampi((int)floor(paracfd::core::grid_fx(g, (double)x)), 0, g.nx - 1);
+			int j = clampi((int)floor(paracfd::core::grid_fy(g, (double)y)), 0, g.ny - 1);
+			int k = clampi((int)floor(paracfd::core::grid_fz(g, (double)z)), 0, g.nz - 1);
 			float s = sample_scalar(u, v, w, p, g, sp.field, i, j, k);
 			float denom = (sp.vmax > sp.vmin) ? (sp.vmax - sp.vmin) : 1.0f;
 			return colormap((s - sp.vmin) / denom);

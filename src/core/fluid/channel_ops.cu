@@ -9,22 +9,22 @@
 #include <cmath>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{
 		inline int gsz(int n, int b = 256) { return (n + b - 1) / b; }
 
 		// component geometry ----------------------------------------------------
-		WINDCFD_HD inline void comp_extent(int comp, MacGrid g, int& ni, int& nj, int& nk)
+		PARACFD_HD inline void comp_extent(int comp, MacGrid g, int& ni, int& nj, int& nk)
 		{
 			if (comp == 0) { ni = g.nx + 1; nj = g.ny; nk = g.nz; }
 			else if (comp == 1) { ni = g.nx; nj = g.ny + 1; nk = g.nz; }
 			else { ni = g.nx; nj = g.ny; nk = g.nz + 1; }
 		}
-		WINDCFD_HD inline int comp_idx(int comp, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline int comp_idx(int comp, MacGrid g, int i, int j, int k)
 		{ return comp == 0 ? g.uidx(i, j, k) : comp == 1 ? g.vidx(i, j, k) : g.widx(i, j, k); }
-		WINDCFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
+		PARACFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
 		{
 			if (comp == 0) { x = g.xf(i); y = g.yc(j); z = g.zc(k); }
 			else if (comp == 1) { x = g.xc(i); y = g.yf(j); z = g.zc(k); }
@@ -32,29 +32,29 @@ namespace windcfd::core
 		}
 		// advection updates the interior faces; inlet(i=0)/outlet(i=nx) u-faces and the
 		// free-slip normal v/w faces are set by the BC steps, so copy them through.
-		WINDCFD_HD inline bool comp_interior(int comp, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline bool comp_interior(int comp, MacGrid g, int i, int j, int k)
 		{
 			if (comp == 0) return i >= 1 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 			if (comp == 1) return i >= 0 && i <= g.nx - 1 && j >= 1 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 			return i >= 0 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 1 && k <= g.nz - 1;
 		}
-		WINDCFD_HD inline bool comp_solidface(int comp, const unsigned char* s, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline bool comp_solidface(int comp, const unsigned char* s, MacGrid g, int i, int j, int k)
 		{ return comp == 0 ? ch_usolid(s, g, i, j, k) : comp == 1 ? ch_vsolid(s, g, i, j, k) : ch_wsolid(s, g, i, j, k); }
 
-		WINDCFD_HD inline double chf(int comp, const double* f, MacGrid g, ChannelBC bc, int i, int j, int k)
+		PARACFD_HD inline double chf(int comp, const double* f, MacGrid g, ChannelBC bc, int i, int j, int k)
 		{ return comp == 0 ? ch_fetch_u(f, g, bc, i, j, k) : comp == 1 ? ch_fetch_v(f, g, bc, i, j, k) : ch_fetch_w(f, g, bc, i, j, k); }
-		WINDCFD_HD inline double chsample(int comp, const double* f, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
+		PARACFD_HD inline double chsample(int comp, const double* f, MacGrid g, ChannelBC bc, double x, double y, double z, double* mn, double* mx)
 		{ return comp == 0 ? ch_trilerp_u(f, g, bc, x, y, z, mn, mx) : comp == 1 ? ch_trilerp_v(f, g, bc, x, y, z, mn, mx) : ch_trilerp_w(f, g, bc, x, y, z, mn, mx); }
 
 		// ---- advection helpers ------------------------------------------------
-		WINDCFD_HD inline bool cell_of_point_solid(MacGrid g, const unsigned char* solid, double x, double y, double z)
+		PARACFD_HD inline bool cell_of_point_solid(MacGrid g, const unsigned char* solid, double x, double y, double z)
 		{
 			int i = (int)floor(grid_fx(g, x)), j = (int)floor(grid_fy(g, y)), k = (int)floor(grid_fz(g, z));
 			return ch_is_solid(solid, g, i, j, k);
 		}
 		// Pull a backtrace/forward-trace endpoint out of any solid it landed in, by
 		// bisecting toward the (fluid) origin node (RESEARCH §3.2 ray clipping).
-		WINDCFD_HD inline void clip_solid(MacGrid g, const unsigned char* solid, double x0, double y0, double z0, double& x, double& y, double& z)
+		PARACFD_HD inline void clip_solid(MacGrid g, const unsigned char* solid, double x0, double y0, double z0, double& x, double& y, double& z)
 		{
 			if (!cell_of_point_solid(g, solid, x, y, z)) return;
 			double lo = 0.0, hi = 1.0; // fraction from origin(0) to endpoint(1)
@@ -66,14 +66,14 @@ namespace windcfd::core
 			}
 			x = x0 + lo * (x - x0); y = y0 + lo * (y - y0); z = z0 + lo * (z - z0);
 		}
-		WINDCFD_HD inline void vel_at(const double* u, const double* v, const double* w, MacGrid g, ChannelBC bc,
+		PARACFD_HD inline void vel_at(const double* u, const double* v, const double* w, MacGrid g, ChannelBC bc,
 			double x, double y, double z, double& vx, double& vy, double& vz)
 		{
 			vx = ch_trilerp_u(u, g, bc, x, y, z, nullptr, nullptr);
 			vy = ch_trilerp_v(v, g, bc, x, y, z, nullptr, nullptr);
 			vz = ch_trilerp_w(w, g, bc, x, y, z, nullptr, nullptr);
 		}
-		WINDCFD_HD inline void rk2_trace(const double* u, const double* v, const double* w, MacGrid g, ChannelBC bc,
+		PARACFD_HD inline void rk2_trace(const double* u, const double* v, const double* w, MacGrid g, ChannelBC bc,
 			const unsigned char* solid, double dt, double x, double y, double z, double& xo, double& yo, double& zo)
 		{
 			double vx, vy, vz; vel_at(u, v, w, g, bc, x, y, z, vx, vy, vz);
@@ -84,7 +84,7 @@ namespace windcfd::core
 			clamp_to_domain(g, xo, yo, zo); clip_solid(g, solid, x, y, z, xo, yo, zo);
 		}
 		// 1st-order reversion band: near a domain edge OR near a solid (via nearsolid).
-		WINDCFD_HD inline bool near_revert(int comp, MacGrid g, const unsigned char* nearsolid, int i, int j, int k)
+		PARACFD_HD inline bool near_revert(int comp, MacGrid g, const unsigned char* nearsolid, int i, int j, int k)
 		{
 			int ni, nj, nk; comp_extent(comp, g, ni, nj, nk);
 			if (i < 1 || i > ni - 2 || j < 1 || j > nj - 2 || k < 1 || k > nk - 2) return true;
@@ -99,7 +99,7 @@ namespace windcfd::core
 			return ns(ca_i, ca_j, ca_k) || ns(cb_i, cb_j, cb_k);
 		}
 
-		WINDCFD_HD inline void forward_node(int comp, const double* field, const double* u, const double* v, const double* w,
+		PARACFD_HD inline void forward_node(int comp, const double* field, const double* u, const double* v, const double* w,
 			double* phiHat, const unsigned char* solid, MacGrid g, ChannelBC bc, double dt, int i, int j, int k)
 		{
 			int idx = comp_idx(comp, g, i, j, k);
@@ -109,7 +109,7 @@ namespace windcfd::core
 			double xb, yb, zb; rk2_trace(u, v, w, g, bc, solid, dt, x, y, z, xb, yb, zb);
 			phiHat[idx] = chsample(comp, field, g, bc, xb, yb, zb, nullptr, nullptr);
 		}
-		WINDCFD_HD inline void correct_node(int comp, const double* field, const double* phiHat,
+		PARACFD_HD inline void correct_node(int comp, const double* field, const double* phiHat,
 			const double* u, const double* v, const double* w, double* out,
 			const unsigned char* solid, const unsigned char* nearsolid, MacGrid g, ChannelBC bc, double dt, int i, int j, int k)
 		{
@@ -155,13 +155,13 @@ namespace windcfd::core
 		}
 
 		// ---- Smagorinsky ------------------------------------------------------
-		WINDCFD_HD inline double uc_(const double* u, MacGrid g, ChannelBC bc, int i, int j, int k)
+		PARACFD_HD inline double uc_(const double* u, MacGrid g, ChannelBC bc, int i, int j, int k)
 		{ return 0.5 * (ch_fetch_u(u, g, bc, i, j, k) + ch_fetch_u(u, g, bc, i + 1, j, k)); }
-		WINDCFD_HD inline double vc_(const double* v, MacGrid g, ChannelBC bc, int i, int j, int k)
+		PARACFD_HD inline double vc_(const double* v, MacGrid g, ChannelBC bc, int i, int j, int k)
 		{ return 0.5 * (ch_fetch_v(v, g, bc, i, j, k) + ch_fetch_v(v, g, bc, i, j + 1, k)); }
-		WINDCFD_HD inline double wc_(const double* w, MacGrid g, ChannelBC bc, int i, int j, int k)
+		PARACFD_HD inline double wc_(const double* w, MacGrid g, ChannelBC bc, int i, int j, int k)
 		{ return 0.5 * (ch_fetch_w(w, g, bc, i, j, k) + ch_fetch_w(w, g, bc, i, j, k + 1)); }
-		WINDCFD_HD inline double smag_nut(const double* u, const double* v, const double* w, const unsigned char* solid,
+		PARACFD_HD inline double smag_nut(const double* u, const double* v, const double* w, const unsigned char* solid,
 			MacGrid g, ChannelBC bc, double Cs, int i, int j, int k)
 		{
 			if (ch_is_solid(solid, g, i, j, k)) return 0.0;
@@ -189,9 +189,9 @@ namespace windcfd::core
 		}
 
 		// ---- diffusion --------------------------------------------------------
-		WINDCFD_HD inline double wall_ghost(double c, ChannelBC bc) { return bc.solid_mode == SOLID_NOSLIP ? -c : c; }
-		WINDCFD_HD inline int normal_axis(int comp) { return comp; }
-		WINDCFD_HD inline void diffuse_node(int comp, const double* field, const double* nut, const unsigned char* solid,
+		PARACFD_HD inline double wall_ghost(double c, ChannelBC bc) { return bc.solid_mode == SOLID_NOSLIP ? -c : c; }
+		PARACFD_HD inline int normal_axis(int comp) { return comp; }
+		PARACFD_HD inline void diffuse_node(int comp, const double* field, const double* nut, const unsigned char* solid,
 			double* out, MacGrid g, ChannelBC bc, double dt, double nu, int i, int j, int k)
 		{
 			int idx = comp_idx(comp, g, i, j, k);
@@ -325,7 +325,7 @@ namespace windcfd::core
 		// dir_xmax encodes the Dirichlet-p=0 OUTLET face: >0 ⇒ xmax (i=nx−1 cell, the M2/M3 default),
 		// <0 ⇒ xmin (i=0 cell, the reversed-tide outlet), 0 ⇒ none. The velocity-Dirichlet inlet face
 		// stays Neumann (no p-neighbour). All dir_xmax>0 paths are identical to the original code.
-		WINDCFD_HD inline void nb_stencil(const double* p, const unsigned char* solid, MacGrid g, int dir_xmax, int i, int j, int k, int& count, double& nbsum)
+		PARACFD_HD inline void nb_stencil(const double* p, const unsigned char* solid, MacGrid g, int dir_xmax, int i, int j, int k, int& count, double& nbsum)
 		{
 			count = 0; nbsum = 0.0;
 			if (i > 0 && !ch_is_solid(solid, g, i - 1, j, k)) { ++count; nbsum += p[g.pidx(i - 1, j, k)]; }
@@ -342,7 +342,7 @@ namespace windcfd::core
 		// Dirichlet-outlet ghost (p=0) on the domain x-face uses d_f = the edge cell width (the existing
 		// mirror-cell convention, weight 1/dx² uniform). diag = Σ w_f, wnb = Σ w_f·p_nb ⇒ Ap = diag·p_c − wnb.
 		// Uniform spacings ⇒ (count·p_c − nbsum)/h², identical to nb_stencil. Stays SPD.
-		WINDCFD_HD inline void fv_stencil_ch(const double* p, const unsigned char* solid, MacGrid g, int dir_xmax, int i, int j, int k, double& diag, double& wnb)
+		PARACFD_HD inline void fv_stencil_ch(const double* p, const unsigned char* solid, MacGrid g, int dir_xmax, int i, int j, int k, double& diag, double& wnb)
 		{
 			diag = 0.0; wnb = 0.0;
 			if (i > 0 && !ch_is_solid(solid, g, i - 1, j, k)) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i - 1, j, k)]; }
@@ -354,7 +354,7 @@ namespace windcfd::core
 			if (k > 0 && !ch_is_solid(solid, g, i, j, k - 1)) { double w = 1.0 / (g.dzc(k) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k - 1)]; }
 			if (k < g.nz - 1 && !ch_is_solid(solid, g, i, j, k + 1)) { double w = 1.0 / (g.dzc(k + 1) * g.dz(k)); diag += w; wnb += w * p[g.pidx(i, j, k + 1)]; }
 		}
-		WINDCFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
 			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]) / g.dx(i)
 				+ (v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]) / g.dy(j)
@@ -412,7 +412,7 @@ namespace windcfd::core
 		// expressions, fv_stencil_ch itself untouched to keep the uniform golden bitwise).
 		// Solid cells and isolated fluid cells (diag==0) become identity rows, matching
 		// k_jacobi/k_zero_solids.
-		WINDCFD_HD inline void fv_line_row(const double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax,
+		PARACFD_HD inline void fv_line_row(const double* p, const double* rhs, const unsigned char* solid, MacGrid g, int dir_xmax,
 			int i, int j, int k, int axis, double& a, double& b, double& c, double& d)
 		{
 			int idx = g.pidx(i, j, k);
@@ -437,7 +437,7 @@ namespace windcfd::core
 		// Dirichlet end) is singular — its last pivot vanishes; that row degrades to identity.
 		// The trigger depends only on matrix coefficients (never on rhs/p), so the smoother
 		// stays one fixed linear operator.
-		WINDCFD_HD inline void line_solve_ch(double* p, const double* rhs, double* cprime, const unsigned char* solid,
+		PARACFD_HD inline void line_solve_ch(double* p, const double* rhs, double* cprime, const unsigned char* solid,
 			MacGrid g, int dir_xmax, int axis, int line)
 		{
 			int n, stride, i = 0, j = 0, k = 0;

@@ -9,25 +9,25 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{
-		WINDCFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
+		PARACFD_HD inline void node_pos(int comp, MacGrid g, int i, int j, int k, double& x, double& y, double& z)
 		{
 			if (comp == 0) { x = g.xf(i); y = g.yc(j); z = g.zc(k); }
 			else if (comp == 1) { x = g.xc(i); y = g.yf(j); z = g.zc(k); }
 			else { x = g.xc(i); y = g.yc(j); z = g.zf(k); }
 		}
 
-		WINDCFD_HD inline double sample_comp(int comp, const double* f, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
+		PARACFD_HD inline double sample_comp(int comp, const double* f, MacGrid g, BC bc, double x, double y, double z, double* mn, double* mx)
 		{
 			if (comp == 0) return trilerp_u(f, g, bc, x, y, z, mn, mx);
 			if (comp == 1) return trilerp_v(f, g, bc, x, y, z, mn, mx);
 			return trilerp_w(f, g, bc, x, y, z, mn, mx);
 		}
 
-		WINDCFD_HD inline void vel_at(const double* u, const double* v, const double* w, MacGrid g, BC bc,
+		PARACFD_HD inline void vel_at(const double* u, const double* v, const double* w, MacGrid g, BC bc,
 			double x, double y, double z, double& vx, double& vy, double& vz)
 		{
 			vx = trilerp_u(u, g, bc, x, y, z, nullptr, nullptr);
@@ -36,7 +36,7 @@ namespace windcfd::core
 		}
 
 		// RK2 backtrace by time-step `dt` (dt>0 traces upstream/backward in time).
-		WINDCFD_HD inline void rk2_trace(const double* u, const double* v, const double* w, MacGrid g, BC bc, double dt,
+		PARACFD_HD inline void rk2_trace(const double* u, const double* v, const double* w, MacGrid g, BC bc, double dt,
 			double x, double y, double z, double& xo, double& yo, double& zo)
 		{
 			double vx, vy, vz;
@@ -49,27 +49,27 @@ namespace windcfd::core
 			clamp_to_domain(g, xo, yo, zo);
 		}
 
-		WINDCFD_HD inline void comp_extent(int comp, MacGrid g, int& ni, int& nj, int& nk)
+		PARACFD_HD inline void comp_extent(int comp, MacGrid g, int& ni, int& nj, int& nk)
 		{
 			if (comp == 0) { ni = g.nx + 1; nj = g.ny; nk = g.nz; }
 			else if (comp == 1) { ni = g.nx; nj = g.ny + 1; nk = g.nz; }
 			else { ni = g.nx; nj = g.ny; nk = g.nz + 1; }
 		}
 
-		WINDCFD_HD inline bool comp_interior(int comp, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline bool comp_interior(int comp, MacGrid g, int i, int j, int k)
 		{
 			if (comp == 0) return i >= 1 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 			if (comp == 1) return i >= 0 && i <= g.nx - 1 && j >= 1 && j <= g.ny - 1 && k >= 0 && k <= g.nz - 1;
 			return i >= 0 && i <= g.nx - 1 && j >= 0 && j <= g.ny - 1 && k >= 1 && k <= g.nz - 1;
 		}
 
-		WINDCFD_HD inline bool near_wall(int comp, MacGrid g, int i, int j, int k, int band)
+		PARACFD_HD inline bool near_wall(int comp, MacGrid g, int i, int j, int k, int band)
 		{
 			int ni, nj, nk; comp_extent(comp, g, ni, nj, nk);
 			return i < band || i > ni - 1 - band || j < band || j > nj - 1 - band || k < band || k > nk - 1 - band;
 		}
 
-		WINDCFD_HD inline int comp_idx(int comp, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline int comp_idx(int comp, MacGrid g, int i, int j, int k)
 		{
 			if (comp == 0) return g.uidx(i, j, k);
 			if (comp == 1) return g.vidx(i, j, k);
@@ -78,7 +78,7 @@ namespace windcfd::core
 
 		// Forward SL sweep: phiHat = A(field). Interior nodes get the backtrace value,
 		// boundary nodes are copied through (keeps wall-normal faces at their BC value).
-		WINDCFD_HD inline void forward_node(int comp, const double* field, const double* u, const double* v, const double* w,
+		PARACFD_HD inline void forward_node(int comp, const double* field, const double* u, const double* v, const double* w,
 			double* phiHat, MacGrid g, BC bc, double dt, int i, int j, int k)
 		{
 			int idx = comp_idx(comp, g, i, j, k);
@@ -89,7 +89,7 @@ namespace windcfd::core
 		}
 
 		// Correction sweep: MacCormack combine + clamp + near-wall reversion.
-		WINDCFD_HD inline void correct_node(int comp, const double* field, const double* phiHat,
+		PARACFD_HD inline void correct_node(int comp, const double* field, const double* phiHat,
 			const double* u, const double* v, const double* w, double* out,
 			MacGrid g, BC bc, double dt, int band, int i, int j, int k)
 		{

@@ -91,7 +91,7 @@ start Phase B until Phase A's oracle is green.
       machine-eps parity + golden.
 - [x] 2.9 Run the Phase-0 oracle with uniform metrics — MUST pass unchanged (Phase A gate)
       → **GREEN: 42/42.** Null-metric path: 32/32 golden Δ ≤ 2.6e-16. Uniform-metric-ARRAY path
-      (device+host arrays, the metric-reading code): 9/9 golden Δ ≤ 7e-15. Full `windcfd-gui` + `ctest`
+      (device+host arrays, the metric-reading code): 9/9 golden Δ ≤ 7e-15. Full `paracfd-gui` + `ctest`
       build/pass. Behaviour change: none.
 
 ## 3. Phase B — Grid generation & config
@@ -149,7 +149,7 @@ start Phase B until Phase A's oracle is green.
 - [x] 4.2 Update the CUDA-GL slice sampler (`slice_field.cu`, `slice_gl.cu`) to sample via the
       world→index mapping
       → `eval_vertex` (slice_field.cu): world→cell via `grid_fx/fy/fz(g,·)` (were `floor(x/h)`).
-      `grid_*` are `WINDCFD_HD`, so the device kernel reads the device-view grid's device metric
+      `grid_*` are `PARACFD_HD`, so the device kernel reads the device-view grid's device metric
       arrays on the device. Collapses to `floor(x/h)` on a uniform grid. slice_gl.cu is interop-only
       (no coordinate mapping). NOTE: the voxel-staircase overlay cube positions in slice_viewer.cpp
       still assume uniform `h` (a graded staircase would draw at uniform spacing) — display polish,

@@ -55,7 +55,7 @@
 #include <utility>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	namespace
 	{
@@ -70,12 +70,12 @@ namespace windcfd::gui
 		}
 	}
 
-	MainWindow::MainWindow(std::unique_ptr<windcfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
+	MainWindow::MainWindow(std::unique_ptr<paracfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
 		QWidget* parent)
 		: QMainWindow(parent), recipe_(recipe)
 	{
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("WindCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
+		setWindowTitle(QString("ParaCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
 			.arg(QString::fromStdString(info.name))
 			.arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
 
@@ -96,7 +96,7 @@ namespace windcfd::gui
 		QAction* closeStep = fileMenu->addAction("Close model");
 		connect(closeStep, &QAction::triggered, this, [this] {
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
-			model_mesh_ = windcfd::core::TriMesh{};
+			model_mesh_ = paracfd::core::TriMesh{};
 			if (viewer_) viewer_->clearMesh();
 			initPlacementHistory(); // no model ⇒ clear the undo/redo history + disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
@@ -383,7 +383,7 @@ namespace windcfd::gui
 		QVBoxLayout* buildingCol = new QVBoxLayout(buildingGroup);
 		QFormLayout* buildingForm = new QFormLayout;
 		buildingForm->setLabelAlignment(Qt::AlignLeft);
-		const windcfd::core::BuildingParams bdefs; // seed the controls from the API defaults
+		const paracfd::core::BuildingParams bdefs; // seed the controls from the API defaults
 
 		wall_thick_spin_ = new QDoubleSpinBox;
 		wall_thick_spin_->setRange(0.05, 2.0);
@@ -807,12 +807,12 @@ namespace windcfd::gui
 		syncGridControls(); // seed the domain/h boxes + readout from the current sim
 	}
 
-	void MainWindow::spawnWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core,
+	void MainWindow::spawnWorker(std::unique_ptr<paracfd::core::ChannelFluidCore> core,
 		long long steps0, double t0)
 	{
 		// The checkpoint hand-off carries a shared_ptr across a queued connection — register it once.
 		static bool s_meta = false;
-		if (!s_meta) { qRegisterMetaType<windcfd::gui::CheckpointStatePtr>("windcfd::gui::CheckpointStatePtr"); s_meta = true; }
+		if (!s_meta) { qRegisterMetaType<paracfd::gui::CheckpointStatePtr>("paracfd::gui::CheckpointStatePtr"); s_meta = true; }
 
 		worker_ = new SimWorker(std::move(core)); // no parent: moved to worker_thread_
 		worker_->setStarted(sim_started_); // hold the fresh worker until "Start Simulation" (persists across a rebuild)
@@ -969,7 +969,7 @@ namespace windcfd::gui
 		if (inlet_profile_box_) // reflect the built inlet mode (log-law vs uniform)
 		{
 			const QSignalBlocker bp(inlet_profile_box_);
-			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == windcfd::core::INLET_LOGLAW ? 1 : 0);
+			inlet_profile_box_->setCurrentIndex(recipe_.bc.inlet_mode == paracfd::core::INLET_LOGLAW ? 1 : 0);
 		}
 		updateGridReadout();
 	}
@@ -983,18 +983,18 @@ namespace windcfd::gui
 		ov.set_fine_core = true;
 		ov.graded = fine_core_chk_ && fine_core_chk_->isChecked();
 		if (!ov.graded) return;
-		windcfd::core::FineCoreSpec& fc = ov.fine_core;
+		paracfd::core::FineCoreSpec& fc = ov.fine_core;
 		fc.Lx = ov.Lx; fc.Ly = ov.Ly; fc.Lz = ov.Lz; // complete the spec so GridMetrics::generate can use it directly
 		fc.h_fine = fc_hfine_spin_ ? fc_hfine_spin_->value() : 0.03;
 		fc.growth = fc_growth_spin_ ? fc_growth_spin_->value() : 1.15;
 		const double margin = fc_margin_spin_ ? fc_margin_spin_->value() : 1.0;
-		const windcfd::core::TriMesh& src = !centerline_mesh_.empty() ? centerline_mesh_ : model_mesh_;
+		const paracfd::core::TriMesh& src = !centerline_mesh_.empty() ? centerline_mesh_ : model_mesh_;
 		if (!src.empty())
 		{
-			const windcfd::core::ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
+			const paracfd::core::ModelPlacement place = (viewer_ && viewer_->hasModelPlacement())
 				? viewer_->modelPlacement()
-				: windcfd::core::place_model_on_bed(src, ov.Lx, ov.Ly);
-			const windcfd::core::TriMesh placed = windcfd::core::placed_mesh(src, place);
+				: paracfd::core::place_model_on_bed(src, ov.Lx, ov.Ly);
+			const paracfd::core::TriMesh placed = paracfd::core::placed_mesh(src, place);
 			// Wrap the placed bbox + margin, CLAMPED to the domain so the core never requests beyond it (a
 			// core ≈ the domain size can't tile in exact h_fine cells → windloads would reject the surface).
 			fc.x0 = std::max(0.0, (double)placed.bbox_min[0] - margin); fc.x1 = std::min(ov.Lx, (double)placed.bbox_max[0] + margin);
@@ -1088,7 +1088,7 @@ namespace windcfd::gui
 			fillFineCoreOverride(ov);
 			if (ov.graded && ov.fine_core.h_fine > 0.0 && ov.fine_core.h_fine < ov.h)
 			{
-				const windcfd::core::GridMetrics gm = windcfd::core::GridMetrics::generate(ov.fine_core);
+				const paracfd::core::GridMetrics gm = paracfd::core::GridMetrics::generate(ov.fine_core);
 				nx = gm.nx(); ny = gm.ny(); nz = gm.nz(); graded = true;
 			}
 		}
@@ -1290,7 +1290,7 @@ namespace windcfd::gui
 		// re-voxelized as the obstacle at the new h if it was injected).
 		const std::string src = recipe_.source_config;
 		const bool had_model = !model_mesh_.empty();
-		windcfd::core::TriMesh keep_mesh = had_model ? model_mesh_ : windcfd::core::TriMesh{};
+		paracfd::core::TriMesh keep_mesh = had_model ? model_mesh_ : paracfd::core::TriMesh{};
 
 		// Preserve the user's gizmo placement (move/rotate/scale) across the rebuild so the model is
 		// re-voxelized WHERE IT WAS PLACED, not re-centred. The "Enable manipulator" state persists in the viewer.
@@ -1299,7 +1299,7 @@ namespace windcfd::gui
 		teardownWorkerForReload();
 
 		SimRecipe recipe; std::string warn;
-		std::unique_ptr<windcfd::core::ChannelFluidCore> core = build_sim(src, recipe, warn, &ov);
+		std::unique_ptr<paracfd::core::ChannelFluidCore> core = build_sim(src, recipe, warn, &ov);
 		if (!core)
 		{
 			statusBar()->showMessage(QString("apply failed: %1").arg(QString::fromStdString(warn)), 6000);
@@ -1309,7 +1309,7 @@ namespace windcfd::gui
 		recipe_ = recipe;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("WindCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
+		setWindowTitle(QString("ParaCFD — G1 slice viewer [%1: %2x%3x%4, h=%5 m]")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h));
 		if (viewer_)
 		{
@@ -1325,7 +1325,7 @@ namespace windcfd::gui
 		// IS the obstacle).
 		if (had_model && viewer_)
 		{
-			viewer_->setMesh(windcfd::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
+			viewer_->setMesh(paracfd::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);    // re-apply the user's placement (setMesh reset it)
 			setModelAsObstacle(true);                            // re-voxelizes at viewer_->modelPlacement()
 			updateGizmoUi();
@@ -1336,7 +1336,7 @@ namespace windcfd::gui
 		// so an Apply that changes the domain re-runs the placed house's section→voxelize on the fresh grid.
 		if (!centerline_mesh_.empty() && viewer_)
 		{
-			viewer_->setMesh(windcfd::core::TriMesh(centerline_mesh_)); // re-show (setMesh reset the gizmo)
+			viewer_->setMesh(paracfd::core::TriMesh(centerline_mesh_)); // re-show (setMesh reset the gizmo)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);           // re-apply the user's placement
 			updateGizmoUi();
 			buildBuilding(false);                                       // voxelize into the ALREADY-regenerated grid (no re-reconstruct → no recursion)
@@ -1382,7 +1382,7 @@ namespace windcfd::gui
 		// from pruning it until the write lands (onCheckpointReady clears it). Numbered <name>.<step>.scn
 		// checkpoints are auto-saves, not user scenes — never added.
 		scene_base_path_ = path;
-		if (!windcfd::gui::is_numbered_checkpoint(path.toStdString()))
+		if (!paracfd::gui::is_numbered_checkpoint(path.toStdString()))
 		{
 			pending_recent_keep_ = QFileInfo(path).absoluteFilePath();
 			addRecentFile(path);
@@ -1391,7 +1391,7 @@ namespace windcfd::gui
 		return true;
 	}
 
-	void MainWindow::onCheckpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag)
+	void MainWindow::onCheckpointReady(paracfd::gui::CheckpointStatePtr state, qint64 tag)
 	{
 		if (!state) return;
 		SceneFile sf;
@@ -1460,7 +1460,7 @@ namespace windcfd::gui
 
 		// Offer sibling restart points (the base scene + its auto-saved checkpoints) so the user can pick
 		// a step to resume from, per "choose a restartpoint when loading".
-		auto cps = windcfd::gui::list_checkpoints(fn.toStdString());
+		auto cps = paracfd::gui::list_checkpoints(fn.toStdString());
 		if (cps.size() > 1)
 		{
 			QStringList items; int cur = 0;
@@ -1483,7 +1483,7 @@ namespace windcfd::gui
 	bool MainWindow::loadSceneFromPath(const QString& path)
 	{
 		SceneFile sf; std::string warn;
-		if (!windcfd::gui::read_scene(path.toStdString(), sf, warn))
+		if (!paracfd::gui::read_scene(path.toStdString(), sf, warn))
 		{
 			std::fprintf(stderr, "[scene] load FAILED (%s): %s\n", path.toUtf8().constData(), warn.c_str());
 			statusBar()->showMessage(QString("scene load failed: %1").arg(QString::fromStdString(warn)), 6000);
@@ -1491,7 +1491,7 @@ namespace windcfd::gui
 		}
 		restoreScene(sf);
 		scene_base_path_ = path;
-		if (!windcfd::gui::is_numbered_checkpoint(path.toStdString())) addRecentFile(path);
+		if (!paracfd::gui::is_numbered_checkpoint(path.toStdString())) addRecentFile(path);
 		statusBar()->showMessage(QString("scene restored: %1 @ step %2")
 			.arg(QFileInfo(path).fileName()).arg(sf.state.steps), 6000);
 		return true;
@@ -1512,7 +1512,7 @@ namespace windcfd::gui
 		if ((int)solid.size() != recipe_.grid.p_count()) solid = recipe_.base_solid;
 		auto core = make_core(recipe_, solid, st.solid_mode);
 		core->set_bed_inlet_mask(st.bed_inlet_mask);
-		if (st.bc.inlet_mode == windcfd::core::INLET_LOGLAW) core->set_inlet_profile(true, st.bc.z0, st.bc.bed_datum);
+		if (st.bc.inlet_mode == paracfd::core::INLET_LOGLAW) core->set_inlet_profile(true, st.bc.z0, st.bc.bed_datum);
 		core->set_inlet_speed(st.bc.U_inlet);
 		core->load_state_host(st.u, st.v, st.w, st.p);
 
@@ -1521,11 +1521,11 @@ namespace windcfd::gui
 		// bytes so a later re-save re-embeds them.
 		step_data_ = d.step_data;
 		step_source_name_ = d.step_name;
-		windcfd::core::TriMesh model = d.mesh; // legacy scenes carry the triangulation directly
+		paracfd::core::TriMesh model = d.mesh; // legacy scenes carry the triangulation directly
 		if (!d.step_data.empty())
 		{
 			std::string err;
-			windcfd::core::TriMesh regen = windcfd::core::load_step_mesh_from_memory(d.step_data, d.step_deflection, &err);
+			paracfd::core::TriMesh regen = paracfd::core::load_step_mesh_from_memory(d.step_data, d.step_deflection, &err);
 			if (!regen.empty()) model = std::move(regen);
 			else std::fprintf(stderr, "[scene] STEP regenerate failed (%s) — falling back to stored mesh\n", err.c_str());
 		}
@@ -1538,19 +1538,19 @@ namespace windcfd::gui
 		if (have_model && d.mesh_is_centerline)
 		{
 			centerline_mesh_ = model;
-			centerline_noslip_ = (st.solid_mode == windcfd::core::SOLID_NOSLIP);
-			model_mesh_ = windcfd::core::TriMesh{};
+			centerline_noslip_ = (st.solid_mode == paracfd::core::SOLID_NOSLIP);
+			model_mesh_ = paracfd::core::TriMesh{};
 		}
 		else
 		{
-			model_mesh_ = have_model ? model : windcfd::core::TriMesh{};
-			centerline_mesh_ = windcfd::core::TriMesh{};
+			model_mesh_ = have_model ? model : paracfd::core::TriMesh{};
+			centerline_mesh_ = paracfd::core::TriMesh{};
 		}
-		scene_mesh_ = have_model ? model : windcfd::core::TriMesh{};
+		scene_mesh_ = have_model ? model : paracfd::core::TriMesh{};
 		scene_place_ = d.place;
 
 		const SimInfo& info = recipe_.info;
-		setWindowTitle(QString("WindCFD — restored [%1: %2x%3x%4, h=%5 m] @ step %6")
+		setWindowTitle(QString("ParaCFD — restored [%1: %2x%3x%4, h=%5 m] @ step %6")
 			.arg(QString::fromStdString(info.name)).arg(info.nx).arg(info.ny).arg(info.nz).arg(info.h).arg(st.steps));
 		if (viewer_)
 		{
@@ -1567,7 +1567,7 @@ namespace windcfd::gui
 		// cases (model_mesh_ is empty for a centerline).
 		if (have_model && viewer_)
 		{
-			viewer_->setMesh(windcfd::core::TriMesh(scene_mesh_));
+			viewer_->setMesh(paracfd::core::TriMesh(scene_mesh_));
 			viewer_->setModelPlacement(d.place); // restore the saved gizmo placement (move/rotate/scale)
 			model_injected_ = true;
 		}
@@ -1589,7 +1589,7 @@ namespace windcfd::gui
 	{
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
-		windcfd::core::TriMesh mesh = windcfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
+		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
 		QApplication::restoreOverrideCursor();
 
 		if (mesh.empty())
@@ -1610,10 +1610,10 @@ namespace windcfd::gui
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
-		centerline_mesh_ = windcfd::core::TriMesh{}; // a plain STEP is the mesh obstacle, not a centerline
+		centerline_mesh_ = paracfd::core::TriMesh{}; // a plain STEP is the mesh obstacle, not a centerline
 		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the mesh on load)
 		step_source_name_ = QFileInfo(path).fileName().toStdString();
-		scene_place_ = windcfd::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
+		scene_place_ = paracfd::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
 		if (viewer_) viewer_->setMesh(std::move(mesh));
 		addRecentFile(path);          // remember it in the Recent Files menu (feature 1)
 
@@ -1628,7 +1628,7 @@ namespace windcfd::gui
 	{
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
-		windcfd::core::TriMesh mesh = windcfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
+		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
 		QApplication::restoreOverrideCursor();
 
 		if (mesh.empty())
@@ -1654,13 +1654,13 @@ namespace windcfd::gui
 
 		// A centerline defines a BUILDING obstacle, not a STEP-as-mesh obstacle: keep model_mesh_ EMPTY so
 		// the Apply/Build paths use the centerline→building voxelizer (not voxelize_mesh over a stale mesh).
-		model_mesh_ = windcfd::core::TriMesh{};
+		model_mesh_ = paracfd::core::TriMesh{};
 
 		// Display the centerline mesh in the viewer AND enable the placement gizmo for it, exactly like a
 		// loaded STEP model: setMesh seeds a centre-on-bed default placement (in the CURRENT domain) that the
 		// user can translate/rotate/scale, and Build voxelizes the TRANSFORMED model (see buildBuilding).
 		scene_mesh_ = centerline_mesh_; // persist for a scene save (display mesh)
-		scene_place_ = windcfd::core::place_model_on_bed(centerline_mesh_, recipe_.info.Lx, recipe_.info.Ly);
+		scene_place_ = paracfd::core::place_model_on_bed(centerline_mesh_, recipe_.info.Lx, recipe_.info.Ly);
 		if (viewer_) viewer_->setMesh(std::move(mesh)); // default centre-on-bed gizmo, valid before first paint
 		addRecentFile(path);
 		updateGizmoUi(); // enable the placement gizmo for the centerline
@@ -1672,7 +1672,7 @@ namespace windcfd::gui
 
 	void MainWindow::buildBuilding(bool reconstruct_grid)
 	{
-		using namespace windcfd::core;
+		using namespace paracfd::core;
 		// Build voxelizes the loaded model as a building. Prefer the centerline; fall back to a plain loaded
 		// model (model_mesh_) so Build also works for a plain STEP and for LEGACY scenes restored before STEP
 		// embedding (their model lands in model_mesh_, with no centerline flag to route it otherwise).
@@ -1779,7 +1779,7 @@ namespace windcfd::gui
 	void MainWindow::updateWindLoadReadout()
 	{
 		if (!load_readout_) return;
-		windcfd::core::WindLoads L;
+		paracfd::core::WindLoads L;
 		if (worker_ && worker_->latestLoads(L) && L.exposed_faces > 0)
 		{
 			load_readout_->setText(QString(
@@ -1817,7 +1817,7 @@ namespace windcfd::gui
 			return;
 		}
 
-		windcfd::core::WindLoadStats S;
+		paracfd::core::WindLoadStats S;
 		if (worker_->latestAvgStats(S) && S.samples > 0)
 		{
 			const double ft = S.flow_through_time > 1e-9 ? S.duration / S.flow_through_time : 0.0;
@@ -1851,7 +1851,7 @@ namespace windcfd::gui
 
 	void MainWindow::addRecentFile(const QString& path)
 	{
-		QSettings s("COBOD", "WindCFD");
+		QSettings s("COBOD", "ParaCFD");
 		QStringList files = s.value("recentStepFiles").toStringList();
 		QString abs = QFileInfo(path).absoluteFilePath();
 		files.removeAll(abs);
@@ -1865,7 +1865,7 @@ namespace windcfd::gui
 	{
 		if (!recent_menu_) return;
 		recent_menu_->clear();
-		QSettings s("COBOD", "WindCFD");
+		QSettings s("COBOD", "ParaCFD");
 		QStringList files = s.value("recentStepFiles").toStringList();
 
 		// Prune entries whose file no longer exists (write the pruned list back). A scene that was just
@@ -1895,7 +1895,7 @@ namespace windcfd::gui
 		recent_menu_->addSeparator();
 		QAction* clear = recent_menu_->addAction("Clear Recent");
 		connect(clear, &QAction::triggered, this, [this] {
-			QSettings s2("COBOD", "WindCFD");
+			QSettings s2("COBOD", "ParaCFD");
 			s2.remove("recentStepFiles");
 			rebuildRecentMenu();
 		});
@@ -1912,7 +1912,7 @@ namespace windcfd::gui
 
 		if (on)
 		{
-			using namespace windcfd::core;
+			using namespace paracfd::core;
 			// Voxelize where the user placed it: use the gizmo's live placement (move/rotate/scale) when a
 			// model is loaded; otherwise the default centre-on-bed. The viewer's placement and its drawn mesh
 			// share one transform, so the solid mask lands exactly under the mesh.
@@ -2002,7 +2002,7 @@ namespace windcfd::gui
 				rec_preset_ = video_dialog_->preset();
 				rec_fps_ = video_dialog_->fps();
 				QString path = video_dialog_->path().trimmed();
-				if (path.isEmpty()) path = "windcfd_run.mp4";
+				if (path.isEmpty()) path = "paracfd_run.mp4";
 				if (!path.endsWith(".mp4", Qt::CaseInsensitive)) path += ".mp4";
 				startRecording(path);
 			});

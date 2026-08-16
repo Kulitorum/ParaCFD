@@ -11,8 +11,8 @@
 // thin-wall gaps). "distance <= half thickness" naturally rounds the OUTER corners by half the
 // wall thickness; a larger configured radius is obtained by pre-filleting the centerline.
 //
-// OCC-free (libwindcfd): consumes only the TriMesh + grid. The centerline STEP itself is read
-// by windcfd_geometry's load_step_mesh; corner rounding here is a procedural 2D fillet.
+// OCC-free (libparacfd): consumes only the TriMesh + grid. The centerline STEP itself is read
+// by paracfd_geometry's load_step_mesh; corner rounding here is a procedural 2D fillet.
 // Units: SI METRES. Mask is the ChannelBC format (cell field, 1=solid 0=fluid, g.pidx).
 #pragma once
 
@@ -22,7 +22,7 @@
 #include <array>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// A 2D building footprint: closed polyline loops in the xy-plane (metres), each a wall
 	// centerline path. Produced by horizontally sectioning the centerline surface.

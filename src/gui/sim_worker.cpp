@@ -11,9 +11,9 @@
 #include <cstdio>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
-	using windcfd::core::MacGrid;
+	using paracfd::core::MacGrid;
 
 	namespace
 	{
@@ -42,7 +42,7 @@ namespace windcfd::gui
 		mask_gen_.fetch_add(1);
 	}
 
-	bool SimWorker::copyMask(std::vector<unsigned char>& mask, windcfd::core::MacGrid& grid)
+	bool SimWorker::copyMask(std::vector<unsigned char>& mask, paracfd::core::MacGrid& grid)
 	{
 		std::lock_guard<std::mutex> lk(mask_mtx_);
 		if (mask_snapshot_.empty()) return false;
@@ -51,7 +51,7 @@ namespace windcfd::gui
 		return true;
 	}
 
-	bool SimWorker::latestLoads(windcfd::core::WindLoads& out) const
+	bool SimWorker::latestLoads(paracfd::core::WindLoads& out) const
 	{
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		if (!loads_valid_.load()) return false;
@@ -59,7 +59,7 @@ namespace windcfd::gui
 		return true;
 	}
 
-	bool SimWorker::copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, windcfd::core::MacGrid& grid) const
+	bool SimWorker::copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, paracfd::core::MacGrid& grid) const
 	{
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		if (!loads_valid_.load()) return false;
@@ -80,7 +80,7 @@ namespace windcfd::gui
 		return true;
 	}
 
-	bool SimWorker::latestAvgStats(windcfd::core::WindLoadStats& out) const
+	bool SimWorker::latestAvgStats(paracfd::core::WindLoadStats& out) const
 	{
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		if (!avg_valid_pub_) return false;
@@ -103,7 +103,7 @@ namespace windcfd::gui
 		avg_phase_ = AvgPhase::Collecting;
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		avg_valid_pub_ = false; // fall back to live Cp until the first sample lands
-		avg_stats_snapshot_ = windcfd::core::WindLoadStats{};
+		avg_stats_snapshot_ = paracfd::core::WindLoadStats{};
 	}
 
 	void SimWorker::reset_averaging()
@@ -113,7 +113,7 @@ namespace windcfd::gui
 		avg_phase_pub_.store((int)AvgPhase::Idle);
 		std::lock_guard<std::mutex> lk(loads_mtx_);
 		avg_valid_pub_ = false;
-		avg_stats_snapshot_ = windcfd::core::WindLoadStats{};
+		avg_stats_snapshot_ = paracfd::core::WindLoadStats{};
 	}
 
 	// Worker-thread: service start/stop commands and advance a scheduled (Pending) start by WALL-CLOCK time.
@@ -166,14 +166,14 @@ namespace windcfd::gui
 		lp_host_.resize(np);
 		cudaMemcpy(lp_host_.data(), core_->p_dev(), sizeof(double) * np, cudaMemcpyDeviceToHost);
 
-		windcfd::core::WindLoadParams prm;
+		paracfd::core::WindLoadParams prm;
 		prm.rho = load_rho_.load();
 		prm.u_ref = core_->inlet_speed();               // live reference (inlet) speed [m/s]
 		if (std::fabs(prm.u_ref) < 1e-6) prm.u_ref = 1.0; // guard q→0 (e.g. tidal slack): keep Cp finite
-		windcfd::core::WindLoads L;
+		paracfd::core::WindLoads L;
 		try
 		{
-			L = windcfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
+			L = paracfd::core::compute_wind_loads(lp_host_.data(), ls_host_.data(), g, prm, &lcp_host_);
 		}
 		catch (const std::exception& e)
 		{
@@ -192,7 +192,7 @@ namespace windcfd::gui
 		// Fold this instantaneous sample into the converged time-average while a window is collecting. Done
 		// BEFORE the swap below (the averager still needs lcp_host_) and off the display lock. result() also
 		// fills avg_cp_scratch_ with the time-averaged per-cell Cp for the building colouring.
-		windcfd::core::WindLoadStats st;
+		paracfd::core::WindLoadStats st;
 		bool have_avg = false;
 		if (avg_phase_ == AvgPhase::Collecting)
 		{

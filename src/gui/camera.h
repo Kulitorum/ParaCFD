@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	class Camera
 	{

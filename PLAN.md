@@ -1,11 +1,11 @@
-# PLAN.md — Implementation Plan: WindCFD (wind loads on 3D-printed buildings)
+# PLAN.md — Implementation Plan: ParaCFD (wind loads on 3D-printed buildings)
 
 GPU (CUDA) 3D incompressible-flow **LES** tool that quantifies how **wind** flows around
 3D-printed concrete buildings and the wind **loads** on their facade and roof, comparing
 **rounded** vs **sharp** building corners. The fluid is **air** in an atmospheric boundary
 layer (ABL) — bluff-body aerodynamics, not a hydraulic problem.
 
-WindCFD was forked from a sediment-transport simulator; **all** sediment / seabed / erosion
+ParaCFD was forked from a sediment-transport simulator; **all** sediment / seabed / erosion
 code has been removed. What remains is a validated, GPU-resident incompressible fluid core
 plus a CAD-to-voxel geometry pipeline and a Qt/GL viewer. On that foundation the wind-load
 workflow is now **substantially built**: air defaults are in, a centerline→building solid
@@ -68,7 +68,7 @@ genuinely future, do not assume an R-milestone feature exists yet.
 
 **Geometry pipeline (complete).**
 - OpenCascade **STEP import** → triangulated `TriMesh` (mm→m scaling, outward-normal winding
-  fix), isolated in the `windcfd_geometry` static lib (the only target that links OCC).
+  fix), isolated in the `paracfd_geometry` static lib (the only target that links OCC).
 - Watertight **ray-parity voxelizer** (CAD mesh → solid cell mask) with an
   enclosed-volume-vs-mesh-volume sanity check and affine model placement.
 - **Building solid from a 3D-print centerline** (`geometry/building.{h,cpp}`) — see W-DONE B
@@ -80,9 +80,9 @@ field — see W-DONE C below.
 
 **IO & config (complete).** Hand-rolled VTK **ImageData (.vti)** writer/reader; **JSON** config
 loader (vendored nlohmann) with a strict allowed-key whitelist; **air** defaults;
-`namespace windcfd::core`, units SI.
+`namespace paracfd::core`, units SI.
 
-**GUI `windcfd-gui` (complete, incl. the Build workflow).** Qt 6 + GL 4.3 slice viewer:
+**GUI `paracfd-gui` (complete, incl. the Build workflow).** Qt 6 + GL 4.3 slice viewer:
 threaded solver (GL strictly on the main thread, render decoupled from stepping → ~60 fps), live
 field slices, CUDA-GL interop colour kernel, animated flow **particles / tracers**, **video
 capture**, clip plane, **STEP model load** + a full **placement gizmo** (move/rotate/scale then
@@ -105,14 +105,14 @@ run drivers.
 Four library/exe targets plus a dev tool; the physics core has no Qt and no OCC dependency.
 
 ```
-WindCFD/
-├── CMakeLists.txt            project(WindCFD LANGUAGES CXX CUDA); Qt auto-detect glob
+ParaCFD/
+├── CMakeLists.txt            project(ParaCFD LANGUAGES CXX CUDA); Qt auto-detect glob
 ├── PLAN.md  RESEARCH.md  CLAUDE.md  HANDOVER.md  research/
 ├── configs/                 v1_cavity_re100 · v2_channel_loglaw · v3_cylinder ·
 │                            g1_viewer(_full/_highres) · m0_smoke · building  (wind-around-house)
 ├── src/
 │   ├── 3rdparty/nlohmann/json.hpp
-│   ├── core/                → libwindcfd (static, C++/CUDA, NO Qt/OCC)
+│   ├── core/                → libparacfd (static, C++/CUDA, NO Qt/OCC)
 │   │   ├── config.{h,cpp}         JSON run config; ✅ defaults now AIR (rho=1.225, nu=1.5e-5)
 │   │   ├── windloads.{h,cpp}      Cp + force/moment integration over the voxelized building
 │   │   ├── cuda_probe.{h,cu}      device query
@@ -130,12 +130,12 @@ WindCFD/
 │   │   │   ├── bedshear.{cu,h}, bedshear_ops.h   log-law GROUND/ABL wall model
 │   │   │   ├── sem_inlet.{cu,h}, inlet_fluct.h, plane_ops.{cu,h}, periodic_ops.h
 │   │   │   └── precursor.{cpp,h}   inlet-plane record/replay
-│   │   └── geometry/          → voxelizer + building in libwindcfd; STEP import split out
+│   │   └── geometry/          → voxelizer + building in libparacfd; STEP import split out
 │   │       ├── tri_mesh.h, model_placement.h, shape_masks.h
 │   │       ├── voxelize.{cpp,h}    watertight ray-parity mesh → solid mask
 │   │       ├── building.{cpp,h}    centerline section → thickened wall + hull roof solid mask
-│   │       └── step_import.{cpp,h} → compiled into windcfd_geometry (OCC-only .cpp)
-│   └── gui/                  → windcfd-gui (Qt6+GL) + windcfd_gui_cuda (Qt-free interop lib)
+│   │       └── step_import.{cpp,h} → compiled into paracfd_geometry (OCC-only .cpp)
+│   └── gui/                  → paracfd-gui (Qt6+GL) + paracfd_gui_cuda (Qt-free interop lib)
 │       ├── main.cpp, main_stub.cpp, main_window.{cpp,h}   incl. the Build workflow + gizmo undo/redo
 │       ├── slice_viewer.{cpp,h}   QOpenGLWidget, GL 4.3, camera, gizmo, clip plane, Cp colouring
 │       ├── sim_worker.{cpp,h}     steps the FluidCore on a QThread (no GL); publishes WindLoads + Cp
@@ -148,8 +148,8 @@ WindCFD/
 └── tools/building_probe.cpp  headless: centerline STEP → footprint → building solid mask (geometry check)
 ```
 
-**Targets:** `libwindcfd` (core, incl. `windloads` + `building`), `windcfd_geometry` (OCC STEP
-import, isolated), `windcfd_gui_cuda` (Qt-free CUDA-GL interop), `windcfd-gui` (Qt6 viewer /
+**Targets:** `libparacfd` (core, incl. `windloads` + `building`), `paracfd_geometry` (OCC STEP
+import, isolated), `paracfd_gui_cuda` (Qt-free CUDA-GL interop), `paracfd-gui` (Qt6 viewer /
 headless driver), `building_probe` (geometry dev tool).
 
 **Memory / performance (RTX 4090, air).** ~4M cells at h = 5 cm (~0.3 GB) is a comfortable
@@ -163,7 +163,7 @@ are the real wall-clock driver (see §5 risks).
 OpenCascade **8.0** (`C:/OpenCASCADE-8.0/build2`).
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
-cmake --build build --target windcfd-gui
+cmake --build build --target paracfd-gui
 ```
 ⚠ **Host-compiler trap:** this box also has VS 18 (MSVC 14.51), which CUDA 13.1 **rejects**.
 Build from the **x64 Native Tools prompt for VS 2022** (14.44). Never `-allow-unsupported-compiler`.

@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	WindLoads compute_wind_loads(const double* p, const unsigned char* solid, MacGrid g,
 		const WindLoadParams& prm, std::vector<float>* out_cell_cp)

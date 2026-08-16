@@ -12,15 +12,15 @@
 #pragma once
 
 #ifdef __CUDACC__
-#	define WINDCFD_CM_HD __host__ __device__
+#	define PARACFD_CM_HD __host__ __device__
 #else
-#	define WINDCFD_CM_HD
+#	define PARACFD_CM_HD
 #endif
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// Perceptual 5-stop gradient blue->cyan->green->yellow->red. `t` is clamped to [0,1].
-	WINDCFD_CM_HD inline void scour_colormap(float t, float& r, float& g, float& b)
+	PARACFD_CM_HD inline void scour_colormap(float t, float& r, float& g, float& b)
 	{
 		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
 		const float rs[5] = { 0.23f, 0.10f, 0.20f, 0.98f, 0.85f };

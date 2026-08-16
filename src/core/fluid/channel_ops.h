@@ -14,7 +14,7 @@
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// ---- Advection (masked MacCormack, RK2 backtrace) ---------------------------
 	void ch_advect_gpu(const double* uIn, const double* vIn, const double* wIn,

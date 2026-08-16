@@ -2,7 +2,7 @@
 // renders an axis-aligned slice of the live simulation: CUDA writes RGBA vertex colours
 // straight into a GL-registered VBO (zero copy, slice_gl.cu) and the widget draws the
 // coloured grid mesh with a slicer-style orbit/pan/zoom camera. ALL GL happens here on
-// the main thread (WINDCFD_ASSERT_GL_THREAD guards every entry point); the widget only
+// the main thread (PARACFD_ASSERT_GL_THREAD guards every entry point); the widget only
 // READS the worker's post-step device snapshots, under the worker's display_mutex().
 #pragma once
 
@@ -29,7 +29,7 @@
 
 class QPainter;
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	class SimWorker;
 
@@ -153,7 +153,7 @@ namespace windcfd::gui
 		// Loaded STEP model (metres). setMesh takes ownership; the GL upload is deferred to
 		// the next paint (main thread) so it is safe to call before the context exists (CLI
 		// --load-step) or from a menu action. clearMesh removes it from the view.
-		void setMesh(windcfd::core::TriMesh mesh);
+		void setMesh(paracfd::core::TriMesh mesh);
 		void clearMesh();
 		bool hasMesh() const { return has_mesh_; }
 
@@ -161,14 +161,14 @@ namespace windcfd::gui
 		// voxel-surface faces over/under the smooth mesh so the user can judge resolution. The
 		// mask is the ChannelBC cell field (1=solid). Geometry build is deferred to the next
 		// paint (main thread). clearVoxelOverlay hides it.
-		void setVoxelOverlay(const std::vector<unsigned char>& solid, windcfd::core::MacGrid grid);
+		void setVoxelOverlay(const std::vector<unsigned char>& solid, paracfd::core::MacGrid grid);
 		void clearVoxelOverlay();
 
 		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement.
 		void setMeshTranslate(double tx, double ty, double tz);
 		// Draw the loaded model under an explicit AFFINE placement (rotation·scale + translation),
 		// overriding the gizmo transform.
-		void setMeshPlacement(const windcfd::core::ModelPlacement& p);
+		void setMeshPlacement(const paracfd::core::ModelPlacement& p);
 
 		// --- Interactive model-placement gizmo -----------------------------------
 		// A single UNIFIED 3D manipulator: all handles are drawn at once — 3 translate arrows, 3 rotate
@@ -192,8 +192,8 @@ namespace windcfd::gui
 		// it does not require the GL upload to have happened.
 		bool hasModelPlacement() const { return gz_valid_ && !mesh_override_; }
 		void resetModelPlacement();                                  // back to centre-on-bed
-		windcfd::core::ModelPlacement modelPlacement() const;          // the affine the voxelizer uses
-		void setModelPlacement(const windcfd::core::ModelPlacement& p);// restore an affine (scene load)
+		paracfd::core::ModelPlacement modelPlacement() const;          // the affine the voxelizer uses
+		void setModelPlacement(const paracfd::core::ModelPlacement& p);// restore an affine (scene load)
 		ModelGizmoXform modelXform() const;                          // full gizmo state (Apply capture/restore)
 		void setModelXform(const ModelGizmoXform& x);
 
@@ -304,7 +304,7 @@ namespace windcfd::gui
 		int mesh_index_count_ = 0;
 		bool has_mesh_ = false;
 		bool mesh_upload_pending_ = false;
-		windcfd::core::TriMesh pending_mesh_;
+		paracfd::core::TriMesh pending_mesh_;
 
 		// Model transform. The model matrix comes from the gizmo TRS (gz_* below); an optional explicit
 		// override matrix can seat the model directly instead.
@@ -335,7 +335,7 @@ namespace windcfd::gui
 		bool has_vox_ = false;
 		bool vox_upload_pending_ = false;
 		std::vector<unsigned char> pending_vox_solid_; // retained after upload so a Cp update can re-colour
-		windcfd::core::MacGrid pending_vox_grid_;
+		paracfd::core::MacGrid pending_vox_grid_;
 		// Live flow-mask overlay: the last mask generation pulled from the worker. The overlay is
 		// re-extracted (exposed faces only) whenever the worker republishes a changed mask.
 		std::uint64_t vox_mask_gen_ = 0;

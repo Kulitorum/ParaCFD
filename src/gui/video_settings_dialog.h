@@ -15,7 +15,7 @@ class QLineEdit;
 class QPushButton;
 class QSpinBox;
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	class VideoSettingsDialog : public QDialog
 	{

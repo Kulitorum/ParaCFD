@@ -2,15 +2,15 @@
 //
 // This header is deliberately free of any OpenCascade (and Qt) include so the GUI and the
 // future voxelizer can consume the mesh without inheriting OCC's include path or host
-// flags. All OCC usage is isolated in step_import.cpp, compiled into the `windcfd_geometry`
-// static lib (see CMakeLists.txt); libwindcfd and the physics gates stay OCC-free.
+// flags. All OCC usage is isolated in step_import.cpp, compiled into the `paracfd_geometry`
+// static lib (see CMakeLists.txt); libparacfd and the physics gates stay OCC-free.
 //
 // ⚠ Units: OCC emits geometry in MILLIMETRES; load_step_mesh() scales every coordinate by
 // 0.001 so the returned TriMesh is in METRES, ready for the SI simulation domain and (later)
 // the watertight voxelizer.
 //
-// The TriMesh struct itself moved to the OCC-free core/geometry/tri_mesh.h so libwindcfd's
-// voxelizer can consume it without inheriting windcfd_geometry's OpenCascade dependency.
+// The TriMesh struct itself moved to the OCC-free core/geometry/tri_mesh.h so libparacfd's
+// voxelizer can consume it without inheriting paracfd_geometry's OpenCascade dependency.
 #pragma once
 
 #include "core/geometry/tri_mesh.h"
@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Read + triangulate a STEP file into a TriMesh (metres, outward normals).
 	//   deflection_mm — BRepMesh linear tolerance in MILLIMETRES (OCC's native unit; the

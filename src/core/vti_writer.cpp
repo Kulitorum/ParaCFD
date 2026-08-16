@@ -5,7 +5,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace windcfd::io
+namespace paracfd::io
 {
 	namespace
 	{

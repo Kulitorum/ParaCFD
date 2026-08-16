@@ -11,7 +11,7 @@
 
 #include <memory>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	struct StamParams
 	{

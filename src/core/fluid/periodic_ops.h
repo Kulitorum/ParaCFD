@@ -8,7 +8,7 @@
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Mixing-length eddy viscosity at cell centres: ν_t = l²·|dU/dz|,
 	// l = κ·z·√(1−z/Lz), z = (k+0.5)·h, |dU/dz| = |d/dz √(u_c²+v_c²)| via the horizontal

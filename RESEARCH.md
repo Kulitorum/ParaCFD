@@ -1,7 +1,7 @@
-# RESEARCH.md — Physics & Numerics Specification for WindCFD
+# RESEARCH.md — Physics & Numerics Specification for ParaCFD
 
-This is the single authoritative physics/numerics spec for **WindCFD**, a GPU (CUDA) 3D
-incompressible-flow LES solver (`namespace windcfd::core`). Every model below is grounded in the
+This is the single authoritative physics/numerics spec for **ParaCFD**, a GPU (CUDA) 3D
+incompressible-flow LES solver (`namespace paracfd::core`). Every model below is grounded in the
 solver that actually exists in `src/core/fluid/`, `src/core/geometry/` and `src/core/windloads.*`.
 The wind-load extraction and the printed-building geometry pipeline are now **implemented** (§6, §7);
 the remaining physics work (time-averaging the loads, an ABL design inflow) is called out in a
@@ -10,7 +10,7 @@ clearly-labelled section (§7.6, §9). Where a value is quoted, use it exactly a
 §10).
 
 **Product context.** COBOD 3D-prints concrete buildings. Because a printer lays down curved and
-straight walls at the same cost, a building's corners can be **sharp or rounded** at will. WindCFD
+straight walls at the same cost, a building's corners can be **sharp or rounded** at will. ParaCFD
 quantifies how **wind** flows around such buildings in an **atmospheric boundary layer (ABL)** and
 what **wind loads** it imposes on the façade and roof, so that **rounded vs sharp corner** designs
 can be compared on drag, roof uplift, and peak cladding suctions. This is bluff-body building
@@ -33,7 +33,7 @@ aerodynamics in air — not water, not sediment.
 field and integrate it into the engineering wind loads (§7), then rank **sharp-cornered vs
 rounded-cornered** variants of the same building under identical inflow. Rounding corners is expected
 to delay/soften separation, narrow the wake, and cut both mean drag and the peak roof-edge suctions
-that govern cladding design — WindCFD is the tool that measures that difference.
+that govern cladding design — ParaCFD is the tool that measures that difference.
 
 **Fluid = air.** All physics is for air at roughly sea-level, ~15 °C:
 
@@ -224,7 +224,7 @@ drag on the face-normal velocity before projection.
 
 ## 6. Geometry pipeline (printed centerline → footprint → voxel mask)
 
-WindCFD does **not** need a watertight CAD solid — the flow sees only the solid/fluid cell mask. So
+ParaCFD does **not** need a watertight CAD solid — the flow sees only the solid/fluid cell mask. So
 for a 3D-printed building the geometry pipeline works directly from the **wall centerline** the printer
 follows, thickening it into a solid mask by a distance test. This is inherently **leak-proof** (no
 thin-wall gaps a ray-parity voxelizer could tunnel through) and makes the **corner style a first-class
@@ -233,7 +233,7 @@ parameter** — exactly the rounded-vs-sharp knob the project exists to study.
 1. **STEP import** (`step_import.*`). OpenCascade reads the printed **centerline** STEP (vertical wall
    surface *ribbons* — the swept toolpath, not a closed solid), native millimetres, and triangulates
    it to a Qt-free `TriMesh` in **metres** (BRepMesh linear deflection ~0.1 mm default). OCC is
-   isolated in the `windcfd_geometry` static lib so the solver and `windloads.*` stay OCC-free.
+   isolated in the `paracfd_geometry` static lib so the solver and `windloads.*` stay OCC-free.
 2. **Placement** (`model_placement.h`). A single shared affine transform positions the mesh; the
    viewer and the geometry stage use the **same** transform so the solid mask lands exactly where the
    building is drawn. `center_footprint` provides the simple "drop it in the middle of the wind
@@ -280,7 +280,7 @@ surface physics** (§9).
 The solver integrates the engineering wind loads directly from the pressure field over the voxelized
 building. The building is the solid-cell mask of §6; its surface is the set of **exposed voxel faces**
 — faces between a solid cell and a fluid neighbour (the 6-neighbour test in `compute_wind_loads`).
-The whole module is host-only and OCC-free (in `libwindcfd`); wind is assumed along **+x** (the inlet).
+The whole module is host-only and OCC-free (in `libparacfd`); wind is assumed along **+x** (the inlet).
 
 **7.1 Surface pressure (exposed-face integration).** For each exposed face the **surface pressure is
 taken as the adjacent fluid cell's pressure** (cell-centred, physical Pa). The **reference pressure
@@ -334,7 +334,7 @@ recovers the full dynamic pressure), **Cd ≈ 1.2** (blunt bluff-body drag), and
   ABL profile (log-law **and** power-law mean + matched turbulence-intensity/length-scale by terrain
   category) so loads correspond to a code-defined wind climate rather than a uniform stream.
 - **Internal pressure** for roof uplift (a GCpi-type sealed vs dominant-opening assumption) is a
-  parameter still to add — WindCFD resolves only the external flow.
+  parameter still to add — ParaCFD resolves only the external flow.
 
 ---
 

@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <limits>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

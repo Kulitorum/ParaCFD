@@ -1,10 +1,10 @@
-# CLAUDE.md — WindCFD
+# CLAUDE.md — ParaCFD
 
 GPU (CUDA) 3D incompressible-flow **LES CFD** tool (C++/CUDA + Qt6) for **wind around
-3D-printed concrete buildings**. Owner: MH (COBOD). Namespace `windcfd::core` (core) /
-`windcfd::gui` (GUI).
+3D-printed concrete buildings**. Owner: MH (COBOD). Namespace `paracfd::core` (core) /
+`paracfd::gui` (GUI).
 
-## What WindCFD is for
+## What ParaCFD is for
 
 Quantify how **wind** flows around a 3D-printed concrete building and the resulting wind
 **loads on the facade and roof** — a bluff body in an atmospheric boundary layer (ABL). The
@@ -25,10 +25,10 @@ an unsettled flow; inflow is uniform, not ABL).
 ## Architecture / module map
 
 Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Three link
-"islands": `libwindcfd` (pure CUDA+C++), `windcfd_geometry` (the only OCC target),
-`windcfd_gui_cuda` (the only CUDA-GL-header target); `windcfd-gui` ties them to Qt.
+"islands": `libparacfd` (pure CUDA+C++), `paracfd_geometry` (the only OCC target),
+`paracfd_gui_cuda` (the only CUDA-GL-header target); `paracfd-gui` ties them to Qt.
 
-### `libwindcfd` — the solver core (no Qt, no OCC, no GL)
+### `libparacfd` — the solver core (no Qt, no OCC, no GL)
 - **Graded structured grid** (`src/core/fluid/grid_metrics.{h,cpp}`): `MacGrid` (`mac_grid.h`) carries
   nullable per-axis metric arrays (cell widths + centres + cumulative face coords) with accessors that
   fall back to the exact uniform `h` when null (uniform = byte-identical). `FineCoreSpec` +
@@ -100,7 +100,7 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
     runs it on Build/Apply, gated by the **"Fill sealed interior"** dock checkbox (default **on**);
     only GENUINELY sealed voids fill (an open/leaky/tunnel structure stays fluid). A watertight loaded
     STEP is already interior-filled by `voxelize_mesh`'s ray parity, so the fill is a no-op there.
-  - **`tools/building_probe`** (dev CLI, `windcfd_geometry`-linked) — load a centerline STEP →
+  - **`tools/building_probe`** (dev CLI, `paracfd_geometry`-linked) — load a centerline STEP →
     section → voxelize headlessly and print stats, to verify the pipeline before the GUI.
 - **Wind loads** (`src/core/windloads.{h,cpp}`) — integrate the **pressure** load on the
   voxelized building. `compute_wind_loads(p, solid, g, prm, out_cell_cp)` walks the exposed
@@ -125,23 +125,23 @@ Layering is deliberate so the physics core stays free of GL/Qt/OpenCascade. Thre
   `src/3rdparty/nlohmann/json.hpp`; **air defaults** ρ=1.225, ν=1.5e-5, `d50` retained only as a
   wall-roughness length), `vti_writer.cpp`/`vti_reader.cpp` (VTI fields), `cuda_probe.cu`.
 
-### `windcfd_geometry` — STEP import (the ONLY OpenCascade target)
+### `paracfd_geometry` — STEP import (the ONLY OpenCascade target)
 `src/core/geometry/step_import.{h,cpp}`. `step_import.h` is OCC-free (returns a `TriMesh`); all
-OCC includes live in the `.cpp`. Mirrors how `windcfd_gui_cuda` isolates GL — so `libwindcfd`
+OCC includes live in the `.cpp`. Mirrors how `paracfd_gui_cuda` isolates GL — so `libparacfd`
 and all tests stay OCC-free. STEP traps handled in the `.cpp`: (a) OCC emits **millimetres** →
 ×0.001 to metres; (b) reversed-face **winding** fix for outward normals; (c) area-weighted
 per-vertex normals.
 
-### `windcfd_gui_cuda` — CUDA-GL interop (the ONLY CUDA target that sees GL headers)
+### `paracfd_gui_cuda` — CUDA-GL interop (the ONLY CUDA target that sees GL headers)
 `src/gui/slice_field.cu` (pure sampler + colourmap kernel with a `__host__ __device__`
 evaluator → exact GPU-vs-CPU parity, no GL needed) + `slice_gl.cu` (the only GL-header TU:
 `cudaGraphicsGLRegisterBuffer`, zero-copy writes into the registered colour VBO, on its own
 non-blocking stream). Kept Qt-free so nvcc never sees Qt host flags.
 
-### `windcfd-gui` — Qt6 + OpenGL 4.3 slice viewer
+### `paracfd-gui` — Qt6 + OpenGL 4.3 slice viewer
 `src/gui/`: `main.cpp` (sets the GL 4.3 `QSurfaceFormat` before `QApplication`; CLI parsing),
 `camera.h` (orbit/pan/zoom), `slice_viewer.{h,cpp}` (`QOpenGLWidget` — **all GL on the main
-thread**, guarded by `WINDCFD_ASSERT_GL_THREAD()`; slice plane, model mesh, voxel staircase
+thread**, guarded by `PARACFD_ASSERT_GL_THREAD()`; slice plane, model mesh, voxel staircase
 overlay (Cp-coloured), flow arrows, clip plane, placement gizmo, legend, axis triad),
 `main_window.{h,cpp}` (the dock UI: building workflow, gizmo + placement undo/redo, Start gate,
 wind-load readout), `sim_worker.{h,cpp}` (steps the `ChannelFluidCore` on a QThread, **no GL**,
@@ -157,7 +157,7 @@ after a scene load** instead of "no centerline loaded"),
 `flow_particles.{h,cpp}` / `flow_tracers.{h,cpp}` (Qt-free CPU tracer field drawn as an
 instanced GL arrow glyph), `video_recorder.{h,cpp}` + `video_settings_dialog.{h,cpp}`
 (fixed-cadence frame capture), `colormap.h` (the one shared colour ramp), `gl_thread_check.h`,
-`main_stub.cpp` (`-DWINDCFD_ENABLE_QT=OFF` fallback for Qt-less hosts).
+`main_stub.cpp` (`-DPARACFD_ENABLE_QT=OFF` fallback for Qt-less hosts).
 
 GUI features:
 - **Building workflow** (the primary path): File → **Open centerline STEP…** or
@@ -203,20 +203,20 @@ VS-bundled Ninja** on PATH first (the VS 2022 x64 dev prompt does both), then:
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
-cmake --build build --target windcfd-gui
+cmake --build build --target paracfd-gui
 ```
 
-- **Targets**: `libwindcfd` (core), `windcfd_geometry` (OCC STEP import), `windcfd_gui_cuda`
-  (CUDA-GL interop), `windcfd-gui` (the app), `building_probe` (dev CLI: centerline → mask),
+- **Targets**: `libparacfd` (core), `paracfd_geometry` (OCC STEP import), `paracfd_gui_cuda`
+  (CUDA-GL interop), `paracfd-gui` (the app), `building_probe` (dev CLI: centerline → mask),
   `parity_probe` (the GPU-vs-CPU + golden parity oracle; `ctest -R parity` / `./build/parity_probe.exe`).
 - **Dependencies**: CUDA 13.1, Qt 6.11.1 (`C:/Qt/6.11.1/msvc2022_64`, auto-detected via glob),
   OpenCascade 8.0 (`C:/OpenCASCADE-8.0/build2`).
 - `CMAKE_CUDA_ARCHITECTURES=89` builds only for this Ada RTX 4090 (fast). The CMake default
   (`75;86;89`) is a multi-arch shipping build (~triples device-code compile time).
-- **libwindcfd carries `${CUDAToolkit_INCLUDE_DIRS}` PUBLIC** so MSVC-compiled `.cpp` TUs find
+- **libparacfd carries `${CUDAToolkit_INCLUDE_DIRS}` PUBLIC** so MSVC-compiled `.cpp` TUs find
   `cuda_runtime.h` (nvcc adds it implicitly for `.cu`, MSVC does not). Don't drop this.
 - **DLL deployment**: a CMake POST_BUILD copies the Qt runtime (`windeployqt`) **and** the
-  OpenCascade DLL closure next to `windcfd-gui.exe`, so it is double-clickable with no Qt/OCC on
+  OpenCascade DLL closure next to `paracfd-gui.exe`, so it is double-clickable with no Qt/OCC on
   PATH. A missing OCC DLL (e.g. `freetype`) = `0xC0000135` at startup with no output.
 - ⚠ MSVC 14.44 `CL.exe` occasionally crashes mid-compile on an AUTOMOC TU (`-1073741819` /
   0xC0000005). Transient — just re-run the build.
@@ -224,9 +224,9 @@ cmake --build build --target windcfd-gui
 ## Run
 
 ```
-build/windcfd-gui.exe --config configs/building.json                                     # windowed building sim
-build/windcfd-gui.exe --load-centerline house.stp                                        # loads configs/building.json
-build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms 5000    # headless (solver only)
+build/paracfd-gui.exe --config configs/building.json                                     # windowed building sim
+build/paracfd-gui.exe --load-centerline house.stp                                        # loads configs/building.json
+build/paracfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms 5000    # headless (solver only)
 ```
 - **Interactive building workflow**: load a centerline (`--load-centerline` / File ▸ Open
   centerline STEP…) → **gizmo place** it (translate/rotate/scale, undoable) → set the **domain
@@ -258,12 +258,12 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
   voxelizer world→index, and scene round-trip). Run: `ctest --test-dir build -R parity` or
   `./build/parity_probe.exe`. Build it via the VS dev env (see Build). Preserve the `_cpu` twins and
   keep this green across any solver change.
-- **Layering**: `libwindcfd` stays Qt-free, OCC-free and GL-free. OpenCascade lives only in
-  `windcfd_geometry`; GL headers only in `windcfd_gui_cuda`'s `slice_gl.cu`. Keep new OCC/GL
+- **Layering**: `libparacfd` stays Qt-free, OCC-free and GL-free. OpenCascade lives only in
+  `paracfd_geometry`; GL headers only in `paracfd_gui_cuda`'s `slice_gl.cu`. Keep new OCC/GL
   code inside those islands. (`building.*` and `windloads.*` are host-only + OCC-free.)
 - **GL thread rule**: all OpenGL runs on the **main thread**; the solver runs on a worker
   QThread with no GL; hand-off is via queued Qt signals. Every viewer GL entry point asserts
-  `WINDCFD_ASSERT_GL_THREAD()`.
+  `PARACFD_ASSERT_GL_THREAD()`.
 - **Rendering is decoupled from stepping** (this is what holds ~60 fps): `step()` runs lock-free
   on the worker, which then copies {u,v,w,p} into device snapshot buffers under
   `display_mutex()`; the main-thread slice kernel reads only those snapshots, on the interop's
@@ -374,8 +374,8 @@ build/windcfd-gui.exe --config configs/g1_viewer.json --offscreen --autoclose-ms
 
 ## History
 
-WindCFD is forked from a former marine/sediment simulator; all of that sediment, seabed and bed
+ParaCFD is forked from a former marine/sediment simulator; all of that sediment, seabed and bed
 -evolution simulation has been removed (`src/core/` now holds only `fluid` + `geometry`, and the
 build no longer compiles any sediment sources). Companion docs — `RESEARCH.md` (physics &
 numerics spec), `PLAN.md` (roadmap, milestones W1–W8), `HANDOVER.md` (current status) — were all
-retargeted to WindCFD alongside this file.
+retargeted to ParaCFD alongside this file.

@@ -7,7 +7,7 @@
 
 #include <cmath>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

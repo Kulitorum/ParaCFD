@@ -42,7 +42,7 @@
 #include <sstream>
 #include <utility>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

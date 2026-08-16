@@ -1,13 +1,13 @@
-# HANDOVER.md — WindCFD current status (2026-07-11)
+# HANDOVER.md — ParaCFD current status (2026-07-11)
 
 This is a fresh-session pick-up doc. It reflects the code as it stands now: the building
 pipeline and wind-load extraction that earlier handovers listed as "planned" are
 **implemented and working**. Skim `CLAUDE.md` for the module map; this file is the
 current-state snapshot and the next-steps list.
 
-## 1. What WindCFD is + the goal
-WindCFD is a GPU (CUDA) 3D incompressible-flow **LES** CFD tool (`C:/CODE/WindCFD`,
-C++/CUDA + Qt6, namespace `windcfd::core` / `windcfd::gui`). The fluid is **air/wind**
+## 1. What ParaCFD is + the goal
+ParaCFD is a GPU (CUDA) 3D incompressible-flow **LES** CFD tool (`C:/CODE/ParaCFD`,
+C++/CUDA + Qt6, namespace `paracfd::core` / `paracfd::gui`). The fluid is **air/wind**
 (ρ ≈ 1.225 kg/m³, ν ≈ 1.5e-5 m²/s). A CAD building is voxelized into a solid obstacle,
 the LES solver develops the flow around it, and the Qt/OpenGL viewer shows live
 velocity/pressure slices, flow arrows and the model.
@@ -24,8 +24,8 @@ roof** — a bluff body in an atmospheric boundary layer (ABL).
 - **No default obstacle.** The old procedural solid-cylinder obstacle was **deleted** — a
   run now starts as an **empty channel**; obstacles come only from a loaded building
   centerline or STEP model.
-- **Building pipeline** (`src/core/geometry/building.{h,cpp}`, OCC-free, in `libwindcfd`):
-  a 3D-printing **CENTERLINE** STEP is loaded via `windcfd_geometry`'s `step_import` into a
+- **Building pipeline** (`src/core/geometry/building.{h,cpp}`, OCC-free, in `libparacfd`):
+  a 3D-printing **CENTERLINE** STEP is loaded via `paracfd_geometry`'s `step_import` into a
   `TriMesh` of the vertical wall surface ribbons, then:
   - horizontally sectioned (`mesh_horizontal_section`) into **2D footprint loops**;
   - voxelized **directly** (`voxelize_building`) — no watertight solid: a cell is solid when
@@ -42,7 +42,7 @@ roof** — a bluff body in an atmospheric boundary layer (ABL).
     to the mesh **before** section+voxelize, so the building is built where it is placed.
   - Dev tool `tools/building_probe.cpp` (CMake target `building_probe`) exercises
     centerline-STEP → building-solid headlessly.
-- **Wind loads** (`src/core/windloads.{h,cpp}`, host-only, OCC-free, in `libwindcfd`):
+- **Wind loads** (`src/core/windloads.{h,cpp}`, host-only, OCC-free, in `libparacfd`):
   `compute_wind_loads()` integrates the CFD **pressure** over the building's exposed voxel
   faces (solid↔fluid) → forces `Fx/Fy/Fz` and moments about the centroid, and coefficients
   **Cd** (drag +x), **Cs** (side +y), **Cl** (uplift +z) via projected frontal/plan
@@ -50,7 +50,7 @@ roof** — a bluff body in an atmospheric boundary layer (ABL).
   `p_ref` is the **upstream inlet-slab mean** (freestream). Per-cell surface **Cp** is
   returned for visualisation, `Cp = (p − p_ref)/(½ρU²)`. Validated headless on a test house:
   windward stagnation **Cp ≈ 1.0**, **Cd ≈ 1.2**, **Cs ≈ 0**.
-- **GUI** (`windcfd-gui`):
+- **GUI** (`paracfd-gui`):
   - File ▸ **"Open centerline STEP…"** and the `--load-centerline <path>` CLI flag.
   - A **"Building (centerline → solid)"** dock group: wall thickness, wall height, corner
     radius (0 = sharp), roof overhang, roof thickness, and a **Build** button.
@@ -99,7 +99,7 @@ OpenCascade 8.0 (`C:/OpenCASCADE-8.0/build2`). Put the VS 2022 `vcvars64` enviro
 the VS-bundled Ninja** on PATH first (the VS 2022 x64 dev prompt does both), then:
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
-cmake --build build --target windcfd-gui
+cmake --build build --target paracfd-gui
 ```
 `-DCMAKE_CUDA_ARCHITECTURES=89` is the fast single-arch (Ada RTX 4090) dev build; the CMake
 default `75;86;89` is the multi-arch shipping build (~3× device-code compile time). A
@@ -107,18 +107,18 @@ POST_BUILD step deploys the Qt (`windeployqt`) and OpenCascade DLL closures next
 so it is double-clickable. If `CL.exe` crashes mid-AUTOMOC (`-1073741819`), just re-run — it
 is transient.
 
-Targets: `libwindcfd` (core, incl. `windloads.cpp` + `building.cpp`), `windcfd_geometry`
-(the only OCC target — STEP import), `windcfd_gui_cuda` (the only CUDA-GL target),
-`windcfd-gui` (the Qt app), and `building_probe` (dev tool).
+Targets: `libparacfd` (core, incl. `windloads.cpp` + `building.cpp`), `paracfd_geometry`
+(the only OCC target — STEP import), `paracfd_gui_cuda` (the only CUDA-GL target),
+`paracfd-gui` (the Qt app), and `building_probe` (dev tool).
 
 Run (windowed):
 ```
-build/windcfd-gui.exe --config configs/building.json
-build/windcfd-gui.exe --load-centerline <path-to-centerline.step>   # auto-picks configs/building.json
+build/paracfd-gui.exe --config configs/building.json
+build/paracfd-gui.exe --load-centerline <path-to-centerline.step>   # auto-picks configs/building.json
 ```
 Run (headless smoke — solver steps, exits clean):
 ```
-build/windcfd-gui.exe --config configs/building.json --offscreen --autoclose-ms 5000
+build/paracfd-gui.exe --config configs/building.json --offscreen --autoclose-ms 5000
 ```
 `--offscreen` has **no GL context**, so it **renders 0 frames** but **does step the CUDA
 solver** (and auto-starts the run), exiting 0 after N ms. Use it for CI / solver debugging,

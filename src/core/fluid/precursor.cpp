@@ -7,7 +7,7 @@
 
 #include <cmath>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	PrecursorLibrary::PrecursorLibrary(MacGrid g, double record_hz) : g_(g)
 	{

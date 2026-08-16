@@ -21,11 +21,11 @@
 #include <cmath>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Linearized-implicit quadratic (Forchheimer) drag on one face-normal velocity component.
 	// kface = screen resistance k = 1/β²−1 (≥0); h = cell size; returns the decelerated component.
-	WINDCFD_HD inline double porous_face_drag(double uc, double kface, double dt, double h)
+	PARACFD_HD inline double porous_face_drag(double uc, double kface, double dt, double h)
 	{
 		if (kface <= 0.0 || h <= 0.0) return uc;
 		double denom = 1.0 + dt * 0.5 * kface * fabs(uc) / h;

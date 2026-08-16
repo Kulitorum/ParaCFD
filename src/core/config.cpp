@@ -10,7 +10,7 @@
 #include <string>
 #include <set>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	using nlohmann::json;
 

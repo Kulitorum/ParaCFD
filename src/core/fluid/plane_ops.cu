@@ -3,7 +3,7 @@
 
 #include <cuda_runtime.h>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

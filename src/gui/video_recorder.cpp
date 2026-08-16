@@ -10,7 +10,7 @@
 
 #include <cstdio>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	VideoRecorder::VideoRecorder() = default;
 	VideoRecorder::~VideoRecorder() { finish(); }
@@ -18,7 +18,7 @@ namespace windcfd::gui
 	QString VideoRecorder::findFfmpeg()
 	{
 		// 1) explicit override.
-		const QByteArray env = qgetenv("WINDCFD_FFMPEG");
+		const QByteArray env = qgetenv("PARACFD_FFMPEG");
 		if (!env.isEmpty())
 		{
 			const QString p = QString::fromLocal8Bit(env);
@@ -46,7 +46,7 @@ namespace windcfd::gui
 		ffmpeg_ = findFfmpeg();
 		if (ffmpeg_.isEmpty())
 		{
-			std::fprintf(stderr, "[video] ffmpeg not found (set WINDCFD_FFMPEG, or put ffmpeg on PATH); recording disabled\n");
+			std::fprintf(stderr, "[video] ffmpeg not found (set PARACFD_FFMPEG, or put ffmpeg on PATH); recording disabled\n");
 			return false;
 		}
 		path_ = path;

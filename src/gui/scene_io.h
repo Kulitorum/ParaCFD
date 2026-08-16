@@ -33,17 +33,17 @@
 #include <string>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// The live DYNAMIC state at a saved step, gathered from the core on the worker thread.
 	// Field arrays are host DOUBLE here (as read from the device); the writer downcasts the big ones.
 	struct CheckpointState
 	{
-		windcfd::core::MacGrid grid;
+		paracfd::core::MacGrid grid;
 		long long steps = 0;
 		double sim_time = 0.0;
-		windcfd::core::ChannelBC bc;                     // live inlet speed/profile at save time
-		int solid_mode = windcfd::core::SOLID_NOSLIP;    // interior-obstacle surface mode (= bc.solid_mode)
+		paracfd::core::ChannelBC bc;                     // live inlet speed/profile at save time
+		int solid_mode = paracfd::core::SOLID_NOSLIP;    // interior-obstacle surface mode (= bc.solid_mode)
 		bool bed_inlet_mask = false;
 
 		std::vector<double> u, v, w, p;                // MAC face velocities + cell pressure
@@ -63,8 +63,8 @@ namespace windcfd::gui
 	{
 		SimRecipe recipe;                              // grid, bc, pr, base_solid, init, provenance, info
 		bool has_mesh = false;                           // true ⇒ `mesh` holds a triangulation (in memory)
-		windcfd::core::TriMesh mesh;                     // display/voxelize mesh (metres); derived from step_data
-		windcfd::core::ModelPlacement place;             // where the mesh sits (display translate)
+		paracfd::core::TriMesh mesh;                     // display/voxelize mesh (metres); derived from step_data
+		paracfd::core::ModelPlacement place;             // where the mesh sits (display translate)
 		bool mesh_is_centerline = false;                 // true ⇒ model is a building CENTERLINE (Build re-voxelizes
 		                                                 // it via the centerline→solid pipeline), false ⇒ plain
 		                                                 // STEP-as-mesh obstacle. Absent in pre-flag scenes ⇒ false.

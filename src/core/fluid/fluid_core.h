@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Host-side snapshot of the MAC fields (for validation/IO). Face-staggered.
 	struct FluidSnapshot

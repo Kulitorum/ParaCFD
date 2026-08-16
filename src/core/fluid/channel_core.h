@@ -13,7 +13,7 @@
 #include <memory>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	struct ChannelParams
 	{

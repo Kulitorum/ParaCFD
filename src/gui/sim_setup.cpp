@@ -10,9 +10,9 @@
 #include <fstream>
 #include <sstream>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
-	using namespace windcfd::core;
+	using namespace paracfd::core;
 
 	namespace
 	{

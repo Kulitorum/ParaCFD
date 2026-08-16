@@ -1,7 +1,7 @@
 // voxelize.h — watertight ray-parity voxelizer: a loaded STEP TriMesh → a solid-cell mask
 // on the MAC grid, so the live flow diverts around the printed obstacle (PLAN §3).
 //
-// OCC-free (lives in libwindcfd): it needs only the mesh geometry, never OpenCascade. The mesh
+// OCC-free (lives in libparacfd): it needs only the mesh geometry, never OpenCascade. The mesh
 // is placed with the SHARED core/geometry/model_placement.h transform, so the mask lands
 // exactly where the viewer draws the model.
 //
@@ -28,7 +28,7 @@
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Voxelize `mesh` (placed by `place`) onto grid `g`. Returns the 1=solid/0=fluid cell mask
 	// (size g.p_count(), indexed g.pidx). Optional outputs:

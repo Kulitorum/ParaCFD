@@ -30,9 +30,9 @@ class QPushButton;
 class QThread;
 class QTimer;
 
-namespace windcfd::core { class ChannelFluidCore; }
+namespace paracfd::core { class ChannelFluidCore; }
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	class SliceViewer;
 	class VideoRecorder;
@@ -44,7 +44,7 @@ namespace windcfd::gui
 	public:
 		// Takes ownership of the initial core; `recipe` carries its domain (recipe.info) for the
 		// viewer AND the ingredients to rebuild the core when a model is (de)injected as obstacle.
-		MainWindow(std::unique_ptr<windcfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
+		MainWindow(std::unique_ptr<paracfd::core::ChannelFluidCore> core, const SimRecipe& recipe,
 			QWidget* parent = nullptr);
 		~MainWindow() override;
 
@@ -73,12 +73,12 @@ namespace windcfd::gui
 
 		// Latest wind loads sampled at shutdown (valid only if a building was present). For the headless
 		// exit-log assertion in main().
-		const windcfd::core::WindLoads& lastLoads() const { return last_loads_; }
+		const paracfd::core::WindLoads& lastLoads() const { return last_loads_; }
 		bool lastLoadsValid() const { return last_loads_valid_; }
 
 		// Latest converged time-averaged loads captured at shutdown (valid only if averaging collected >=1
 		// sample). For the headless `--average-now` exit-log in main().
-		const windcfd::core::WindLoadStats& lastAvgStats() const { return last_avg_stats_; }
+		const paracfd::core::WindLoadStats& lastAvgStats() const { return last_avg_stats_; }
 		bool lastAvgStatsValid() const { return last_avg_valid_; }
 
 		// Programmatically start (or schedule) converged load averaging, exactly as the "Start averaging" /
@@ -169,7 +169,7 @@ namespace windcfd::gui
 
 		void shutdownWorker();
 		// `steps0`/`t0` prime the worker's counters (a scene restore resumes from the saved step).
-		void spawnWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core,
+		void spawnWorker(std::unique_ptr<paracfd::core::ChannelFluidCore> core,
 			long long steps0 = 0, double t0 = 0.0);
 
 		// --- Scene save / restore internals ------------------------------------------------------
@@ -178,14 +178,14 @@ namespace windcfd::gui
 		void restoreScene(SceneFile& sf); // tear down + rebuild core + inject the saved state
 		// Worker → main-thread hand-off: write the gathered state to disk. tag<0 = manual save (→ Recent
 		// Files), tag>=0 = an auto-save at that step (→ <base>.<step>.scn, not Recent).
-		void onCheckpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag);
+		void onCheckpointReady(paracfd::gui::CheckpointStatePtr state, qint64 tag);
 		QString scene_base_path_;          // stem (no extension) of the current scene, for the auto-save series
 		QString pending_manual_save_path_; // destination of an in-flight manual "Save Scene As"
 		QString pending_recent_keep_;      // a just-saved scene optimistically in Recent Files before its
 		                                   // async write lands — rebuildRecentMenu keeps it from being pruned
 		int autosave_interval_ = 0;        // auto-save cadence in steps (0 = off); re-applied on each spawnWorker
-		windcfd::core::TriMesh scene_mesh_;  // display mesh persisted into a saved scene (obstacle model)
-		windcfd::core::ModelPlacement scene_place_{}; // its display placement
+		paracfd::core::TriMesh scene_mesh_;  // display mesh persisted into a saved scene (obstacle model)
+		paracfd::core::ModelPlacement scene_place_{}; // its display placement
 		// Stop + join + delete the worker (and its thread) so a fresh core can replace it. Shared by the
 		// grid Apply and scene restore (both fully rebuild the sim). No-op if none.
 		void teardownWorkerForReload();
@@ -276,7 +276,7 @@ namespace windcfd::gui
 		long long max_cells_cache_ = 0; // 0 = not computed yet
 		double vram_total_gb_ = 0.0;    // total device VRAM [GB] for the grid readout (0 = unknown)
 
-		// Recent-files (feature 1): persisted via QSettings("COBOD","WindCFD"). The submenu is
+		// Recent-files (feature 1): persisted via QSettings("COBOD","ParaCFD"). The submenu is
 		// rebuilt on demand (pruning files that no longer exist), MRU-first, capped at kMaxRecent.
 		void addRecentFile(const QString& path);
 		void rebuildRecentMenu();
@@ -310,12 +310,12 @@ namespace windcfd::gui
 		QLabel* status_ = nullptr;
 		QLabel* fps_label_ = nullptr;
 		SimRecipe recipe_;
-		windcfd::core::TriMesh model_mesh_; // CPU copy of the loaded model (for voxelization)
+		paracfd::core::TriMesh model_mesh_; // CPU copy of the loaded model (for voxelization)
 
 		// --- Building (centerline STEP → thickened walls + flat roof solid) ----------------------
 		// Stored centerline surface + the dock's wall/roof params, so Build can re-voxelize + re-inject
 		// the building without reloading the STEP. Distinct from model_mesh_ (the STEP-as-mesh obstacle).
-		windcfd::core::TriMesh centerline_mesh_; // stored centerline (empty until a centerline is loaded)
+		paracfd::core::TriMesh centerline_mesh_; // stored centerline (empty until a centerline is loaded)
 		bool centerline_noslip_ = false;         // surface mode for the injected building solid
 
 		// The loaded model's SOURCE STEP bytes (the source of truth). The triangulated meshes above are
@@ -349,9 +349,9 @@ namespace windcfd::gui
 		bool model_injected_ = false;
 		bool worker_down_ = false;
 		DiversionReport diversion_;
-		windcfd::core::WindLoads last_loads_{}; // wind loads captured at shutdown (headless exit-log)
+		paracfd::core::WindLoads last_loads_{}; // wind loads captured at shutdown (headless exit-log)
 		bool last_loads_valid_ = false;
-		windcfd::core::WindLoadStats last_avg_stats_{}; // time-averaged loads captured at shutdown (--average-now)
+		paracfd::core::WindLoadStats last_avg_stats_{}; // time-averaged loads captured at shutdown (--average-now)
 		bool last_avg_valid_ = false;
 		long long last_steps_ = 0;
 		double last_sim_time_ = 0.0;

@@ -26,7 +26,7 @@
 #include <mutex>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// Flow-diversion metrics sampled from a settled voxelized-obstacle run (headless assertions
 	// for the --voxelize smoke path). Computed AFTER the worker thread has joined, so touching
@@ -44,7 +44,7 @@ namespace windcfd::gui
 	{
 		Q_OBJECT
 	public:
-		explicit SimWorker(std::unique_ptr<windcfd::core::ChannelFluidCore> core, QObject* parent = nullptr)
+		explicit SimWorker(std::unique_ptr<paracfd::core::ChannelFluidCore> core, QObject* parent = nullptr)
 			: QObject(parent), core_(std::move(core)) {}
 		~SimWorker() override;
 
@@ -62,7 +62,7 @@ namespace windcfd::gui
 		// disp_mtx_ — NOT the live core_ (which the worker frees + rebuilds off-thread; reading core_->grid()
 		// from paintGL raced that swap → dangling device grid → CUDA IMA). Call under display_mutex(), like
 		// the disp_* pointers it pairs with.
-		windcfd::core::MacGrid displayGrid() const { return disp_grid_; }
+		paracfd::core::MacGrid displayGrid() const { return disp_grid_; }
 
 		bool playing() const { return playing_.load(); }
 		// Master run gate ("hold until Start Simulation"): the worker steps NOTHING until started, so the
@@ -80,7 +80,7 @@ namespace windcfd::gui
 		// geometry only then — never a per-frame mask copy. copyMask() (main thread) returns the
 		// latest mask + its grid, or false if none.
 		std::uint64_t maskGeneration() const { return mask_gen_.load(); }
-		bool copyMask(std::vector<unsigned char>& mask, windcfd::core::MacGrid& grid);
+		bool copyMask(std::vector<unsigned char>& mask, paracfd::core::MacGrid& grid);
 
 		// --- Live wind-load readout (M-loads) ----------------------------------------------------
 		// When a building/obstacle is present (solid_cells>0) the worker integrates the pressure field
@@ -93,12 +93,12 @@ namespace windcfd::gui
 		std::uint64_t loadGeneration() const { return loads_gen_.load(); }
 		bool hasLoads() const { return loads_valid_.load(); }
 		// Cheap: copies just the INSTANTANEOUS WindLoads struct (for the ~60 Hz GUI readout). False if none.
-		bool latestLoads(windcfd::core::WindLoads& out) const;
+		bool latestLoads(paracfd::core::WindLoads& out) const;
 		// The per-cell Cp field + symmetric colour range [lo,hi] the building overlay should show: the
 		// TIME-AVERAGED Cp while an averaging window is active (Collecting/Stopped), otherwise the live
 		// instantaneous Cp. Keyed on loadGeneration() (bumps each publish) — call only when it changes, not
 		// per-frame (copies g.p_count() floats). Returns false if no Cp has been integrated yet.
-		bool copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, windcfd::core::MacGrid& grid) const;
+		bool copyDisplayCp(std::vector<float>& cell_cp, float& lo, float& hi, paracfd::core::MacGrid& grid) const;
 
 		// --- Converged, time-averaged loads (M-loads §7.6) ---------------------------------------
 		// The live Cd/Cl/Cs/Cp above are INSTANTANEOUS values off an unsettled, turbulent flow — one random
@@ -116,18 +116,18 @@ namespace windcfd::gui
 		double avgCountdownSeconds() const { return avg_countdown_.load(); } // wall secs until a scheduled start
 		// Latest averaged statistics (valid once collecting has folded >=1 sample; frozen after Stop). Cheap
 		// (copies the small struct). Returns false while Idle/Pending or before the first sample.
-		bool latestAvgStats(windcfd::core::WindLoadStats& out) const;
+		bool latestAvgStats(paracfd::core::WindLoadStats& out) const;
 
 		// Factory that rebuilds the core with a given obstacle mask + surface mode. Set once
 		// (captures the immutable SimRecipe). Invoked ONLY on the worker thread by run().
-		void setRebuildFactory(std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(
+		void setRebuildFactory(std::function<std::unique_ptr<paracfd::core::ChannelFluidCore>(
 			const std::vector<unsigned char>&, int)> f) { factory_ = std::move(f); }
 
 		// Graded fine-core metrics (shared with the recipe; null ⇒ uniform grid). Lets the worker's
 		// HOST-side consumers (wind loads, the grids published to the viewer) use a HOST-view MacGrid
 		// instead of the core's DEVICE view (whose metric pointers would crash a host dereference). Set
 		// at spawn and after an Apply re-grid; a plain obstacle re-inject keeps the same metrics.
-		void setMetrics(std::shared_ptr<windcfd::core::GridMetrics> m) { metrics_ = std::move(m); }
+		void setMetrics(std::shared_ptr<paracfd::core::GridMetrics> m) { metrics_ = std::move(m); }
 
 		// Queue a core rebuild with a new obstacle mask (thread-safe from the main thread). The
 		// worker picks it up at the top of its next loop iteration and rebuilds ON ITS THREAD —
@@ -217,7 +217,7 @@ namespace windcfd::gui
 		// A checkpoint was gathered on the worker thread (queued → the GUI writes it to disk on the main
 		// thread). `tag` < 0 = manual save; >= 0 = the step count of an auto-save. The shared_ptr keeps the
 		// (large) host state alive until the writer is done; no big copy crosses the connection.
-		void checkpointReady(windcfd::gui::CheckpointStatePtr state, qint64 tag);
+		void checkpointReady(paracfd::gui::CheckpointStatePtr state, qint64 tag);
 
 	private:
 		void alloc_display();     // lazy device snapshot buffers (needs the grid)
@@ -231,20 +231,20 @@ namespace windcfd::gui
 		// HOST-view MacGrid for host-side consumers (wind loads, the grids published to the viewer). On a
 		// graded grid core_->grid() is the DEVICE view (device metric pointers) → a host deref crashes; this
 		// returns the host-array view. Uniform (metrics_ null) ⇒ the core's null-metric grid (unchanged).
-		windcfd::core::MacGrid hostGrid() const { return metrics_ ? metrics_->host_view() : core_->grid(); }
+		paracfd::core::MacGrid hostGrid() const { return metrics_ ? metrics_->host_view() : core_->grid(); }
 		void service_averaging();   // worker-thread: process start/stop commands + the Pending→Collecting (wall-clock) transition
 		void begin_collecting();    // worker-thread: reset the accumulator + enter Collecting from the current sim-time
 		void reset_averaging();     // worker-thread: return to Idle + invalidate the published averaged snapshot (on rebuild)
 
 		// Graded fine-core metric arrays (shared with the recipe; null ⇒ uniform). The core's device-view
 		// grid points INTO these arrays, so metrics_ must outlive core_ — declared first (destroyed last).
-		std::shared_ptr<windcfd::core::GridMetrics> metrics_;
-		std::unique_ptr<windcfd::core::ChannelFluidCore> core_;
+		std::shared_ptr<paracfd::core::GridMetrics> metrics_;
+		std::unique_ptr<paracfd::core::ChannelFluidCore> core_;
 
 		// Live flow solid-mask snapshot (host), republished only when the mask changes (see above).
 		std::mutex mask_mtx_;
 		std::vector<unsigned char> mask_snapshot_;
-		windcfd::core::MacGrid mask_grid_{};
+		paracfd::core::MacGrid mask_grid_{};
 		std::atomic<std::uint64_t> mask_gen_{ 0 };
 
 		// Live wind-load snapshot (host), republished every kLoadsEvery steps while a building exists.
@@ -253,9 +253,9 @@ namespace windcfd::gui
 		// reused each compute to avoid re-allocation.
 		static constexpr long long kLoadsEvery = 30; // recompute cadence [steps]
 		mutable std::mutex loads_mtx_;
-		windcfd::core::WindLoads loads_snapshot_{};
+		paracfd::core::WindLoads loads_snapshot_{};
 		std::vector<float> cell_cp_snapshot_;
-		windcfd::core::MacGrid loads_grid_{};
+		paracfd::core::MacGrid loads_grid_{};
 		std::atomic<std::uint64_t> loads_gen_{ 0 };
 		std::atomic<bool> loads_valid_{ false };
 		std::atomic<double> load_rho_{ 1.225 }; // dynamic-pressure density (set from the solver's rho)
@@ -268,11 +268,11 @@ namespace windcfd::gui
 		// avg_countdown_ (atomics) and avg_stats_snapshot_/avg_cp_snapshot_ (under loads_mtx_). avg_valid_pub_
 		// gates the building overlay onto the averaged Cp (copyDisplayCp): set true once a sample is folded,
 		// stays true when Stopped (frozen), cleared on reset/rebuild so the overlay falls back to live Cp.
-		windcfd::core::LoadAverager averager_;          // worker-thread only
+		paracfd::core::LoadAverager averager_;          // worker-thread only
 		AvgPhase avg_phase_ = AvgPhase::Idle;           // worker-thread only
 		std::chrono::steady_clock::time_point avg_deadline_{}; // worker-thread only: scheduled start (Pending)
 		std::vector<float> avg_cp_scratch_;             // worker-thread mean-Cp scratch (reused each publish)
-		windcfd::core::WindLoadStats avg_stats_snapshot_{}; // published (loads_mtx_)
+		paracfd::core::WindLoadStats avg_stats_snapshot_{}; // published (loads_mtx_)
 		std::vector<float> avg_cp_snapshot_;                // published time-averaged per-cell Cp (loads_mtx_)
 		float avg_cp_lo_ = -0.5f, avg_cp_hi_ = 0.5f;        // published symmetric averaged-Cp range (loads_mtx_)
 		bool avg_valid_pub_ = false;                        // published (loads_mtx_): averaged Cp/stats ready
@@ -283,7 +283,7 @@ namespace windcfd::gui
 		std::atomic<double> avg_countdown_{ 0.0 };          // worker→GUI: wall secs until a scheduled start
 
 		// Pending core rebuild (obstacle re-injection). Guarded by rebuild_mtx_; flagged atomic.
-		std::function<std::unique_ptr<windcfd::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;
+		std::function<std::unique_ptr<paracfd::core::ChannelFluidCore>(const std::vector<unsigned char>&, int)> factory_;
 		std::mutex rebuild_mtx_;
 		std::vector<unsigned char> pending_mask_;
 		int pending_mode_ = 0;
@@ -321,7 +321,7 @@ namespace windcfd::gui
 		double* dw_ = nullptr;
 		double* dp_ = nullptr;
 		unsigned char* ds_ = nullptr; // solid-cell snapshot (obstacle), for auto-range
-		windcfd::core::MacGrid disp_grid_; // grid (dims + device metrics) matching the snapshots; published under disp_mtx_ (see displayGrid())
+		paracfd::core::MacGrid disp_grid_; // grid (dims + device metrics) matching the snapshots; published under disp_mtx_ (see displayGrid())
 		std::atomic<bool> disp_ready_{ false };
 
 		// Display-snapshot throttle (GUI "Fast sim"): 0 ⇒ publish every step. When > 0 the worker skips
@@ -351,7 +351,7 @@ namespace windcfd::gui
 		std::mutex flow_mtx_;
 		std::vector<double> fu_front_, fv_front_, fw_front_, fu_back_, fv_back_, fw_back_;
 		std::vector<unsigned char> fs_front_, fs_back_;
-		windcfd::core::MacGrid flow_grid_front_{};
+		paracfd::core::MacGrid flow_grid_front_{};
 		int flow_sign_front_ = 1; // current inlet direction snapshotted with the flow (guarded by flow_mtx_)
 		std::chrono::steady_clock::time_point last_flow_pub_{};
 	};

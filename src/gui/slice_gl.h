@@ -6,7 +6,7 @@
 
 #include "gui/slice_field.h"
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// Register GL buffer `vbo` (raw name) for CUDA write-discard access. Must be called
 	// with the GL context current (main thread). Returns an opaque handle, or nullptr on
@@ -30,5 +30,5 @@ namespace windcfd::gui
 	// the worker like slice_gl_fill. Returns false on error or when no fluid cell contributed
 	// (out->valid is set accordingly).
 	bool slice_gl_reduce(void* handle, const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, windcfd::core::MacGrid g, Field field, FieldRange* out);
+		const unsigned char* solid, paracfd::core::MacGrid g, Field field, FieldRange* out);
 }

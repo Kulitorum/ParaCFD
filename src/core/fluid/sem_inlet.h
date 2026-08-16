@@ -16,7 +16,7 @@
 #include <cmath>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	struct SemParams
 	{
@@ -31,14 +31,14 @@ namespace windcfd::core
 	};
 
 	// Nezu–Nakagawa (1993) rms profiles (research/14 §2), z from bed, h = h_dom.
-	WINDCFD_HD inline double nezu_urms(double us, double z, double h, double g) { return g * 2.30 * us * exp(-z / h); }
-	WINDCFD_HD inline double nezu_vrms(double us, double z, double h, double g) { return g * 1.63 * us * exp(-z / h); }
-	WINDCFD_HD inline double nezu_wrms(double us, double z, double h, double g) { return g * 1.27 * us * exp(-z / h); }
+	PARACFD_HD inline double nezu_urms(double us, double z, double h, double g) { return g * 2.30 * us * exp(-z / h); }
+	PARACFD_HD inline double nezu_vrms(double us, double z, double h, double g) { return g * 1.63 * us * exp(-z / h); }
+	PARACFD_HD inline double nezu_wrms(double us, double z, double h, double g) { return g * 1.27 * us * exp(-z / h); }
 	// shear stress −u'w' = u*²(1−z/h) ⇒ R13 = <u'w'> = −u*²(1−z/h), scaled by γ².
-	WINDCFD_HD inline double nezu_uw(double us, double z, double h, double g) { return -(g * g) * us * us * (1.0 - z / h); }
+	PARACFD_HD inline double nezu_uw(double us, double z, double h, double g) { return -(g * g) * us * us * (1.0 - z / h); }
 
 	// Lower-triangular Cholesky of R_ij (research/14 §3): a21=a32=0.
-	WINDCFD_HD inline void sem_cholesky(double us, double z, double h, double g,
+	PARACFD_HD inline void sem_cholesky(double us, double z, double h, double g,
 		double& a11, double& a22, double& a31, double& a33)
 	{
 		a11 = nezu_urms(us, z, h, g);
@@ -50,10 +50,10 @@ namespace windcfd::core
 	}
 
 	// Tent shape f(s)=√(3/2)(1−|s|), |s|<1 (research/14 §3); ∫f² over [-1,1] = 1.
-	WINDCFD_HD inline double sem_tent(double s) { double a = fabs(s); return a < 1.0 ? 1.2247448713915890 * (1.0 - a) : 0.0; }
+	PARACFD_HD inline double sem_tent(double s) { double a = fabs(s); return a < 1.0 ? 1.2247448713915890 * (1.0 - a) : 0.0; }
 
 	// Convected SEM sums S_j(y,z) = (1/√N) Σ_k ε_j^k f_σ(0−x_k, y−y_k, z−z_k).
-	WINDCFD_HD inline void sem_sums(double y, double z, const double* ex, const double* ey, const double* ez,
+	PARACFD_HD inline void sem_sums(double y, double z, const double* ex, const double* ey, const double* ez,
 		const double* e1, const double* e2, const double* e3, int N, double sigma, double pref,
 		double& S1, double& S2, double& S3)
 	{
@@ -74,7 +74,7 @@ namespace windcfd::core
 	}
 
 	// V_B and the f_σ prefactor √(V_B/σ³).
-	WINDCFD_HD inline double sem_boxvol(double sigma, double Ly, double Lz)
+	PARACFD_HD inline double sem_boxvol(double sigma, double Ly, double Lz)
 	{ return (2.0 * sigma) * (Ly + 2.0 * sigma) * (Lz + 2.0 * sigma); }
 
 	// Free-function plane evaluators (shared by class + parity test). Fill inlet-face

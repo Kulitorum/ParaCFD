@@ -1,6 +1,6 @@
 ## Context
 
-WindCFD is a GPU LES solver for wind around 3D-printed concrete buildings; its purpose is to
+ParaCFD is a GPU LES solver for wind around 3D-printed concrete buildings; its purpose is to
 quantify how **rounded vs sharp corners** change facade/roof loads. The solver runs a Stam
 stable-fluids scheme on a **uniform MAC grid** (`MacGrid`, `src/core/fluid/mac_grid.h:45`) with a
 single scalar `double h` threaded through ~300 call sites across 38 files. The pressure Poisson
@@ -27,7 +27,7 @@ measure is below the grid's resolution. A uniform grid fine enough to fix this e
 advertises "every CUDA kernel has a CPU reference + GPU-vs-CPU parity test at 1e-5" as a live
 invariant. **It is not live.** The CPU twins exist (`ch_poisson_apply_cpu`, `poisson_apply_cpu`,
 `mac_advect_cpu`, …) but there is **no test target** — CMake defines only `building_probe` and
-`windcfd-gui`; no `add_test`, no `enable_testing`, no gtest, nothing calls the twins. The parity
+`paracfd-gui`; no `add_test`, no `enable_testing`, no gtest, nothing calls the twins. The parity
 suite this design originally leaned on as "the oracle" **does not run**. Building an oracle is
 therefore **Phase 0** (see D4 + Migration Plan), not an assumption.
 

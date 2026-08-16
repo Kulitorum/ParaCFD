@@ -20,15 +20,15 @@
 #include <cstdio>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{
-		WINDCFD_HD inline int nnb_count(MacGrid g, int i, int j, int k)
+		PARACFD_HD inline int nnb_count(MacGrid g, int i, int j, int k)
 		{
 			return (i > 0) + (i < g.nx - 1) + (j > 0) + (j < g.ny - 1) + (k > 0) + (k < g.nz - 1);
 		}
-		WINDCFD_HD inline double nb_sum(const double* p, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline double nb_sum(const double* p, MacGrid g, int i, int j, int k)
 		{
 			double s = 0.0;
 			if (i > 0) s += p[g.pidx(i - 1, j, k)];
@@ -41,7 +41,7 @@ namespace windcfd::core
 		}
 
 		// Finite-volume divergence: each face flux over the LOCAL cell width (graded-aware; ⇒ /h uniform).
-		WINDCFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
+		PARACFD_HD inline double div_cell(const double* u, const double* v, const double* w, MacGrid g, int i, int j, int k)
 		{
 			return (u[g.uidx(i + 1, j, k)] - u[g.uidx(i, j, k)]) / g.dx(i)
 				+ (v[g.vidx(i, j + 1, k)] - v[g.vidx(i, j, k)]) / g.dy(j)
@@ -52,7 +52,7 @@ namespace windcfd::core
 		// dp/dn=0). Per face f: weight w_f = A_f/(d_f·V_cell) = 1/(d_centre-to-centre · cell_width_normal).
 		// Returns diag = Σ_f w_f and wnb = Σ_f w_f·p_nb, so Ap = diag·p_c − wnb. Uniform ⇒ each w_f=1/h²,
 		// diag=count/h², wnb=nbsum/h² — exactly the old (count·p_c − nbsum)/h² operator. Stays SPD.
-		WINDCFD_HD inline void fv_stencil(const double* p, MacGrid g, int i, int j, int k, double& diag, double& wnb)
+		PARACFD_HD inline void fv_stencil(const double* p, MacGrid g, int i, int j, int k, double& diag, double& wnb)
 		{
 			diag = 0.0; wnb = 0.0;
 			if (i > 0) { double w = 1.0 / (g.dxc(i) * g.dx(i)); diag += w; wnb += w * p[g.pidx(i - 1, j, k)]; }
@@ -111,7 +111,7 @@ namespace windcfd::core
 		// CG stalls (relres stuck ≫ tol → residual divergence → the graded-obstacle blow-up). Restrict is the
 		// ADJOINT of prolong in the inner product where the level operator is self-adjoint: uniform ⇒ Euclidean
 		// ⇒ R = ⅛Pᵀ; graded ⇒ volume-weighted (see k_restrict) — either way the V-cycle stays symmetric / SPD.
-		WINDCFD_HD inline void axis_stencil(int fi, int nc, const double* fc, const double* cc, int& C0, int& C1, double& w0, double& w1)
+		PARACFD_HD inline void axis_stencil(int fi, int nc, const double* fc, const double* cc, int& C0, int& C1, double& w0, double& w1)
 		{
 			double t;
 			if (fc && cc)

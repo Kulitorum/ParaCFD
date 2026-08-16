@@ -10,7 +10,7 @@
 #include <cmath>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

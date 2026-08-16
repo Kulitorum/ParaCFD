@@ -9,14 +9,14 @@
 //   Cp = (p - p_ref)/q ; Cd = Fx/(q*A_frontal) ; Cs = Fy/(q*A_frontal) ; Cl = Fz/(q*A_plan).
 // Only the PRESSURE load is integrated (skin friction is small for a bluff body and not included).
 //
-// Host-only, OCC-free (lives in libwindcfd). Units: SI. Wind is assumed along +x (the inlet).
+// Host-only, OCC-free (lives in libparacfd). Units: SI. Wind is assumed along +x (the inlet).
 #pragma once
 
 #include "core/fluid/mac_grid.h"
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	struct WindLoadParams
 	{

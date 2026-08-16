@@ -11,18 +11,18 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{
-		WINDCFD_HD inline double uc(const double* u, MacGrid g, BC bc, int i, int j, int k)
+		PARACFD_HD inline double uc(const double* u, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_u(u, g, bc, i, j, k) + fetch_u(u, g, bc, i + 1, j, k)); }
-		WINDCFD_HD inline double vc(const double* v, MacGrid g, BC bc, int i, int j, int k)
+		PARACFD_HD inline double vc(const double* v, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_v(v, g, bc, i, j, k) + fetch_v(v, g, bc, i, j + 1, k)); }
-		WINDCFD_HD inline double wc(const double* w, MacGrid g, BC bc, int i, int j, int k)
+		PARACFD_HD inline double wc(const double* w, MacGrid g, BC bc, int i, int j, int k)
 		{ return 0.5 * (fetch_w(w, g, bc, i, j, k) + fetch_w(w, g, bc, i, j, k + 1)); }
 
-		WINDCFD_HD inline double smag_nut(const double* u, const double* v, const double* w,
+		PARACFD_HD inline double smag_nut(const double* u, const double* v, const double* w,
 			MacGrid g, BC bc, double Cs, int i, int j, int k)
 		{
 			// Diagonal strains over the local cell width; cross strains over the 2-cell centre span
@@ -56,7 +56,7 @@ namespace windcfd::core
 		// diffuse one component (comp: 0=u,1=v,2=w) into out. The Laplacian is the sum of three
 		// non-uniform second derivatives (d2_axis): the component's NORMAL axis is face-spaced (dx/dy/dz),
 		// the two TANGENTIAL axes are centre-spaced (gap*). Uniform spacings ⇒ the (Σnb − 6c)/h² stencil.
-		WINDCFD_HD inline void diffuse_node(int comp, const double* field, const double* nut,
+		PARACFD_HD inline void diffuse_node(int comp, const double* field, const double* nut,
 			double* out, MacGrid g, BC bc, double dt, double nu, int i, int j, int k)
 		{
 			int idx;

@@ -14,9 +14,9 @@
 #include <regex>
 #include <sstream>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
-	using namespace windcfd::core;
+	using namespace paracfd::core;
 	namespace fs = std::filesystem;
 
 	namespace
@@ -360,7 +360,7 @@ namespace windcfd::gui
 			if (r.contains("fine_core"))
 			{
 				const auto& fcj = r.at("fine_core");
-				windcfd::core::FineCoreSpec& fc = d.recipe.fine_core;
+				paracfd::core::FineCoreSpec& fc = d.recipe.fine_core;
 				fc.Lx = fcj.value("Lx", 0.0); fc.Ly = fcj.value("Ly", 0.0); fc.Lz = fcj.value("Lz", 0.0);
 				fc.x0 = fcj.value("x0", 0.0); fc.x1 = fcj.value("x1", 0.0);
 				fc.y0 = fcj.value("y0", 0.0); fc.y1 = fcj.value("y1", 0.0);
@@ -369,7 +369,7 @@ namespace windcfd::gui
 			}
 			if (d.recipe.graded && d.recipe.fine_core.h_fine > 0.0)
 			{
-				d.recipe.metrics = std::make_shared<windcfd::core::GridMetrics>(windcfd::core::GridMetrics::generate(d.recipe.fine_core));
+				d.recipe.metrics = std::make_shared<paracfd::core::GridMetrics>(paracfd::core::GridMetrics::generate(d.recipe.fine_core));
 				d.recipe.grid = d.recipe.metrics->device_view(); // device metric pointers for the rebuilt core
 			}
 		}

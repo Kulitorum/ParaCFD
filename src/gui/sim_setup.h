@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	struct SimInfo
 	{
@@ -36,18 +36,18 @@ namespace windcfd::gui
 	// worker's rebuild factory so a re-inject is a pure worker-thread operation.
 	struct SimRecipe
 	{
-		windcfd::core::MacGrid grid;               // GRADED: the DEVICE-view MacGrid (kernels); UNIFORM: null-metric grid.
+		paracfd::core::MacGrid grid;               // GRADED: the DEVICE-view MacGrid (kernels); UNIFORM: null-metric grid.
 		// Graded fine-core grid (null ⇒ uniform). GridMetrics is move-only, so it is held by shared_ptr:
 		// the recipe is copied (into recipe_, the worker rebuild factory, scene_io) and every copy shares
 		// this one instance, keeping the host+device metric arrays alive as long as any device-view MacGrid
 		// (the core's g_, snapshots) references them. Host consumers use metrics->host_view().
-		std::shared_ptr<windcfd::core::GridMetrics> metrics; // null ⇒ uniform grid
-		windcfd::core::FineCoreSpec fine_core;               // the parsed fine-core spec (for Apply re-grid)
+		std::shared_ptr<paracfd::core::GridMetrics> metrics; // null ⇒ uniform grid
+		paracfd::core::FineCoreSpec fine_core;               // the parsed fine-core spec (for Apply re-grid)
 		bool graded = false;                                 // true ⇒ metrics is set (graded grid active)
-		windcfd::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
-		windcfd::core::ChannelParams pr;
+		paracfd::core::ChannelBC bc;               // solid_mode is overridden per make_core() call
+		paracfd::core::ChannelParams pr;
 		std::vector<unsigned char> base_solid;   // config obstacle (procedural cylinder); all-zero if none
-		int base_solid_mode = windcfd::core::SOLID_NOSLIP; // config's obstacle surface mode
+		int base_solid_mode = paracfd::core::SOLID_NOSLIP; // config's obstacle surface mode
 		double init_u = 1.0;                     // init_uniform u0
 		double init_v_blip = 0.0;                // init_uniform transverse blip (absolute m/s)
 		SimInfo info;
@@ -77,7 +77,7 @@ namespace windcfd::gui
 		// Lx/Ly/Lz are re-set from the resolved domain). set_fine_core=false ⇒ use the config's fine_core.
 		bool set_fine_core = false;
 		bool graded = false;
-		windcfd::core::FineCoreSpec fine_core;
+		paracfd::core::FineCoreSpec fine_core;
 	};
 
 	// Derive the integer grid dimensions from a domain + voxel size, EXACTLY as the sim builder does
@@ -87,7 +87,7 @@ namespace windcfd::gui
 
 	// Construct a fresh, flow-initialised core from the recipe with `solid` as the obstacle mask
 	// and `solid_mode` as its surface condition (SOLID_FREESLIP / SOLID_NOSLIP). Ready to step.
-	std::unique_ptr<windcfd::core::ChannelFluidCore> make_core(const SimRecipe& r,
+	std::unique_ptr<paracfd::core::ChannelFluidCore> make_core(const SimRecipe& r,
 		const std::vector<unsigned char>& solid, int solid_mode);
 
 	// Parse `config_path` (JSON), fill `recipe` (incl. recipe.info), and return the initial core
@@ -95,6 +95,6 @@ namespace windcfd::gui
 	// channel-with-cylinder setup and records the reason in `warn`. When `ov` is non-null and
 	// active, its domain + voxel size replace the config's (everything else unchanged) so the GUI
 	// can rebuild the same sim at a coarser/finer grid.
-	std::unique_ptr<windcfd::core::ChannelFluidCore> build_sim(const std::string& config_path,
+	std::unique_ptr<paracfd::core::ChannelFluidCore> build_sim(const std::string& config_path,
 		SimRecipe& recipe, std::string& warn, const GridOverride* ov = nullptr);
 }

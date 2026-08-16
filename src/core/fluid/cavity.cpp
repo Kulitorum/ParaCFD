@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	namespace
 	{

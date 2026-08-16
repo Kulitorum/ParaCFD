@@ -1,6 +1,6 @@
 // video_recorder.h — pipe rendered GL frames to ffmpeg for a high-quality MP4 of the run.
 //
-// windcfd-gui captures the viewer's framebuffer whenever the sand bed changes and streams the frames
+// paracfd-gui captures the viewer's framebuffer whenever the sand bed changes and streams the frames
 // as raw RGBA into an ffmpeg subprocess (H.264 / crf 17). No libav linkage — ffmpeg.exe is spawned
 // via QProcess, so there is nothing to build/deploy and the codec licence stays with the exe.
 //
@@ -17,7 +17,7 @@
 
 class QProcess;
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	class VideoRecorder
 	{
@@ -28,7 +28,7 @@ namespace windcfd::gui
 		VideoRecorder(const VideoRecorder&) = delete;
 		VideoRecorder& operator=(const VideoRecorder&) = delete;
 
-		// Arm recording to `path` (an .mp4). ffmpeg is located (WINDCFD_FFMPEG env → PATH → bundled build)
+		// Arm recording to `path` (an .mp4). ffmpeg is located (PARACFD_FFMPEG env → PATH → bundled build)
 		// and spawned LAZILY on the first frame, which locks the output size to that frame's dimensions
 		// (rounded down to even, as yuv420p requires). `crf` is the H.264 quality (0 lossless … 51 worst,
 		// default 17 visually lossless), `preset` the x264 speed/size trade (ultrafast…veryslow, default

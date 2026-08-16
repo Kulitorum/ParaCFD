@@ -1,4 +1,4 @@
-// main.cpp — windcfd-gui entry point (milestone G1).
+// main.cpp — paracfd-gui entry point (milestone G1).
 //
 // Requests a GL 4.3 core-profile default surface format BEFORE QApplication (so the
 // QOpenGLWidget's context and Qt's shared context match — cobod-slicer main.cpp:474
@@ -43,7 +43,7 @@
 //                          speed. Optional density = seeds along the longest axis (default 10).
 //   --record <path.mp4>    record an MP4 of the run: one frame is captured every N sim steps and
 //                          H.264-encoded via ffmpeg (QProcess pipe, no libav linkage). Finalized on
-//                          close. Needs ffmpeg on PATH or via the WINDCFD_FFMPEG env override.
+//                          close. Needs ffmpeg on PATH or via the PARACFD_FFMPEG env override.
 //   --autosave <n>         auto-save a checkpoint (<scene>.<step>.scn) every n steps (0 = off)
 //   --load-scene <path>    at startup, restore a saved .scn (setup + all data) — resumes from its step
 //   --save-scene <path>    after startup, save the full scene to <path> (.scn) — headless save smoke
@@ -70,7 +70,7 @@
 #include <sstream>
 #include <string>
 
-using namespace windcfd::gui;
+using namespace paracfd::gui;
 
 int main(int argc, char** argv)
 {
@@ -140,7 +140,7 @@ int main(int argc, char** argv)
 	}
 
 	QApplication app(argc, argv);
-	QApplication::setApplicationName("WindCFD G1");
+	QApplication::setApplicationName("ParaCFD G1");
 
 	// Headless smoke of the video pipe (offscreen has no real GL, so grabFramebuffer yields nothing —
 	// this feeds SYNTHETIC frames straight through VideoRecorder to prove the ffmpeg pipe + MP4
@@ -148,7 +148,7 @@ int main(int argc, char** argv)
 	if (!record_selftest.empty())
 	{
 		std::fprintf(stderr, "[G1] --record-selftest: piping 30 synthetic frames to ffmpeg -> '%s'\n", record_selftest.c_str());
-		windcfd::gui::VideoRecorder rec;
+		paracfd::gui::VideoRecorder rec;
 		if (!rec.start(QString::fromStdString(record_selftest))) return 3;
 		for (int f = 0; f < 30; ++f)
 		{
@@ -170,7 +170,7 @@ int main(int argc, char** argv)
 		std::string err, gpu;
 		int ccM = 0, ccm = 0;
 		// 0 = usable, 1 = no device / driver too old, 2 = device present but too old to RUN our kernels.
-		const int st = windcfd::core::cuda_probe_usable(&gpu, &ccM, &ccm, &err);
+		const int st = paracfd::core::cuda_probe_usable(&gpu, &ccM, &ccm, &err);
 		if (st != 0)
 		{
 			std::fprintf(stderr, "[G1] GPU unusable (%d): %s (%s compute %d.%d)\n",
@@ -180,9 +180,9 @@ int main(int argc, char** argv)
 			{
 				// A device is present but its compute capability predates this build's compiled archs
 				// (sm_75/86/89). Updating the driver will NOT help — the GPU itself is too old.
-				title = QStringLiteral("WindCFD - GPU not supported");
+				title = QStringLiteral("ParaCFD - GPU not supported");
 				msg = QStringLiteral(
-					"<b>WindCFD cannot run on this GPU.</b><br><br>"
+					"<b>ParaCFD cannot run on this GPU.</b><br><br>"
 					"Your GPU (<b>%1</b>, CUDA compute capability %2.%3) is older than this build supports. "
 					"It needs an NVIDIA GPU with <b>compute capability 7.5 (Turing) or newer</b> — a GeForce "
 					"GTX&nbsp;16 / RTX&nbsp;20-series or later, or an equivalent Quadro / RTX&nbsp;A card. "
@@ -200,9 +200,9 @@ int main(int argc, char** argv)
 				// label has openExternalLinks set, so a click opens the default browser.
 				const QString link = QStringLiteral(
 					"<a href=\"https://www.nvidia.com/Download/index.aspx\">www.nvidia.com/Download</a>");
-				title = QStringLiteral("WindCFD - GPU required");
+				title = QStringLiteral("ParaCFD - GPU required");
 				msg = QStringLiteral(
-					"<b>WindCFD could not start.</b><br><br>"
+					"<b>ParaCFD could not start.</b><br><br>"
 					"It requires an NVIDIA (CUDA-capable) GPU with an up-to-date driver.<br><br>");
 				if (old_driver)
 					msg += QStringLiteral(
@@ -231,7 +231,7 @@ int main(int argc, char** argv)
 	// --- Build the simulation ---------------------------------------------------
 	SimRecipe recipe;
 	std::string warn;
-	std::unique_ptr<windcfd::core::ChannelFluidCore> core = build_sim(config, recipe, warn);
+	std::unique_ptr<paracfd::core::ChannelFluidCore> core = build_sim(config, recipe, warn);
 	const SimInfo& info = recipe.info;
 	if (!warn.empty()) std::fprintf(stderr, "[G1] %s\n", warn.c_str());
 	std::fprintf(stderr, "[G1] sim '%s': %dx%dx%d cells, h=%.3f m, U=%.3f m/s, nu=%.3e\n",
@@ -428,7 +428,7 @@ int main(int argc, char** argv)
 	// --- Wind-load summary (building pressure integration) -----------------------
 	if (win.lastLoadsValid())
 	{
-		const windcfd::core::WindLoads& wl = win.lastLoads();
+		const paracfd::core::WindLoads& wl = win.lastLoads();
 		std::fprintf(stderr,
 			"[G1] wind-loads: Cd=%.3f (drag +x) Cl=%.3f (uplift +z) Cs=%.3f (side +y); "
 			"Cp=[%.2f, %.2f]; exposed_faces=%lld; A_frontal=%.3f m^2 A_plan=%.3f m^2 L_ref=%.3f m\n",
@@ -438,7 +438,7 @@ int main(int argc, char** argv)
 	// --- Converged time-averaged load summary (headless --average-now check) -----
 	if (win.lastAvgStatsValid())
 	{
-		const windcfd::core::WindLoadStats& s = win.lastAvgStats();
+		const paracfd::core::WindLoadStats& s = win.lastAvgStats();
 		const double ft = s.flow_through_time > 1e-9 ? s.duration / s.flow_through_time : 0.0;
 		std::fprintf(stderr,
 			"[G1] time-avg: %lld samples over %.3f s (%.2f flow-throughs); "

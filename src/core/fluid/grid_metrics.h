@@ -14,7 +14,7 @@
 
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// Fine-core grid specification (SI metres). A uniform-h_fine core inside the box
 	// [x0,x1]×[y0,y1]×[z0,z1] with geometric growth (ratio-bounded) out to the domain

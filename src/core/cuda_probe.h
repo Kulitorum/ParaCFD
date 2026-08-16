@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	// out[i] = a*x[i] + y[i], CPU reference.
 	void saxpy_cpu(float a, const std::vector<float>& x, const std::vector<float>& y, std::vector<float>& out);

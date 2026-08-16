@@ -16,7 +16,7 @@
 
 #include <cuda_runtime.h> // float4, cudaStream_t
 
-namespace windcfd::gui
+namespace paracfd::gui
 {
 	// Which scalar of the {u,v,w,p} state to colour.
 	enum class Field : int
@@ -42,7 +42,7 @@ namespace windcfd::gui
 	// nearest MAC cell, reduced to the chosen scalar, and colour-mapped over [vmin,vmax].
 	struct SliceParams
 	{
-		windcfd::core::MacGrid grid; // MAC geometry (nx,ny,nz,h) + metric arrays (device view for the sampler)
+		paracfd::core::MacGrid grid; // MAC geometry (nx,ny,nz,h) + metric arrays (device view for the sampler)
 		float Lx = 0.0f, Ly = 0.0f, Lz = 0.0f; // TRUE domain extent [m] (xf[nx] etc.); 0 ⇒ fall back to nx·h.
 		                                       // Set explicitly so slice_vertex_world (host geometry AND the
 		                                       // device sampler) agrees without dereferencing metric pointers.
@@ -58,9 +58,9 @@ namespace windcfd::gui
 	// World position of mesh vertex (a,b) on the slice plane. Shared by the colour path
 	// and the host that builds the static GL position buffer, so geometry and sampling
 	// agree exactly. Returns SI metres.
-	WINDCFD_HD inline void slice_vertex_world(const SliceParams& sp, int a, int b, float& x, float& y, float& z)
+	PARACFD_HD inline void slice_vertex_world(const SliceParams& sp, int a, int b, float& x, float& y, float& z)
 	{
-		const windcfd::core::MacGrid& g = sp.grid;
+		const paracfd::core::MacGrid& g = sp.grid;
 		// TRUE domain extent from sp.Lx/Ly/Lz (xf[nx] etc.) — on a graded grid nx·h (= n·h_fine) undershoots
 		// the far field, which shrinks + offsets the slice quad toward the origin. Passed in explicitly (not
 		// g.Lx()) so the HOST geometry path never dereferences the device metric pointers. 0 ⇒ nx·h fallback.
@@ -102,9 +102,9 @@ namespace windcfd::gui
 	// scalar (same cell-centred sampling as the slice fill), so the reduced range matches the display.
 	// `p` may be null (⇒ Pressure samples as 0), matching the slice fill.
 	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, windcfd::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
+		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
 
 	// CPU reference (host fields → out3[3]) with identical arithmetic. Used by the GPU-vs-CPU test.
 	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, windcfd::core::MacGrid g, Field field, float out3[3]);
+		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float out3[3]);
 }

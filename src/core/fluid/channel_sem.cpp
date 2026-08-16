@@ -10,7 +10,7 @@
 #include <cmath>
 #include <vector>
 
-namespace windcfd::core
+namespace paracfd::core
 {
 	ChannelSemResult run_channel_sem(const ChannelSemConfig& cfg)
 	{

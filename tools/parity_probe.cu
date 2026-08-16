@@ -44,7 +44,7 @@
 #include <string>
 #include <vector>
 
-using namespace windcfd::core;
+using namespace paracfd::core;
 
 // --- CUDA + device-buffer plumbing -------------------------------------------
 #define CU(expr)                                                                          \
