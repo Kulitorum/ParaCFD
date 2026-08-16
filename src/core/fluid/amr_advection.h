@@ -12,7 +12,9 @@ namespace paracfd::core
 	// through the integer-coordinate GPU hash. A static protection mask covers every
 	// face centre within `protection_cells * h` of fabric; those values use a local
 	// first-order fallback, so no sample can jump to the opposite side of a sheet.
-	// This is deliberately conservative near fabric and is not yet MacCormack.
+	// Trilinear and diffusion stencils resolve same-level brick crossings through the
+	// GPU coordinate hash. Coarse/fine samples are interpolated but are not yet the
+	// final conservative face reconstruction. This remains first-order, not MacCormack.
 	class DeviceAmrAdvection
 	{
 	public:

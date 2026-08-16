@@ -46,7 +46,9 @@ int main()
 	const TriMesh normal=quad({0,-0.5,-0.5},{0,0.5,-0.5},{0,0.5,0.5},{0,-0.5,0.5});
 	const TriMesh parallel=quad({-0.5,-0.5,0},{0.5,-0.5,0},{0.5,0.5,0},{-0.5,0.5,0});
 	const TriMesh inclined=rotate_y(parallel,15.0*3.14159265358979323846/180.0);
-	const CaseResult normal_result=run_case("normal plate",normal),parallel_result=run_case("parallel plate",parallel),inclined_result=run_case("inclined plate",inclined);
+	// The impulsively initialized normal plate needs a longer pressure adjustment than
+	// the tangential cases before its force reaches the downstream-sign regime.
+	const CaseResult normal_result=run_case("normal plate",normal,16),parallel_result=run_case("parallel plate",parallel),inclined_result=run_case("inclined plate",inclined);
 	ParagliderConfig uniform_fine=flow_config();uniform_fine.domain={3,4,3,3};uniform_fine.amr.base_cell_size=0.125;ParagliderConfig refined=uniform_fine;refined.amr.base_cell_size=0.25;refined.amr.max_levels=2;refined.amr.wing_refinement_distance=0.1;refined.amr.surface_refinement_distance=0.1;refined.amr.wake_length=0;refined.amr.wake_radius=0;const CaseResult uniform_fine_result=run_case("uniform-fine inclined plate",inclined,8,uniform_fine),refined_result=run_case("2:1 AMR inclined plate",inclined,8,refined);
 	check(normal_result.converged&&parallel_result.converged&&inclined_result.converged,"all manufactured plate timesteps converge");
 	check(std::isfinite(normal_result.loads.pressure_force.x)&&std::isfinite(parallel_result.loads.pressure_force.x)&&std::isfinite(inclined_result.loads.pressure_force.z),"plate pressure loads are finite");

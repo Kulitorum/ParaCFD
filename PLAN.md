@@ -62,7 +62,7 @@ Pending:
 - Geometry preprocessing and force/reference calculations retain FP64 where valuable.
 - CUDA pressure operator has measured FP32/FP64 parity and timing probes.
 
-The first-order AMR advection/Smagorinsky/external-BC/composite-projection path is GPU resident. Pending: higher-order fabric-side-safe reconstruction, consistent brick/coarse-fine velocity interpolation, and full-case convergence validation.
+The first-order AMR advection/Smagorinsky/external-BC/composite-projection path is GPU resident. Same-level interpolation, Smagorinsky gradients, eddy-viscosity access, and diffusion now cross brick boundaries through the hash without stencil clamping; all levels sample a common old-time state before commit. Pending: higher-order fabric-side-safe reconstruction, conservative coarse/fine face treatment, and full-case convergence validation.
 
 ## G. Aerodynamics — manufactured load path implemented
 
