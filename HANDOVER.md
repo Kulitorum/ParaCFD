@@ -16,7 +16,7 @@ Implemented:
 - a composite matrix-free pressure operator containing implicit regular faces plus compact EB and coarse/fine connections;
 - CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
-- bounded MacCormack/RK2 finest-brick GPU advection, a static one-byte same-side six-link graph in the fabric band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
+- bounded MacCormack/RK2 finest-brick GPU advection, minmod-limited linear transport on complete stencils of a static one-byte same-side six-link fabric graph (first-order fallback at incomplete stencils), and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
 - conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
 - compact same-side EB aperture transport using structured carrier states, first-order upwinding, molecular diffusion, and a graph-normal Smagorinsky estimate without a full-domain sparse velocity graph;
 - adaptive one-global-step CFL control from a persistent GPU maximum reduction over regular AMR velocity fields; compact EB states retain their own bounded local update;
@@ -26,13 +26,13 @@ Implemented:
 - two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
 - BVH tracer collision and triangle-native delta-Cp render storage;
 - a dedicated GUI worker that advances `ExternalAeroCore`, publishes pressure timing/residuals and pressure-only forces, and colors STEP triangles by visible-side Cp, Cp+, Cp-, or live delta-Cp;
-- a purpose-built grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
+- a purpose-built compact grid panel whose domain/AMR/solver/reference controls feed the actual `ParagliderConfig`, with bbox span/chord inference, an explicit LE/TE polarity flip, separate `Fit Wing`/`Fit Domain` camera framing, restored arrow/tracer tuning controls, wheel-safe editors, and live CFL, regular/EB peak velocity, divergence, flux-error, and persistent-memory diagnostics.
 
 Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 
 ## Current acceptance geometry
 
-`Test-Data/PlanBParakite.step` is exercised through `configs/planb_parakite.json`. That exporter uses -Y as forward, so the config applies +90 degrees about Z to map the model to ParaCFD's fixed +X freestream.
+`Test-Data/PlanBParakite.step` is exercised through `configs/planb_parakite.json`. Its leading edge points toward source -Y, so the confirmed config applies -90 degrees about Z to map the leading edge to upstream -X, against ParaCFD's fixed +X freestream velocity.
 
 At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_subdivisions=4`, the case currently reports approximately:
 
@@ -40,22 +40,22 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - 120 active bricks / 3,932,160 active cells;
 - 32,338 owned EB fragments, 114,042 face apertures, and 155,324 surface patches;
 - zero unresolved cells and 348 pressure-static isolated pockets;
-- 3,007 numerical aperture slivers discarded during canonical-frame level-atlas construction, totalling 0.000312367 m^2 of cumulative atlas area at the configurable `1e-4 h^2` cutoff;
+- 2,796 numerical aperture slivers discarded during the confirmed-upstream canonical-frame level-atlas construction, totalling 0.000283775 m^2 of cumulative atlas area at the configurable `1e-4 h^2` cutoff;
 - 4,478,434 composite pressure slots with 81,920 coarse/fine and 102,227 EB connections;
 - 124.14 MiB pooled FP32 field estimate;
 - an initial +X freestream projection converging in about 189 PCG iterations to the tightened 1e-5 global relative residual in roughly 130-170 ms on the RTX 4090;
 - 348.68 MiB estimated persistent GPU storage for fields, projection, and conservative 2:1 velocity synchronization (CUDA context/driver allocations excluded).
-- 135,577 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
+- 135,707 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
 - about 25-30 ms bounded MacCormack advection, 8-10 ms LES/diffusion, 0.1-0.6 ms compact EB transport, and typically 40-140 ms projection as the warm solve evolves (individual timings vary);
-- 493.55 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
+- 493.57 MiB total persistent estimate for fields, projection, compact EB transport, two advection states/masks, and locator.
 
-`paraglider_case_probe` records long imported-wing histories in the exact frame used by the GUI. With the default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, precomputed fabric-band link graph, graph-normal EB Smagorinsky treatment, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reaches 0.677 s. The regular peak is 13.1 m/s instead of the former 56.1 m/s structured leading-edge runaway, and the compact peak is 39.2 m/s. Pressure-only force is still evolving at `[131.9, -0.52, 39.4]` N; max/RMS-volume divergence are `7.74e-4 / 3.90e-6 s^-1`, and net integrated flux error is `-6.79e-5 m^3/s`. The last measured step is 72.7 ms, including 38.2 ms projection and 0.36 ms compact EB transport. Persistent storage is 493.55 MiB. This is a stability/conservation result, not a converged aerodynamic result.
+`paraglider_case_probe` records long imported-wing histories in the exact frame used by the GUI. With the confirmed leading edge facing upstream, default 0.25 same-side fragment merge, `1e-4 h^2` aperture cutoff, limited fabric-band link transport, graph-normal EB Smagorinsky treatment, adaptive CFL, and 1e-5 projection tolerance, a 500-step PlanB run reaches 0.531 s. The regular peak is 11.99 m/s, while the compact peak is still 46.8 m/s. Pressure-only force is still evolving at `[145.9, 0.10, 10.0]` N; max/RMS-volume divergence are `4.88e-4 / 3.93e-6 s^-1`, and net integrated flux error is `-3.15e-5 m^3/s`. The background mean is `[10.009, -1.3e-5, -2.5e-4]` m/s with zero reverse-flow volume. The last measured step is 73.0 ms, including 37.2 ms projection and 0.13 ms compact EB transport. Persistent storage is 493.57 MiB. This is a stability/conservation result, not a converged aerodynamic result; the compact peak remains an explicit blocker rather than being masked by a velocity guard.
 
 The case probe accepts `--max-levels N` for resolution studies. A four-level case builds 12.938 million pressure states with 1.427 GiB persistent storage. Without EB LES its compact aft-junction aperture reaches 102 m/s by 0.457 s while carrying conservative net fragment flux; with graph LES it settles near 49 m/s and reaches 0.294 s in 500 steps. The affected nodes lie 10-14 mm from two CAD faces and one is a 39-connection merged same-side fragment, identifying a complex trailing-edge/seam junction rather than a cross-fabric leak. At comparable physical time, three/four-level pressure forces remain roughly 12-14% apart. This demonstrates improved compact stability but incomplete force/grid convergence.
 
 ## Next engineering work
 
-1. Replace first-order fabric-band and compact-graph updates with higher-order same-side transport, extend graph-normal EB LES to a full irregular strain tensor/wall treatment, and add a local acceptance gate.
+1. Extend the limited fabric-band reconstruction to the compact EB graph, add a local compact-flux acceptance gate, and extend graph-normal EB LES to a full irregular strain tensor/wall treatment.
 2. Make general cross-level interpolation consistent with the conservative normal 2:1 flux state and run systematic grid/domain/orientation force-convergence studies.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.

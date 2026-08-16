@@ -11,7 +11,8 @@ namespace paracfd::core
 	// Production AMR advection layer. Backtraces locate the finest active brick
 	// through the integer-coordinate GPU hash. Static preprocessing marks faces within
 	// `protection_cells * h` of fabric and stores their six Cartesian same-side links.
-	// Those faces use bounded first-order donor transport and link-restricted molecular
+	// Those faces use bounded, minmod-limited same-side transport (with a first-order
+	// fallback wherever the required links are unavailable) plus link-restricted molecular
 	// diffusion; far-field faces retain bounded RK2/MacCormack transport and LES. This
 	// permits tangential transport near a sheet without per-step triangle traversal or
 	// opposite-side stencil sampling.

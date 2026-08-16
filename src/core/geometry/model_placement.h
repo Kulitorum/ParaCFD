@@ -41,8 +41,9 @@ namespace paracfd::core
 
 	// Face-only horizontal bbox inference deliberately determines axes, not polarity.
 	// ParaCFD keeps Z as up, treats the longer of X/Y as span, and maps the assumed
-	// negative chord direction into its fixed +X freestream. `yaw_degrees` is therefore
-	// either +90 degrees for span-X/chord-Y data or 180 degrees for span-Y/chord-X data.
+	// negative leading-edge direction to upstream -X, against its fixed +X freestream.
+	// `yaw_degrees` is therefore -90 degrees for span-X/chord-Y data or zero for
+	// span-Y/chord-X data.
 	// The caller must still expose a leading/trailing-edge flip.
 	struct HorizontalWingAxes
 	{
@@ -65,7 +66,7 @@ namespace paracfd::core
 		result.valid = true;
 		result.span_axis = dx > dy ? 0 : 1;
 		result.chord_axis = 1 - result.span_axis;
-		result.yaw_degrees = result.span_axis == 0 ? 90.0 : 180.0;
+		result.yaw_degrees = result.span_axis == 0 ? -90.0 : 0.0;
 		return result;
 	}
 

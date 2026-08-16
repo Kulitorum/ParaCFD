@@ -27,7 +27,7 @@ namespace paracfd::core
 		double cfl_velocity = 0.0;
 		double effective_cfl = 0.0;
 		AmrGpuSolveResult pressure;
-		bool first_order_fabric_protection = true;
+		bool side_safe_fabric_transport = true;
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
 	};

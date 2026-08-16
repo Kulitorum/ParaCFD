@@ -97,13 +97,39 @@ namespace paracfd::core
 		{
 			const int bs=view.layout.brick_size,per_component=bs*bs*(bs+1);int r=q,local=r%per_component;r/=per_component;component=r%3;brick=r/3;i=j=k=0;if(component==0){i=local%(bs+1);local/=bs+1;j=local%bs;k=local/bs;}else if(component==1){i=local%bs;local/=bs;j=local%(bs+1);k=local/(bs+1);}else{i=local%bs;local/=bs;j=local%bs;k=local/bs;}
 		}
-		__device__ Real side_safe_first_order(GpuAmrHierarchyView hierarchy,const DeviceAmrFieldLevelView* views,int level,const GpuBrickRecord& record,int component,int brick,int i,int j,int k,Real current,unsigned char links,Real dt)
+		__device__ Real minmod(Real a,Real b)
 		{
-			const DeviceAmrFieldLevelView view=views[level];const GpuAmrPoint point=face_node_point(record,component,i,j,k);const Real velocity[3]={sample_local(hierarchy,views,level,record,0,brick,point),sample_local(hierarchy,views,level,record,1,brick,point),sample_local(hierarchy,views,level,record,2,brick,point)};Real weighted_delta=0,weight_sum=0;for(int axis=0;axis<3;++axis){const int direction=velocity[axis]>=Real(0)?-1:1,bit=2*axis+(direction>0);if(!(links&(1u<<bit)))continue;int q[3]={i,j,k};q[axis]+=direction;const Real neighbour=valid_face_index(component,view.layout.brick_size,q[0],q[1],q[2])?value_at_clamped(view,component,brick,q[0],q[1],q[2]):value_at_node(hierarchy,views,level,record,component,brick,q[0],q[1],q[2]);const Real weight=dt*abs(velocity[axis])/Real(record.h);weighted_delta+=weight*(neighbour-current);weight_sum+=weight;}return current+(weight_sum>Real(1)?weighted_delta/weight_sum:weighted_delta);
+			return a*b<=Real(0)?Real(0):(abs(a)<abs(b)?a:b);
+		}
+		__device__ bool step_same_level_face_node(const DeviceAmrFieldLevelView& view,int component,int axis,int direction,int& brick,int& i,int& j,int& k)
+		{
+			int* coordinate=axis==0?&i:(axis==1?&j:&k);*coordinate+=direction;const int bs=view.layout.brick_size;if(valid_face_index(component,bs,i,j,k))return true;
+			const int nx=component==0?bs+1:bs,ny=component==1?bs+1:bs,nz=component==2?bs+1:bs;int face=-1,outside=0;if(i<0){face=0;++outside;}else if(i>=nx){face=1;++outside;}if(j<0){face=2;++outside;}else if(j>=ny){face=3;++outside;}if(k<0){face=4;++outside;}else if(k>=nz){face=5;++outside;}if(outside!=1)return false;const int neighbour=view.neighbors[brick*6+face];if(neighbour<0||(view.flags[neighbour]&BRICK_COVERED))return false;if(face==0)i+=bs;else if(face==1)i-=bs;else if(face==2)j+=bs;else if(face==3)j-=bs;else if(face==4)k+=bs;else k-=bs;brick=neighbour;return valid_face_index(component,bs,i,j,k);
+		}
+		__device__ std::size_t face_index(const DeviceAmrFieldLevelView& view,int component,int brick,int i,int j,int k)
+		{
+			return component==0?view.layout.u_index(brick,i,j,k):(component==1?view.layout.v_index(brick,i,j,k):view.layout.w_index(brick,i,j,k));
+		}
+		__device__ Real side_safe_muscl(GpuAmrHierarchyView hierarchy,const DeviceAmrFieldLevelView* views,int level,const GpuBrickRecord& record,int component,int brick,int i,int j,int k,Real current,unsigned char links,const unsigned char* component_links,Real dt)
+		{
+			const DeviceAmrFieldLevelView view=views[level];const GpuAmrPoint point=face_node_point(record,component,i,j,k);const Real velocity[3]={sample_local(hierarchy,views,level,record,0,brick,point),sample_local(hierarchy,views,level,record,1,brick,point),sample_local(hierarchy,views,level,record,2,brick,point)};Real weighted_delta=0,weight_sum=0,lower=current,upper=current;
+			for(int axis=0;axis<3;++axis)
+			{
+				const int upstream_direction=velocity[axis]>=Real(0)?-1:1,upstream_bit=2*axis+(upstream_direction>0),downstream_bit=2*axis+(upstream_direction<0);if(!(links&(1u<<upstream_bit)))continue;
+				int upstream_brick=brick,ui=i,uj=j,uk=k;if(!step_same_level_face_node(view,component,axis,upstream_direction,upstream_brick,ui,uj,uk))continue;const Real upstream=value_at_clamped(view,component,upstream_brick,ui,uj,uk);lower=min(lower,upstream);upper=max(upper,upstream);const Real weight=dt*abs(velocity[axis])/Real(record.h);Real delta=weight*(upstream-current);
+				// A limited linear reconstruction is legal only when all three additional
+				// segments are represented by same-side links. Otherwise retain the robust
+				// first-order donor update locally at a fabric edge, physical boundary, or
+				// coarse/fine transition.
+				const unsigned char upstream_links=component_links[face_index(view,component,upstream_brick,ui,uj,uk)];int upstream2_brick=upstream_brick,u2i=ui,u2j=uj,u2k=uk,downstream_brick=brick,di=i,dj=j,dk=k;const bool second_order=(links&(1u<<downstream_bit))&&(upstream_links&(1u<<upstream_bit))&&step_same_level_face_node(view,component,axis,upstream_direction,upstream2_brick,u2i,u2j,u2k)&&step_same_level_face_node(view,component,axis,-upstream_direction,downstream_brick,di,dj,dk);
+				if(second_order){const Real upstream2=value_at_clamped(view,component,upstream2_brick,u2i,u2j,u2k),downstream=value_at_clamped(view,component,downstream_brick,di,dj,dk);lower=min(lower,downstream);upper=max(upper,downstream);const Real upstream_slope=minmod(upstream-upstream2,current-upstream),current_slope=minmod(current-upstream,downstream-current);const Real incoming=upstream+Real(0.5)*upstream_slope,outgoing=current+Real(0.5)*current_slope;delta=-weight*(outgoing-incoming);}
+				weighted_delta+=delta;weight_sum+=weight;
+			}
+			const Real scale=weight_sum>Real(1)?Real(1)/weight_sum:Real(1);return max(lower,min(upper,current+scale*weighted_delta));
 		}
 		__global__ void advect_forward_level_kernel(GpuAmrHierarchyView hierarchy,const DeviceAmrFieldLevelView* views,int level,Real dt,const unsigned char* links_u,const unsigned char* links_v,const unsigned char* links_w,Real* u_out,Real* v_out,Real* w_out)
 		{
-			const DeviceAmrFieldLevelView view=views[level];const int bs=view.layout.brick_size,per_component=bs*bs*(bs+1),q=blockIdx.x*blockDim.x+threadIdx.x,total=view.brick_count*3*per_component;if(q>=total)return;int component,brick,i,j,k;decode_face_work(view,q,component,brick,i,j,k);if(view.flags[brick]&BRICK_COVERED)return;const GpuBrickRecord record=hierarchy.levels[level].bricks[brick];const GpuAmrPoint point=face_node_point(record,component,i,j,k);const std::size_t index=component==0?view.layout.u_index(brick,i,j,k):(component==1?view.layout.v_index(brick,i,j,k):view.layout.w_index(brick,i,j,k));const Real current=component==0?view.u[index]:(component==1?view.v[index]:view.w[index]);const unsigned char links=component==0?links_u[index]:(component==1?links_v[index]:links_w[index]);const Real result=(links&0x40)?side_safe_first_order(hierarchy,views,level,record,component,brick,i,j,k,current,links,dt):sample_finest(hierarchy,views,component,rk2_trace(hierarchy,views,level,record,brick,point,dt),current);if(component==0)u_out[index]=result;else if(component==1)v_out[index]=result;else w_out[index]=result;
+			const DeviceAmrFieldLevelView view=views[level];const int bs=view.layout.brick_size,per_component=bs*bs*(bs+1),q=blockIdx.x*blockDim.x+threadIdx.x,total=view.brick_count*3*per_component;if(q>=total)return;int component,brick,i,j,k;decode_face_work(view,q,component,brick,i,j,k);if(view.flags[brick]&BRICK_COVERED)return;const GpuBrickRecord record=hierarchy.levels[level].bricks[brick];const GpuAmrPoint point=face_node_point(record,component,i,j,k);const std::size_t index=component==0?view.layout.u_index(brick,i,j,k):(component==1?view.layout.v_index(brick,i,j,k):view.layout.w_index(brick,i,j,k));const Real current=component==0?view.u[index]:(component==1?view.v[index]:view.w[index]);const unsigned char* component_links=component==0?links_u:(component==1?links_v:links_w);const unsigned char links=component_links[index];const Real result=(links&0x40)?side_safe_muscl(hierarchy,views,level,record,component,brick,i,j,k,current,links,component_links,dt):sample_finest(hierarchy,views,component,rk2_trace(hierarchy,views,level,record,brick,point,dt),current);if(component==0)u_out[index]=result;else if(component==1)v_out[index]=result;else w_out[index]=result;
 		}
 		__global__ void advect_correct_level_kernel(GpuAmrHierarchyView hierarchy,const DeviceAmrFieldLevelView* views,const DeviceAmrFieldLevelView* forward_views,int level,Real dt,const unsigned char* links_u,const unsigned char* links_v,const unsigned char* links_w,Real* u_out,Real* v_out,Real* w_out)
 		{

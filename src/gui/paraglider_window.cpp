@@ -22,6 +22,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -36,6 +37,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -48,9 +50,35 @@ namespace paracfd::gui
 
 	namespace
 	{
+		class ScrollSafeDoubleSpinBox final:public QDoubleSpinBox
+		{
+		protected:
+			void wheelEvent(QWheelEvent* event)override{event->ignore();}
+		};
+
+		class ScrollSafeSpinBox final:public QSpinBox
+		{
+		protected:
+			void wheelEvent(QWheelEvent* event)override{event->ignore();}
+		};
+
+		class ScrollSafeComboBox final:public QComboBox
+		{
+		protected:
+			void wheelEvent(QWheelEvent* event)override{event->ignore();}
+		};
+
+		class ScrollSafeSlider final:public QSlider
+		{
+		public:
+			using QSlider::QSlider;
+		protected:
+			void wheelEvent(QWheelEvent* event)override{event->ignore();}
+		};
+
 		QDoubleSpinBox* real_spin(double lo,double hi,double value,int decimals,const char* suffix="")
 		{
-			auto* spin=new QDoubleSpinBox;spin->setRange(lo,hi);spin->setDecimals(decimals);spin->setValue(value);
+			auto* spin=new ScrollSafeDoubleSpinBox;spin->setRange(lo,hi);spin->setDecimals(decimals);spin->setValue(value);
 			spin->setSuffix(QString::fromUtf8(suffix));spin->setKeyboardTracking(false);return spin;
 		}
 
@@ -79,7 +107,7 @@ namespace paracfd::gui
 		setWindowTitle("ParaCFD — GPU paraglider aerodynamics");resize(1320,820);
 		viewer_=new SliceViewer(this);setCentralWidget(viewer_);
 		SimInfo initial;initial.nx=initial.ny=initial.nz=32;initial.h=0.5;initial.coarse_h=0.5;initial.Lx=initial.Ly=initial.Lz=16;initial.U=config_.freestream.speed;initial.rho=config_.freestream.rho;initial.nu=config_.freestream.nu;initial.name="paraglider";viewer_->setInfo(initial);
-		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(400);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(7);
+		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(400);viewer_->setArrowSpeedMult(0.1f);viewer_->setArrowWidthMult(0.5f);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(7);
 		buildMenus();buildControls();configToUi(config_);
 		repaint_timer_=new QTimer(this);connect(repaint_timer_,&QTimer::timeout,this,[this]{updateSnapshot();viewer_->update();});repaint_timer_->start(16);
 		statusBar()->showMessage("Open a STEP wing, inspect its orientation, then Build CFD Grid.");
@@ -102,27 +130,33 @@ namespace paracfd::gui
 		auto* panel=new QWidget;auto* column=new QVBoxLayout(panel);column->setContentsMargins(8,8,8,8);
 		wing_label_=new QLabel("No STEP wing loaded");wing_label_->setWordWrap(true);column->addWidget(wing_label_);
 		auto* wind_hint=new QLabel(QString::fromUtf8("FREESTREAM +X  →\nBBox infers span/chord; leading/trailing needs confirmation."));wind_hint->setStyleSheet("font-weight:600;color:#ff9a75;background:#20242a;padding:6px;");column->addWidget(wind_hint);
-		auto* orientation=new QHBoxLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip);orientation->addWidget(yaw);orientation->addWidget(aoa_up);orientation->addWidget(aoa_down);column->addLayout(orientation);
+		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
 
 		auto* run_group=new QGroupBox("Run");auto* run_column=new QVBoxLayout(run_group);build_button_=new QPushButton("Build CFD Grid");start_button_=new QPushButton("Start Simulation");play_button_=new QPushButton("Play");play_button_->setCheckable(true);step_button_=new QPushButton("Step");start_button_->setEnabled(false);play_button_->setEnabled(false);step_button_->setEnabled(false);connect(build_button_,&QPushButton::clicked,this,[this]{buildGrid();});connect(start_button_,&QPushButton::clicked,this,&ParagliderWindow::startSimulation);connect(play_button_,&QPushButton::toggled,this,[this](bool on){play_button_->setText(on?"Pause":"Play");if(worker_)worker_->setPlaying(on);});connect(step_button_,&QPushButton::clicked,this,[this]{if(worker_)worker_->stepOnce();});auto* run_row=new QHBoxLayout;run_row->addWidget(start_button_);run_row->addWidget(play_button_);run_row->addWidget(step_button_);run_column->addWidget(build_button_);run_column->addLayout(run_row);column->addWidget(run_group);
 
 		auto* physics=new QGroupBox("Freestream / solver (Build resets)");auto* form=new QFormLayout(physics);
 		speed_=real_spin(0,100,10,3," m/s");rho_=real_spin(0.1,10,1.225,4," kg/m³");nu_=real_spin(1e-8,1e-2,1.5e-5,8," m²/s");tessellation_=real_spin(0.01,100,2,2," mm");
 		upstream_=real_spin(0,100,3,2," m");downstream_=real_spin(0,200,8,2," m");lateral_=real_spin(0,100,3,2," m");vertical_=real_spin(0,100,3,2," m");
-		base_h_=real_spin(0.015625,10,0.25,5," m");levels_=new QSpinBox;levels_->setRange(1,6);brick_size_=new QSpinBox;brick_size_->setRange(8,64);brick_size_->setSingleStep(8);
+		base_h_=real_spin(0.015625,10,0.25,5," m");levels_=new ScrollSafeSpinBox;levels_->setRange(1,6);brick_size_=new ScrollSafeSpinBox;brick_size_->setRange(8,64);brick_size_->setSingleStep(8);
 		wing_refine_=real_spin(0,50,1,3," m");surface_refine_=real_spin(0,20,0.35,3," m");wake_length_=real_spin(0,200,8,2," m");wake_radius_=real_spin(0,100,2,2," m");
 		min_volume_fraction_=real_spin(0.01,0.49,0.25,3);min_volume_fraction_->setSingleStep(0.01);min_aperture_area_fraction_=real_spin(0,0.1,1e-4,6);min_aperture_area_fraction_->setSingleStep(1e-4);
-		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(1e-8,1e-2,1e-5,8);projection_iterations_=new QSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
+		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(1e-8,1e-2,1e-5,8);projection_iterations_=new ScrollSafeSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
 		reference_area_=real_spin(0,10000,0,3," m²");reference_length_=real_spin(0,1000,0,3," m");
 		form->addRow("Speed",speed_);form->addRow("Density",rho_);form->addRow("Kinematic viscosity",nu_);form->addRow("STEP deflection",tessellation_);form->addRow("Upstream margin",upstream_);form->addRow("Downstream margin",downstream_);form->addRow("Lateral margin",lateral_);form->addRow("Vertical margin",vertical_);form->addRow("Base cell size",base_h_);form->addRow("AMR levels",levels_);form->addRow("Brick size",brick_size_);form->addRow("Wing refine distance",wing_refine_);form->addRow("Surface refine distance",surface_refine_);form->addRow("Wake length",wake_length_);form->addRow("Wake radius",wake_radius_);form->addRow("Min fragment volume / h³",min_volume_fraction_);form->addRow("Min aperture area / h²",min_aperture_area_fraction_);form->addRow("CFL",cfl_);form->addRow("Smagorinsky Cs",smagorinsky_);form->addRow("Projection tolerance",projection_tolerance_);form->addRow("Projection max iterations",projection_iterations_);form->addRow("Reference area",reference_area_);form->addRow("Reference length",reference_length_);column->addWidget(physics);
 		for(auto* spin:{speed_,rho_,nu_,tessellation_,upstream_,downstream_,lateral_,vertical_,base_h_,wing_refine_,surface_refine_,wake_length_,wake_radius_,min_volume_fraction_,min_aperture_area_fraction_,cfl_,smagorinsky_,projection_tolerance_,reference_area_,reference_length_})connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(levels_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(brick_size_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});
 		grid_readout_=new QLabel;grid_readout_->setStyleSheet("font-family:Consolas;color:#bcd;");grid_readout_->setWordWrap(true);column->addWidget(grid_readout_);
 
-		auto* visualization=new QGroupBox("Visualization");auto* viz_form=new QFormLayout(visualization);field_=new QComboBox;field_->addItems({"Speed |u|","X velocity u","Y velocity v","Z velocity w","Pressure p"});slice_axis_=new QComboBox;slice_axis_->addItems({"X-normal","Y-normal","Z-normal"});slice_axis_->setCurrentIndex(2);slice_position_=new QSlider(Qt::Horizontal);slice_position_->setRange(0,1000);slice_position_->setValue(500);auto_range_=new QCheckBox("Auto range");auto_range_->setChecked(true);show_slice_=new QCheckBox("Slice");show_slice_->setChecked(true);show_model_=new QCheckBox("STEP surface");show_model_->setChecked(true);show_amr_=new QCheckBox("AMR bricks");show_amr_->setChecked(false);show_eb_=new QCheckBox("EB cells");show_eb_->setChecked(false);show_arrows_=new QCheckBox("Velocity arrows");show_arrows_->setChecked(true);show_tracers_=new QCheckBox("Flow tracers");show_tracers_->setChecked(true);surface_colour_=new QComboBox;surface_colour_->addItems({"Visible side Cp+/Cp-",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});surface_colour_->setCurrentIndex(1);auto* layers=new QWidget;auto* layers_row=new QHBoxLayout(layers);layers_row->setContentsMargins(0,0,0,0);for(auto* check:{show_slice_,show_model_,show_amr_,show_eb_,show_arrows_,show_tracers_})layers_row->addWidget(check);auto* views=new QWidget;auto* views_row=new QHBoxLayout(views);views_row->setContentsMargins(0,0,0,0);auto* fit_wing=new QPushButton("Fit Wing");auto* fit_domain=new QPushButton("Fit Domain");views_row->addWidget(fit_wing);views_row->addWidget(fit_domain);viz_form->addRow("Field",field_);viz_form->addRow("Slice plane",slice_axis_);viz_form->addRow("Plane position",slice_position_);viz_form->addRow(auto_range_);viz_form->addRow("View",views);viz_form->addRow("Layers",layers);viz_form->addRow("Canopy colour",surface_colour_);column->addWidget(visualization);
+		auto* visualization=new QGroupBox("Visualization");auto* viz_form=new QFormLayout(visualization);field_=new ScrollSafeComboBox;field_->addItems({"Speed |u|","X velocity u","Y velocity v","Z velocity w","Pressure p"});slice_axis_=new ScrollSafeComboBox;slice_axis_->addItems({"X-normal","Y-normal","Z-normal"});slice_axis_->setCurrentIndex(2);slice_position_=new ScrollSafeSlider(Qt::Horizontal);slice_position_->setRange(0,1000);slice_position_->setValue(500);auto_range_=new QCheckBox("Auto range");auto_range_->setChecked(true);show_slice_=new QCheckBox("Slice");show_slice_->setChecked(true);show_model_=new QCheckBox("STEP surface");show_model_->setChecked(true);show_amr_=new QCheckBox("AMR grid");show_amr_->setToolTip("Show or hide the cyan three-dimensional AMR brick boundaries.");show_amr_->setChecked(false);show_eb_=new QCheckBox("EB cells");show_eb_->setChecked(false);show_arrows_=new QCheckBox("Velocity arrows");show_arrows_->setChecked(true);show_tracers_=new QCheckBox("Flow tracers");show_tracers_->setChecked(true);surface_colour_=new ScrollSafeComboBox;surface_colour_->addItems({"Visible side Cp+/Cp-",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});surface_colour_->setCurrentIndex(1);auto* layers=new QWidget;auto* layers_grid=new QGridLayout(layers);layers_grid->setContentsMargins(0,0,0,0);const QList<QCheckBox*> layer_checks={show_slice_,show_model_,show_amr_,show_eb_,show_arrows_,show_tracers_};for(int q=0;q<layer_checks.size();++q)layers_grid->addWidget(layer_checks[q],q/2,q%2);auto* views=new QWidget;auto* views_column=new QVBoxLayout(views);views_column->setContentsMargins(0,0,0,0);auto* fit_wing=new QPushButton("Fit Wing");auto* fit_domain=new QPushButton("Fit Domain");views_column->addWidget(fit_wing);views_column->addWidget(fit_domain);viz_form->addRow("Field",field_);viz_form->addRow("Slice plane",slice_axis_);viz_form->addRow("Plane position",slice_position_);viz_form->addRow(auto_range_);viz_form->addRow("View",views);viz_form->addRow("Layers",layers);viz_form->addRow("Canopy colour",surface_colour_);column->addWidget(visualization);
 		connect(field_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){static constexpr Field fields[]={Field::SpeedMag,Field::VelU,Field::VelV,Field::VelW,Field::Pressure};viewer_->setField(fields[index]);});connect(slice_axis_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){viewer_->setAxis(static_cast<Axis>(index));});connect(slice_position_,&QSlider::valueChanged,this,[this](int value){viewer_->setPlaneFraction(value/1000.0f);});connect(auto_range_,&QCheckBox::toggled,viewer_,&SliceViewer::setAutoRange);connect(fit_wing,&QPushButton::clicked,viewer_,&SliceViewer::frameWingView);connect(fit_domain,&QPushButton::clicked,viewer_,&SliceViewer::frameDomainView);connect(show_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowSlice);connect(show_model_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowModel);connect(show_amr_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_eb_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_arrows_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowArrows);connect(show_tracers_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowTracers);connect(surface_colour_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{applySurfaceColour();});
 
+		auto* arrows_group=new QGroupBox("Flow arrows (visual only)");auto* arrows_form=new QFormLayout(arrows_group);auto* arrow_mode=new ScrollSafeComboBox;arrow_mode->addItems({"3D volume","2D slice plane"});arrow_mode->setCurrentIndex(viewer_->arrowMode3D()?0:1);arrow_mode->setToolTip("3D advects arrows through the volume; 2D confines them to the selected slice.");auto* arrow_density=new ScrollSafeSlider(Qt::Horizontal);arrow_density->setRange(100,8000);arrow_density->setValue(viewer_->arrowDensity());arrow_density->setToolTip("Number of animated flow arrows.");auto* arrow_speed=new ScrollSafeSlider(Qt::Horizontal);arrow_speed->setRange(0,100);arrow_speed->setValue(static_cast<int>(std::lround(viewer_->arrowSpeedMult()*100.0f)));arrow_speed->setToolTip("Animation speed only: 0 freezes the arrows and 100 is full visual speed. This does not alter the CFD solution.");auto* arrow_width=new ScrollSafeSlider(Qt::Horizontal);arrow_width->setRange(5,100);arrow_width->setValue(static_cast<int>(std::lround(viewer_->arrowWidthMult()*50.0f)));arrow_width->setToolTip("Arrow shaft and head thickness; arrow length is unchanged.");arrows_form->addRow("Mode",arrow_mode);arrows_form->addRow("Density",arrow_density);arrows_form->addRow("Animation speed",arrow_speed);arrows_form->addRow("Size / width",arrow_width);column->addWidget(arrows_group);
+		connect(arrow_mode,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int value){viewer_->setArrowMode3D(value==0);});connect(arrow_density,&QSlider::valueChanged,viewer_,&SliceViewer::setArrowDensity);connect(arrow_speed,&QSlider::valueChanged,this,[this](int value){viewer_->setArrowSpeedMult(value/100.0f);});connect(arrow_width,&QSlider::valueChanged,this,[this](int value){viewer_->setArrowWidthMult(value/50.0f);});
+
+		auto* tracers_group=new QGroupBox("Flow tracers (visual only)");auto* tracers_form=new QFormLayout(tracers_group);auto* tracer_mode=new ScrollSafeComboBox;tracer_mode->addItems({"3D volume","2D slice plane"});tracer_mode->setCurrentIndex(viewer_->tracerMode3D()?0:1);tracer_mode->setToolTip("3D seeds the inlet plane and integrates full 3D streamlines; 2D stays on the selected slice.");auto* tracer_density=new ScrollSafeSlider(Qt::Horizontal);tracer_density->setRange(2,120);tracer_density->setValue(viewer_->tracerGridDensity());tracer_density->setToolTip("Inlet seed count along the larger inlet dimension.");auto* tracer_length=new ScrollSafeSlider(Qt::Horizontal);tracer_length->setRange(50,2000);tracer_length->setValue(viewer_->tracerTrail());tracer_length->setToolTip("Maximum streamline length in integration steps.");auto* tracer_width=new ScrollSafeSlider(Qt::Horizontal);tracer_width->setRange(10,60);tracer_width->setValue(static_cast<int>(std::lround(viewer_->tracerWidth()*10.0f)));tracer_width->setToolTip("Tracer ribbon thickness in screen pixels.");auto* tracer_boring=new ScrollSafeSlider(Qt::Horizontal);tracer_boring->setRange(990,1100);tracer_boring->setPageStep(10);tracer_boring->setValue(static_cast<int>(std::lround(viewer_->tracerBoring()*1000.0f)));tracer_boring->setToolTip("Hide short, straight streamlines. Far left shows all; moving right retains increasingly long and meandering wake paths.");tracers_form->addRow("Mode",tracer_mode);tracers_form->addRow("Seed density",tracer_density);tracers_form->addRow("Length",tracer_length);tracers_form->addRow("Width",tracer_width);tracers_form->addRow("Hide boring",tracer_boring);column->addWidget(tracers_group);
+		connect(tracer_mode,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int value){viewer_->setTracerMode3D(value==0);});connect(tracer_density,&QSlider::valueChanged,viewer_,&SliceViewer::setTracerGridDensity);connect(tracer_length,&QSlider::valueChanged,viewer_,&SliceViewer::setTracerTrail);connect(tracer_width,&QSlider::valueChanged,this,[this](int value){viewer_->setTracerWidth(value/10.0f);});connect(tracer_boring,&QSlider::valueChanged,this,[this](int value){viewer_->setTracerBoring(value/1000.0f);});connect(tracer_boring,&QSlider::sliderPressed,this,[this]{viewer_->setTracerBoringInstant(true);});connect(tracer_boring,&QSlider::sliderReleased,this,[this]{viewer_->setTracerBoringInstant(false);});
+
 		solver_readout_=new QLabel("Grid not built");solver_readout_->setWordWrap(true);solver_readout_->setStyleSheet("font-family:Consolas;color:#cdd;");load_readout_=new QLabel("Pressure loads unavailable");load_readout_->setWordWrap(true);load_readout_->setStyleSheet("font-family:Consolas;color:#cdd;");column->addWidget(solver_readout_);column->addWidget(load_readout_);column->addStretch();
-		auto* scroll=new QScrollArea;scroll->setWidgetResizable(true);scroll->setWidget(panel);dock->setWidget(scroll);addDockWidget(Qt::LeftDockWidgetArea,dock);
+		auto* scroll=new QScrollArea;scroll->setWidgetResizable(true);scroll->setWidget(panel);dock->setWidget(scroll);addDockWidget(Qt::LeftDockWidgetArea,dock);resizeDocks({dock},{380},Qt::Horizontal);
 	}
 
 	void ParagliderWindow::configToUi(const ParagliderConfig& c)
@@ -172,8 +206,8 @@ namespace paracfd::gui
 			{
 				config_.placement=left_rotation(config_.placement,axes.yaw_degrees,{0,0,1});
 				orientation_note=axes.span_axis==0
-					?"bbox: span X / chord Y; assumed chord flow -Y -> +X"
-					:"bbox: span Y / chord X; assumed chord flow -X -> +X";
+					?"bbox: span X / chord Y; assumed leading edge -Y -> upstream -X"
+					:"bbox: span Y / chord X; assumed leading edge -X -> upstream -X";
 			}
 			else orientation_note="bbox span/chord ambiguous; imported axes retained";
 			std::fprintf(stderr,"[paraglider-orientation] bbox %.3f x %.3f m: %s\n",

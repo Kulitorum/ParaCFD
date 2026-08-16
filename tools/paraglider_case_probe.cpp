@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -21,13 +23,34 @@ namespace
 		for(int level=0;level<(int)hierarchy.levels().size();++level){const AmrLevel& metadata=hierarchy.levels()[level];const AmrHostLevelFields& values=fields.levels()[level];for(int brick=0;brick<(int)metadata.bricks.size();++brick){const BrickMetadata& record=metadata.bricks[brick];if(!record.active())continue;for(int component=0;component<3;++component){const int ni=component==0?bs+1:bs,nj=component==1?bs+1:bs,nk=component==2?bs+1:bs;for(int k=0;k<nk;++k)for(int j=0;j<nj;++j)for(int i=0;i<ni;++i){const std::size_t index=component==0?values.layout.u_index(brick,i,j,k):(component==1?values.layout.v_index(brick,i,j,k):values.layout.w_index(brick,i,j,k));const double value=std::abs(static_cast<double>(component==0?values.u[index]:(component==1?values.v[index]:values.w[index])));if(value<=out.value)continue;out={value,level,brick,component,i,j,k,{record.origin.x+(i+(component==0?0.0:0.5))*record.h,record.origin.y+(j+(component==1?0.0:0.5))*record.h,record.origin.z+(k+(component==2?0.0:0.5))*record.h}};}}}}
 		return out;
 	}
+	struct DirectionAccumulator
+	{
+		double volume=0,sum_u=0,sum_v=0,sum_w=0,sum_speed2=0,sum_transverse2=0,reverse_volume=0,cross_dominant_volume=0;
+		double min_u=std::numeric_limits<double>::infinity(),max_u=-std::numeric_limits<double>::infinity();
+		double max_abs_v=0,max_abs_w=0;
+		void add(double u,double v,double w,double cell_volume)
+		{
+			if(!std::isfinite(u)||!std::isfinite(v)||!std::isfinite(w))return;const double transverse2=v*v+w*w;volume+=cell_volume;sum_u+=cell_volume*u;sum_v+=cell_volume*v;sum_w+=cell_volume*w;sum_speed2+=cell_volume*(u*u+transverse2);sum_transverse2+=cell_volume*transverse2;if(u<0)reverse_volume+=cell_volume;if(transverse2>u*u)cross_dominant_volume+=cell_volume;min_u=std::min(min_u,u);max_u=std::max(max_u,u);max_abs_v=std::max(max_abs_v,std::abs(v));max_abs_w=std::max(max_abs_w,std::abs(w));
+		}
+	};
+	struct DirectionalStats{DirectionAccumulator all,background;};
+	DirectionalStats directional_stats(const ExternalAeroCore& core,const AmrHostFields& fields,const Aabb3d& wing_box)
+	{
+		DirectionalStats out;const AmrHierarchy& hierarchy=core.hierarchy();const int bs=hierarchy.brick_size();const double pad=2.0;
+		for(int level=0;level<(int)hierarchy.levels().size();++level){const AmrLevel& metadata=hierarchy.levels()[level];const AmrHostLevelFields& values=fields.levels()[level];const double cell_volume=metadata.h*metadata.h*metadata.h;for(int brick=0;brick<(int)metadata.bricks.size();++brick){const BrickMetadata& record=metadata.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const double u=0.5*(static_cast<double>(values.u[values.layout.u_index(brick,i,j,k)])+static_cast<double>(values.u[values.layout.u_index(brick,i+1,j,k)])),v=0.5*(static_cast<double>(values.v[values.layout.v_index(brick,i,j,k)])+static_cast<double>(values.v[values.layout.v_index(brick,i,j+1,k)])),w=0.5*(static_cast<double>(values.w[values.layout.w_index(brick,i,j,k)])+static_cast<double>(values.w[values.layout.w_index(brick,i,j,k+1)]));const Vec3d point=record.origin+Vec3d{(i+0.5)*metadata.h,(j+0.5)*metadata.h,(k+0.5)*metadata.h};out.all.add(u,v,w,cell_volume);const bool background=point.x<wing_box.lo.x-pad||point.y<wing_box.lo.y-pad||point.y>wing_box.hi.y+pad||point.z<wing_box.lo.z-pad||point.z>wing_box.hi.z+pad;if(background)out.background.add(u,v,w,cell_volume);}}}
+		return out;
+	}
+	void print_direction_region(const char* label,const DirectionAccumulator& value)
+	{
+		if(!(value.volume>0)){std::printf("[paraglider-case]   %s direction: no represented volume\n",label);return;}const double inv=1.0/value.volume;std::printf("[paraglider-case]   %s direction: mean=[%.5g %.5g %.5g] m/s rms|u|=%.5g rms-trans=%.5g u-range=[%.5g %.5g] max|v,w|=[%.5g %.5g] reverse=%.4g%% transverse-dominant=%.4g%%\n",label,value.sum_u*inv,value.sum_v*inv,value.sum_w*inv,std::sqrt(value.sum_speed2*inv),std::sqrt(value.sum_transverse2*inv),value.min_u,value.max_u,value.max_abs_v,value.max_abs_w,100.0*value.reverse_volume*inv,100.0*value.cross_dominant_volume*inv);
+	}
 
 	double elapsed_ms(std::chrono::steady_clock::time_point begin,std::chrono::steady_clock::time_point end)
 	{
 		return std::chrono::duration<double,std::milli>(end-begin).count();
 	}
 
-	void report(int step,const ExternalAeroCore& core,const ExternalAeroStepStats& stats,double rho,AmrHostFields* diagnostic_fields,const TriangleBvh* bvh)
+	void report(int step,const ExternalAeroCore& core,const ExternalAeroStepStats& stats,double rho,AmrHostFields* diagnostic_fields,const TriangleBvh* bvh,const Aabb3d* wing_box)
 	{
 		const AerodynamicLoads loads=core.pressure_loads();const ExternalAeroConservationStats conservation=core.conservation_stats();
 		std::printf("[paraglider-case] step=%d t=%.6f s dt=%.3e max|u_i|=%.5g [regular=%.5g special=%.5g CFL-source=%.5g] CFL=%.3f Fp=[%.8g %.8g %.8g] N div[max=%.3e rmsV=%.3e] flux-error[max=%.3e abs=%.3e net=%.3e] PCG=%d/%.3e step=%.2f ms projection=%.2f ms EB=%.2f ms\n",step,core.physical_time(),stats.dt,stats.max_abs_velocity,stats.max_abs_regular_velocity,stats.max_abs_special_velocity,stats.cfl_velocity,stats.effective_cfl,loads.pressure_force.x,loads.pressure_force.y,loads.pressure_force.z,conservation.max_abs_divergence,conservation.volume_weighted_rms_divergence,conservation.max_integrated_flux_error,conservation.absolute_integrated_flux_error,conservation.net_integrated_flux_error,stats.pressure.iterations,stats.pressure.relative_residual,stats.gpu_step_ms,stats.projection_ms,stats.embedded_transport_ms);
@@ -37,7 +60,7 @@ namespace
 			{
 				int degree=0;double area_sum=0,absolute_flux=0,net_flux=0,wall_area=0;for(std::size_t edge=0;edge<system.embedded.size();++edge){const auto& incident=system.embedded[edge];const int lo=incident.direction>0?incident.coarse_dof:incident.fine_dof,hi=incident.direction>0?incident.fine_dof:incident.coarse_dof;if(node!=lo&&node!=hi)continue;const double flux=incident.open_area*fluxes.embedded_velocity[edge];++degree;area_sum+=incident.open_area;absolute_flux+=std::abs(flux);net_flux+=node==lo?flux:-flux;}for(const auto& patch:system.surface_patches)if(patch.plus_dof==node||patch.minus_dof==node)wall_area+=patch.area;const NearestSurfacePoint nearest=bvh?bvh->nearest(system.centroid[node]):NearestSurfacePoint{};std::printf("[paraglider-case]     %s node=%d %s degree=%d A-sum=%.3e |Q|=%.3e Qnet=%.3e wall-A=%.3e centre=[%.5g %.5g %.5g] fabric-distance=%.3e triangle=%u face=%u\n",label,node,node>=structured_end?"fragment":"regular",degree,area_sum,absolute_flux,net_flux,wall_area,system.centroid[node].x,system.centroid[node].y,system.centroid[node].z,nearest.found?nearest.distance:-1.0,nearest.triangle_id,nearest.source_face_id);
 			};describe_node(lower,"lower");describe_node(upper,"upper");}
-		if(diagnostic_fields&&bvh){const FieldMaximum maximum=locate_regular_maximum(core,*diagnostic_fields);const NearestSurfacePoint nearest=bvh->nearest(maximum.point);std::printf("[paraglider-case]   active regular maximum: %.6g m/s component=%c level=%d brick=%d ijk=[%d %d %d] point=[%.6g %.6g %.6g] fabric-distance=%.6g m triangle=%u\n",maximum.value,maximum.component>=0?"uvw"[maximum.component]:'?',maximum.level,maximum.brick,maximum.i,maximum.j,maximum.k,maximum.point.x,maximum.point.y,maximum.point.z,nearest.found?nearest.distance:-1.0,nearest.triangle_id);}
+		if(diagnostic_fields&&bvh){const FieldMaximum maximum=locate_regular_maximum(core,*diagnostic_fields);const NearestSurfacePoint nearest=bvh->nearest(maximum.point);std::printf("[paraglider-case]   active regular maximum: %.6g m/s component=%c level=%d brick=%d ijk=[%d %d %d] point=[%.6g %.6g %.6g] fabric-distance=%.6g m triangle=%u\n",maximum.value,maximum.component>=0?"uvw"[maximum.component]:'?',maximum.level,maximum.brick,maximum.i,maximum.j,maximum.k,maximum.point.x,maximum.point.y,maximum.point.z,nearest.found?nearest.distance:-1.0,nearest.triangle_id);if(wing_box){const DirectionalStats direction=directional_stats(core,*diagnostic_fields,*wing_box);print_direction_region("active",direction.all);print_direction_region("background",direction.background);}}
 	}
 }
 
@@ -69,11 +92,12 @@ int main(int argc,char** argv)
 		std::size_t discarded_apertures=0;double discarded_area=0;for(const AmrEbLevelAtlas& level:core.embedded_boundary().levels){discarded_apertures+=level.topology.discarded_subgrid_apertures;discarded_area+=level.topology.discarded_subgrid_aperture_area;}
 		std::printf("[paraglider-case] triangles=%zu bricks=%zu DOFs=%d EB-edges=%zu patches=%zu discarded-apertures=%zu/%.6g-m2 load=%.2f ms preprocess=%.2f ms GPU=%.2f MiB tolerance=%.3e\n",wing.triangle_count(),core.hierarchy().active_brick_count(),core.pressure_system().storage_size,core.pressure_system().embedded.size(),core.pressure_system().surface_patches.size(),discarded_apertures,discarded_area,elapsed_ms(load_begin,load_end),elapsed_ms(build_begin,build_end),core.gpu_bytes()/(1024.0*1024.0),config.solver.projection_tolerance);
 		std::unique_ptr<AmrHostFields> diagnostic_fields=locate_regular_max?std::make_unique<AmrHostFields>(core.hierarchy()):nullptr;
-		if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] initialization did not converge: iterations=%d residual=%.3e\n",stats.pressure.iterations,stats.pressure.relative_residual);return 3;}report(0,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh);
+		const Aabb3d wing_box{{wing.bbox_min[0],wing.bbox_min[1],wing.bbox_min[2]},{wing.bbox_max[0],wing.bbox_max[1],wing.bbox_max[2]}};
+		if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] initialization did not converge: iterations=%d residual=%.3e\n",stats.pressure.iterations,stats.pressure.relative_residual);return 3;}report(0,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box);
 		for(int step=1;step<=steps;++step)
 		{
 			stats=core.step();if(!stats.pressure.converged){std::fprintf(stderr,"[paraglider-case] step %d did not converge: iterations=%d residual=%.3e\n",step,stats.pressure.iterations,stats.pressure.relative_residual);return 4;}
-			if(step==1||step==steps||step%sample_every==0)report(step,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh);
+			if(step==1||step==steps||step%sample_every==0)report(step,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box);
 		}
 	}
 	catch(const std::exception& exception){std::fprintf(stderr,"[paraglider-case] failed: %s\n",exception.what());return 5;}
