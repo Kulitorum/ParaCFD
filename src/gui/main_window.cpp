@@ -2,7 +2,9 @@
 #include "gui/main_window.h"
 
 #include "core/geometry/building.h"
+#include "core/fluid/amr_eb.h"
 #include "core/fluid/amr_grid.h"
+#include "core/fluid/amr_pressure.h"
 #include "core/geometry/embedded_boundary.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/step_import.h"
@@ -102,6 +104,7 @@ namespace paracfd::gui
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
 			model_mesh_ = paracfd::core::TriMesh{};
 			if (viewer_) { viewer_->clearMesh(); viewer_->clearParagliderDebugBoxes(); }
+			if (start_btn_) { start_btn_->setEnabled(true); start_btn_->setText("Start Simulation"); }
 			initPlacementHistory(); // no model ⇒ clear the undo/redo history + disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
 		});
@@ -893,6 +896,12 @@ namespace paracfd::gui
 
 	void MainWindow::startSimulation()
 	{
+		if (!model_mesh_.empty() && centerline_mesh_.empty())
+		{
+			statusBar()->showMessage("paraglider AMR/EB pressure topology is ready; the external-aero velocity timestep is not wired yet", 8000);
+			std::fprintf(stderr,"[paraglider] start refused: the legacy channel timestep is not a valid solver for zero-thickness fabric\n");
+			return;
+		}
 		if (sim_started_) return; // idempotent
 		sim_started_ = true;
 		if (worker_) worker_->setStarted(true); // release the master run gate — the worker begins stepping
@@ -1649,6 +1658,9 @@ namespace paracfd::gui
 		if (model_injected_) setModelAsObstacle(false);
 		if (viewer_) viewer_->clearVoxelOverlay();
 		model_injected_ = false;
+		// Never let the legacy channel worker appear to simulate this surface. Keep it held until
+		// the AMR external-aero velocity/advection path consumes the composite EB projection.
+		sim_started_=false;if(worker_)worker_->setStarted(false);if(play_btn_)play_btn_->setEnabled(false);if(step_btn_)step_btn_->setEnabled(false);if(start_btn_){start_btn_->setEnabled(false);start_btn_->setText("CFD timestep not yet wired");}
 		buildParagliderPreviewGrid();
 		updateGizmoUi(); // enable the placement gizmo for the freshly loaded model
 		return true;
@@ -1658,16 +1670,24 @@ namespace paracfd::gui
 	{
 		using namespace paracfd::core;if(model_mesh_.empty()||!viewer_)return;
 		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());TriangleBvh bvh(wing);ParagliderConfig cfg;const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);AmrHierarchy amr=AmrHierarchy::build_static(requested,wing,bvh,cfg.amr);
-		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0;EmbeddedBoundaryBuildOptions options;options.min_volume_fraction=cfg.amr.min_volume_fraction;
+		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0,pressure_static=0;EmbeddedBoundaryBuildOptions options;options.min_volume_fraction=cfg.amr.min_volume_fraction;options.complex_subdivisions=cfg.amr.complex_subdivisions;
 		for(const AmrLevel& level:amr.levels())for(int brick_id=0;brick_id<(int)level.bricks.size();++brick_id)
 		{
-			const BrickMetadata& brick=level.bricks[brick_id];if(!brick.active())continue;const float width=amr.brick_size()*brick.h;brick_boxes.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});if(!brick.embedded_boundary())continue;
-			UniformEbGrid grid{brick.origin,amr.brick_size(),amr.brick_size(),amr.brick_size(),brick.h};EmbeddedBoundary eb=build_embedded_boundary(wing,bvh,grid,options);fragments+=eb.fragments.size();patches+=eb.patches.size();apertures+=eb.apertures.size();unresolved+=eb.unresolved.size();
-			for(int cell:eb.irregular_cells){const auto q=grid.cell_coord(cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
-			for(const UnresolvedEbCell& problem:eb.unresolved){const auto q=grid.cell_coord(problem.parent_cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
+			const BrickMetadata& brick=level.bricks[brick_id];if(!brick.active())continue;const float width=amr.brick_size()*brick.h;brick_boxes.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});
 		}
-		viewer_->setShowSlice(false);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;const Vec3d padded_size=amr.domain().hi-amr.domain().lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only padded domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8 — CFD timestep not started").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved),15000);
-		std::fprintf(stderr,"[paraglider-preview] face-only requested domain %.3f x %.3f x %.3f m; padded AMR %.3f x %.3f x %.3f m, %zu bricks; EB fragments=%zu apertures=%zu patches=%zu unresolved=%zu\n",requested_size.x,requested_size.y,requested_size.z,padded_size.x,padded_size.y,padded_size.z,amr.active_brick_count(),fragments,apertures,patches,unresolved);
+		const AmrEmbeddedBoundaryAtlas atlas=build_amr_embedded_boundary_atlas(amr,wing,bvh,options);
+		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
+		{
+			const EmbeddedBoundary& eb=level_atlas.topology;const UniformEbGrid& grid=eb.grid;
+			for(const FluidFragment& fragment:eb.fragments)if(level_atlas.owned_cell[fragment.parent_cell]){++fragments;if(fragment.pressure_static)++pressure_static;}
+			for(const FaceAperture& aperture:eb.apertures)if(level_atlas.owned_cell[aperture.parent_face_cell])++apertures;
+			for(const SurfacePatch& patch:eb.patches){const BrickLocation owner=amr.locate_finest(patch.centroid);if(owner.found()&&owner.level==level_atlas.level)++patches;}
+			for(int cell:eb.irregular_cells)if(level_atlas.owned_cell[cell]){const auto q=grid.cell_coord(cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
+			for(const UnresolvedEbCell& problem:eb.unresolved)if(level_atlas.owned_cell[problem.parent_cell]){++unresolved;const auto q=grid.cell_coord(problem.parent_cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
+		}
+		bool pressure_ready=false;std::size_t pressure_dofs=0,pressure_edges=0;if(atlas.ready_for_flow())try{const CompositeAmrPressureSystem pressure=build_composite_amr_pressure_system(amr,atlas);pressure_ready=true;pressure_dofs=pressure.storage_size;pressure_edges=pressure.coarse_fine.size()+pressure.embedded.size();}catch(const std::exception& e){std::fprintf(stderr,"[paraglider-preview] composite pressure rejected topology: %s\n",e.what());}
+		viewer_->setShowSlice(false);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;const Vec3d padded_size=amr.domain().hi-amr.domain().lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8, static pockets %9; pressure topology %10").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved).arg(pressure_static).arg(pressure_ready?QString("ready (%1 DOFs/%2 edges)").arg(pressure_dofs).arg(pressure_edges):QString("not ready")),15000);
+		std::fprintf(stderr,"[paraglider-preview] face-only requested domain %.3f x %.3f x %.3f m; padded AMR %.3f x %.3f x %.3f m, %zu bricks; EB fragments=%zu apertures=%zu patches=%zu unresolved=%zu static=%zu pressure=%s (%zu DOFs, %zu special edges)\n",requested_size.x,requested_size.y,requested_size.z,padded_size.x,padded_size.y,padded_size.z,amr.active_brick_count(),fragments,apertures,patches,unresolved,pressure_static,pressure_ready?"ready":"not-ready",pressure_dofs,pressure_edges);
 	}
 
 	bool MainWindow::loadCenterlineFile(const QString& path, bool noslip)
@@ -1694,6 +1714,7 @@ namespace paracfd::gui
 			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 5000);
 
 		centerline_mesh_ = mesh; // keep the centerline so Build can re-run without reloading
+		if(start_btn_){start_btn_->setEnabled(!sim_started_);start_btn_->setText(sim_started_?"Simulation running":"Start Simulation");}
 		centerline_noslip_ = noslip;
 		step_data_ = read_file_bytes(path); // embed the SOURCE STEP in a saved scene (regenerates the centerline on load)
 		step_source_name_ = QFileInfo(path).fileName().toStdString();

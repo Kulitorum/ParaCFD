@@ -48,6 +48,8 @@ namespace paracfd::core
 		std::uint16_t fragment_count = 0;
 		Vec3d plane_normal{}; // topology plane, minus -> plus
 		double plane_offset = 0.0; // dot(n,x)-offset
+		int sampled_voxel_offset = -1; // fallback topology, resolution^3 FragmentRefs
+		std::uint8_t sampled_resolution = 0;
 	};
 
 	struct FluidFragment
@@ -59,6 +61,7 @@ namespace paracfd::core
 		FragmentRef merge_target = invalid_fragment; // self when unmerged; never crosses fabric
 		int pressure_dof = -1;
 		int connection_offset = 0, connection_count = 0;
+		bool pressure_static = false; // isolated sealed pocket: retained state, excluded from projection
 	};
 
 	struct FragmentConnection
@@ -112,6 +115,7 @@ namespace paracfd::core
 		std::vector<FragmentConnection> connections; // only faces touching irregular topology
 		std::vector<FaceAperture> apertures;
 		std::vector<SurfacePatch> patches;
+		std::vector<FragmentRef> sampled_voxel_fragments;
 		std::vector<UnresolvedEbCell> unresolved;
 		double min_volume_fraction = 0.05;
 
@@ -123,9 +127,19 @@ namespace paracfd::core
 
 	struct EmbeddedBoundaryBuildOptions
 	{
-		double coplanar_angle_tolerance = 1e-6;
-		double coplanar_distance_tolerance = 1e-8; // metres, additionally scaled by cell h
-		double surface_coverage_tolerance = 2e-3; // a full splitter must cover the plane/cell section
+		// A CAD canopy is curved, so a CFD cell commonly contains several non-coplanar
+		// tessellation triangles belonging to one smooth sheet. Fit those triangles to
+		// one local topology plane only while both bounds below hold. Ribs, converging
+		// skins, and other distinct sheets exceed these bounds and remain unresolved.
+		double smooth_sheet_angle_tolerance = 0.26; // radians (about 15 degrees)
+		double smooth_sheet_distance_fraction = 0.15; // max vertex distance from fitted plane / h
+		double coplanar_angle_tolerance = 1e-6; // exact Cartesian-face classification only
+		double coplanar_distance_tolerance = 1e-8; // metres, exact-face classification only
+		double surface_coverage_tolerance = 0.05; // projected coverage of fitted plane/cell section
+		// Optional finest-level fallback for cells with junctions, terminating sheets,
+		// or multiple surfaces. It reconstructs fluid connectivity (never solid fill)
+		// on an N^3 local graph whose edges are blocked by exact BVH intersections.
+		int complex_subdivisions = 0;
 		double min_volume_fraction = 0.05;
 	};
 

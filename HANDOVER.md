@@ -2,45 +2,54 @@
 
 ## Current state
 
-ParaCFD is being migrated from the building/channel solver to a purpose-built static-geometry paraglider solver. The repository builds, and the new foundation has deterministic CPU/GPU tests. The physical invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close its openings, or replace it with a binary solid mask.
+ParaCFD is being migrated from the building/channel solver to a purpose-built static-geometry paraglider solver. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.
 
 Implemented:
 
-- STEP triangle source-face provenance and optional UV retention;
-- affine-safe placed normals;
-- robust static double-precision triangle BVH;
-- paraglider configuration and automatic far-field bounding box;
-- 2:1 static block-AMR hierarchy, CPU/GPU brick hashing, level-pooled FP32 SoA fields, and CPU/CUDA same-level halos;
-- ratio-two restriction, prolongation, balancing, and aperture-aware flux matching primitives;
-- one-level zero-thickness EB cells with split fluid fragments, split Cartesian-face apertures, coincident blocked faces without tiny fragments, surface patches, explicit unresolved-complexity reporting, and conservative same-side small-fragment merging (including merge chains);
-- one-level finite-volume EB pressure operator, CPU PCG/reference path, and CUDA FP32 matrix-free operator/CG path;
-- two-sided pressure/Cp/pressure-force accumulation with winding-invariant force and optional reference coefficients;
-- BVH segment collision for particles and tracers, plus triangle-native delta-Cp rendering support;
-- GPU +X inflow, X-max pressure outlet, and symmetric Y/Z free-slip boundary kernels with no ground;
-- geometry, operator, AMR, configuration, and GPU timing probes.
+- OpenCascade STEP tessellation in metres with triangle-to-face provenance and optional UVs;
+- affine-safe placement, static double-precision triangle BVH, and face-only bbox/domain sizing (STEP wires do not affect the domain);
+- static balanced 2:1 brick AMR, pooled FP32 SoA fields, same-level halos, hash lookup, restriction/prolongation, and conservative four-tile coarse/fine interfaces;
+- a sparse cross-brick EB atlas, so brick boundaries are not walls and covered coarse cells are excluded by finest-owner selection;
+- smooth-sheet fitting plus a configurable finest-cell fluid-connectivity fallback supporting arbitrary fragment counts without solid/parity classification;
+- split face apertures, including multiple disconnected openings on a partially covered aligned Cartesian face;
+- conservative same-fluid small-fragment merging and explicitly retained/counted pressure-static pockets;
+- a composite matrix-free pressure operator containing implicit regular faces plus compact EB and coarse/fine connections;
+- CPU divergence/gradient reference operations and CUDA FP32/FP64 operator/Jacobi-PCG projection across all AMR levels;
+- two-sided pressure/Cp/pressure-force accumulation with winding-invariant force;
+- BVH tracer collision and triangle-native delta-Cp render storage;
+- a GUI AMR/EB preview that validates pressure-topology construction and refuses to run the unrelated legacy channel timestep.
 
-The old solver remains buildable as a reference. It must not be confused with the new aerodynamic path.
+The old solver remains buildable only as a reference. It is not a paraglider result path.
+
+## Current acceptance geometry
+
+`Test-Data/PlanBParakite.step` is exercised through `configs/planb_parakite.json`. That exporter uses -Y as forward, so the config applies +90 degrees about Z to map the model to ParaCFD's fixed +X freestream.
+
+At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_subdivisions=4`, the case currently reports approximately:
+
+- 49,673 triangles / 176 CAD faces;
+- 120 active bricks / 3,932,160 active cells;
+- 32,338 owned EB fragments, 117,040 face apertures, and 155,324 surface patches;
+- zero unresolved cells and 294 pressure-static isolated pockets;
+- 4,484,367 composite pressure slots with 81,920 coarse/fine and 112,563 EB connections;
+- 124.14 MiB pooled FP32 field estimate (before pressure solver/topology scratch).
 
 ## Next engineering work
 
-1. Assemble EB topology across adjacent bricks, including fragment/aperture identity at brick interfaces and physical boundary records.
-2. Implement composite AMR pressure coupling. Coarse flux must equal the sum of fine aperture fluxes, and the preconditioner must operate across levels rather than solving levels independently.
-3. Port velocity storage, boundary conditions, MacCormack advection, and Smagorinsky LES to the AMR hierarchy. Near fabric, BVH/EB segment-side tests must prevent a backtrace from sampling the opposite pressure side.
-4. Add the complete external-aero timestep and manufactured GPU flow cases: normal/parallel/inclined plates, opened cavity, AMR conservation, and AMR-versus-uniform comparison.
-5. Replace the legacy Qt workflow with STEP -> Build CFD Grid -> Start Simulation; then add brick/EB overlays, two-sided Cp colouring, pressure-only force readouts, residuals, timings, and memory statistics.
-6. Only after the new path is operational, remove building, channel, ground/seabed, porous, old voxel-load, centerline, and building-config code and simplify CMake.
+1. Move composite divergence, pressure RHS, and velocity correction from the CPU reference into persistent CUDA allocations over `DeviceAmrFields` and compact special-flux arrays.
+2. Implement the new external-aero timestep: +X freestream BC, regular/EB velocity fluxes, composite projection, then AMR-aware advection and LES with side-safe backtraces.
+3. Add component-wise pressure gauges and aperture-aware EB reconstruction when fabric reaches a 2:1 interface; replace Jacobi with a geometric multilevel preconditioner.
+4. Add dynamic normal/parallel/inclined plate and opened-cavity tests, followed by AMR-versus-uniform force validation.
+5. Complete the Qt workflow and only then remove building/channel/ground/seabed/porous code.
 
 ## Important files
 
-- Geometry: `src/core/geometry/tri_mesh.h`, `step_import.cpp`, `triangle_bvh.*`, `embedded_boundary.*`
-- AMR: `src/core/fluid/amr_grid.*`, `amr_fields.*`, `amr_exchange.*`
-- Pressure: `src/core/fluid/eb_pressure.*`
+- Geometry: `src/core/geometry/tri_mesh.h`, `step_import.*`, `triangle_bvh.*`, `embedded_boundary.*`
+- AMR fields/exchange: `src/core/fluid/amr_grid.*`, `amr_fields.*`, `amr_exchange.*`
+- AMR EB/pressure: `src/core/fluid/amr_eb.*`, `amr_pressure.*`, `eb_pressure.*`
 - Loads/config: `src/core/aero_loads.*`, `src/core/paraglider_config.*`
 - Tests/probes: `tools/paraglider_geometry_probe.cpp`, `paraglider_gpu_probe.cpp`, `paraglider_probe.cpp`
-- New default: `configs/paraglider.json`
 
 ## Validation policy
 
-Do not bless old output merely because the operator changed. Keep mathematically unchanged legacy parity tests. Validate redesigned geometry/operators against analytical or CPU-double references. Production fields are FP32, while geometry, residual accumulation where useful, force totals, and reference calculations may be FP64.
-
-Do not hide unresolved geometry at the finest level. Emit the affected brick/cell and triangle information and reject the CFD grid until it is resolved or the configured refinement limit is intentionally increased.
+Do not bless changed output merely because an operator changed. Validate redesigned geometry and operators against analytical or CPU-double references. Production fields are FP32; geometry, residual accumulation where useful, and force totals remain FP64. Never hide unresolved topology or cross-fabric connections by loosening tolerances.

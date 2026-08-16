@@ -268,8 +268,7 @@ int main(int argc, char** argv)
 	if (!step_path.empty())
 	{
 		(void)voxelize; // auto-injected on load now; the flag no longer gates injection
-		std::fprintf(stderr, "[G1] --load-step: loading + auto-injecting model as %s obstacle\n",
-			noslip ? "no-slip" : "free-slip");
+		std::fprintf(stderr, "[paraglider] --load-step: loading zero-thickness two-sided fabric preview\n");
 		if (!win.loadStepFile(QString::fromStdString(step_path), noslip))
 			std::fprintf(stderr, "[G1] STEP load failed; no obstacle injected\n");
 	}

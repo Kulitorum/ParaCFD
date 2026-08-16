@@ -32,6 +32,7 @@ namespace paracfd::core
 		double surface_refinement_distance = 0.35; // m
 		double wake_length = 8.0;                 // m, +X from wing bbox
 		double wake_radius = 2.0;                 // m around wing bbox y/z centre
+		int complex_subdivisions = 4;             // finest-cell N^3 fluid-connectivity fallback
 		double min_volume_fraction = 0.05;
 	};
 

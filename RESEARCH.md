@@ -6,7 +6,7 @@ The CAD model is a collection of oriented surface patches, not a watertight soli
 
 An opening is represented by the absence of fabric. No parity test or inside/outside classification is valid for this model. Surface preprocessing therefore asks only which triangles intersect a cell/face and how they partition local fluid connectivity.
 
-Regular cells use implicit Cartesian topology. Irregular cells carry compact fragment, aperture, blocked-face, and fabric-patch arrays. A sheet coincident with a Cartesian face suppresses that implicit face connection while retaining two ordinary full-volume cells. If multiple non-coplanar sheets or unresolved sheet endings make local topology ambiguous, refinement is mandatory. Reaching the finest level without resolving the topology is a grid-generation error, never permission to connect or merge regions.
+Regular cells use implicit Cartesian topology. Irregular cells carry compact fragment, aperture, blocked-face, and fabric-patch arrays. A sheet coincident with a Cartesian face suppresses that implicit face connection while retaining two ordinary full-volume cells; partial coverage produces one record per connected fluid opening. At the finest level, a deterministic local microcell graph may recover multi-fragment topology at sheet endings and junctions. All microcells remain fluid and only exact triangle crossings remove graph edges, so this is neither solid voxelization nor parity filling. Reaching the finest level without a valid topology is a grid-generation error, never permission to connect or merge regions.
 
 ## Finite-volume pressure operator
 
@@ -28,7 +28,7 @@ At a 2:1 AMR interface, the geometric coarse aperture flux is replaced by the su
 
 ## Small control volumes
 
-Tiny cut fragments create severe explicit stability limits and poorly conditioned pressure equations. The initial stabilization merges a fragment below a configurable volume fraction with a larger fluid neighbour through the largest appropriate open aperture. A fabric surface is not an open aperture, so the operation cannot cross sides. Strictly increasing merge chains are resolved to one root, and volumes/centroids/source fluxes are accumulated conservatively into that representative.
+Tiny cut fragments create severe explicit stability limits and poorly conditioned pressure equations. The initial stabilization joins adjacent tiny fragments only through actual apertures, then merges the group into an appropriate larger fluid neighbour. A fabric surface is not an open aperture, so the operation cannot cross sides. Merge chains resolve to one root, and volumes are accumulated conservatively into that representative. A group with no external fluid aperture remains an explicitly counted pressure-static pocket rather than being connected through fabric.
 
 ## AMR layout
 
@@ -64,4 +64,4 @@ Production velocity, pressure, turbulent viscosity, and temporary GPU fields use
 
 ## Current evidence and remaining validation
 
-Manufactured tests cover a flat and inclined membrane, winding reversal, a deliberate gap, complex T/trailing-edge detection, same-side small-fragment conservation, one-level projection, ratio-two exchange conservation, and FP32 operator parity. They do not yet establish end-to-end paraglider accuracy. Normal/parallel/inclined dynamic plate cases, an opened internal cavity, composite-AMR flow conservation, and AMR-versus-uniform force/convergence studies are still required.
+Manufactured tests cover flat/inclined/curved membranes, winding reversal, a deliberate gap, a four-region T-junction, a terminating sheet, a thin trailing edge, disconnected apertures on a partially covered aligned face, same-side small-fragment conservation, cross-brick EB projection, coupled 2:1 projection, and FP32/FP64 operator parity. They do not yet establish end-to-end paraglider accuracy. Normal/parallel/inclined dynamic plate cases, an opened internal cavity, and AMR-versus-uniform force/convergence studies remain required after the velocity/advection timestep is ported.

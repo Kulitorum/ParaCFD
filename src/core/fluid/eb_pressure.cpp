@@ -21,7 +21,7 @@ namespace paracfd::core
 	{
 		EbPressureSystem s;s.eb=&eb;s.storage_size=eb.grid.cell_count()+static_cast<int>(eb.fragments.size());s.cell_dof.assign(eb.grid.cell_count(),-1);s.fragment_dof.assign(eb.fragments.size(),-1);s.volume.assign(s.storage_size,0);s.centroid.assign(s.storage_size,{});s.active.assign(s.storage_size,0);s.pressure_outlet_xmax=outlet;
 		for(int c=0;c<eb.grid.cell_count();++c)if(eb.cells[c].state==EbCellState::regular){s.cell_dof[c]=c;s.active[c]=1;s.volume[c]=eb.grid.h*eb.grid.h*eb.grid.h;s.centroid[c]=eb.grid.cell_centroid(c);}
-		for(int i=0;i<static_cast<int>(eb.fragments.size());++i)if(eb.fragments[i].merge_target==irregular_fragment(i)){int q=eb.grid.cell_count()+i;s.fragment_dof[i]=q;s.active[q]=1;s.volume[q]=eb.fragments[i].volume;s.centroid[q]=eb.fragments[i].centroid;}
+		for(int i=0;i<static_cast<int>(eb.fragments.size());++i)if(eb.fragments[i].merge_target==irregular_fragment(i)){int q=eb.grid.cell_count()+i;s.fragment_dof[i]=q;s.active[q]=eb.fragments[i].pressure_static?0:1;s.volume[q]=eb.fragments[i].volume;s.centroid[q]=eb.fragments[i].centroid;}
 		// Resolve arbitrary acyclic merge chains. Every link was selected through an open
 		// same-side aperture to a strictly larger fragment, so a cycle indicates corrupt
 		// preprocessing rather than a case that may be silently joined.

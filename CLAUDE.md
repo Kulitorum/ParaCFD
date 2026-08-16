@@ -33,7 +33,7 @@ The new grid path is static block-structured Cartesian AMR with refinement ratio
 
 Fields use pooled, contiguous Structure-of-Arrays storage per AMR level. Production `Real` is `float`; `PARACFD_VALIDATION_FP64=ON` changes the new numerical path to `double` for validation. Geometry preprocessing and global validation calculations may still use double precision. A GPU-resident per-level coordinate hash locates the finest brick and local cell directly.
 
-The implemented AMR exchange primitives include same-level halo exchange, ratio-two restriction/prolongation, aperture-aware flux matching, and hierarchy balancing. A complete composite multilevel pressure solve is not yet assembled; see Current limitations.
+The implemented AMR path includes same-level halo exchange, ratio-two restriction/prolongation, aperture-aware flux matching, hierarchy balancing, and one matrix-free composite pressure operator spanning all active levels. Coarse/fine faces are compact four-tile connections; ordinary same-level faces remain implicit structured stencils.
 
 ## Zero-thickness embedded boundaries
 
@@ -44,13 +44,13 @@ Regular cells retain implicit Cartesian topology. Only cells intersected by fabr
 - Cartesian-face apertures with area, centroid, and the fluid fragments they join;
 - fabric surface patches with source triangle/face IDs, area, centroid, normal, and plus/minus fragments.
 
-A smooth membrane cut produces two fluid fragments and no connection through fabric. Fabric exactly coincident with a Cartesian face becomes a blocked cut face between two full-volume regular cells; it does not create zero-volume fragments. Cartesian faces cut into disconnected openings receive separate aperture records. Complex cells containing non-coplanar sheets, unresolved surface endings, T-junctions, or converging skins are explicitly reported for refinement; they are never silently merged across fabric.
+A smooth membrane cut produces two fluid fragments and no connection through fabric. Fabric exactly coincident with a Cartesian face becomes a blocked cut face between two full-volume regular cells; partial coverage is reconstructed into separate connected apertures. Complex finest-level cells use a configurable deterministic local fluid-connectivity graph whose edges are blocked by exact BVH intersections. This supports more than two fragments at ribs, sheet endings, and junctions without inside/outside filling or cross-fabric merging; any topology still unresolved is a hard preprocessing failure.
 
-Small fragments below `min_volume_fraction` are conservatively merged through the largest suitable open aperture to a larger same-side control volume. Fabric is never a legal merge connection.
+Small fragments below `min_volume_fraction` are conservatively merged through suitable open apertures to a larger same-side control volume. Fabric is never a legal merge connection. An isolated sealed pocket retains its pressure state and volume but is excluded from the projection until component-wise gauge/nullspace handling is implemented; the preprocessing report counts these states explicitly.
 
 ## Pressure projection and aerodynamic loads
 
-The one-level matrix-free finite-volume pressure operator uses actual control-volume volumes and coefficients proportional to open area divided by centre distance. Regular/regular faces retain a structured fast path; irregular apertures and blocked coincident faces are compact special cases. CPU reference and FP32 CUDA operator implementations share the same topology. A GPU-resident preconditioned CG implementation is available for one-level pressure systems with an outlet reference. GPU boundary kernels prescribe +X freestream, use an X-max pressure reference/zero-gradient velocity, and apply the same free-slip far-field condition at both Y and both Z boundaries; there is no ground branch.
+The matrix-free finite-volume pressure operator uses actual control-volume volumes and coefficients proportional to open area divided by centre distance. Regular/regular faces retain a structured fast path; EB apertures, blocked coincident faces, and 2:1 coarse/fine tiles are compact special cases. A sparse cross-brick atlas prevents brick boundaries from becoming physical walls and augments one composite pressure graph spanning every level. CPU reference and FP32/FP64 CUDA operator implementations share the topology. A GPU-resident Jacobi-PCG solve and manufactured divergence/gradient correction tests cover both EB and coarse/fine fluxes. GPU boundary kernels prescribe +X freestream, use an X-max pressure reference/zero-gradient velocity, and apply the same free-slip far-field condition at both Y and both Z boundaries; there is no ground branch.
 
 Surface pressure results retain `p_plus`, `p_minus`, `delta_p`, the corresponding Cp values, and pressure force per source triangle. Whole-wing force and moment use double-precision accumulation. With freestream along +X, drag, side, and lift axes are +X, +Y, and +Z. Coefficients are reported only when the user supplies a positive reference area; the present aerodynamic load is explicitly pressure-only because fabric skin friction is not implemented.
 
@@ -78,16 +78,17 @@ Important probes are:
 - `parity_probe`: retained CPU/GPU parity coverage for useful legacy kernels.
 
 `configs/paraglider.json` is the new configuration reference.
+`configs/planb_parakite.json` is the checked-in PlanB acceptance case; its +90-degree Z placement maps that exporter’s forward direction (-Y) to ParaCFD freestream (+X).
 
 ## Current limitations
 
 The repository is in an incremental migration state and must not yet be described as a trustworthy end-to-end paraglider CFD product:
 
-- Per-brick EB topology works, but cross-brick EB fragment connectivity has not yet been assembled into a global composite graph.
-- Composite coarse/fine pressure coupling and a multilevel GPU projection are not implemented. The exchange/reflux primitives alone are not a multilevel solve.
+- EB that reaches a 2:1 interface is currently rejected instead of receiving aperture-aware cross-level fragment reconstruction. The tested PlanB hierarchy keeps its EB atlas away from these interfaces.
+- The composite solver currently uses Jacobi-PCG, not a geometric multigrid preconditioner; production-size convergence and component-wise pressure gauges still need work.
 - The existing MacCormack and Smagorinsky kernels have not yet been ported to AMR-aware, side-aware sampling on the new fields.
 - The new external-aerodynamic timestep is not wired end to end through advection, LES, boundary conditions, projection, and statistics.
-- The primary Qt controls remain substantially inherited from the building/channel product. AMR/EB inspection and two-sided Cp colouring are not yet wired into the UI.
+- The Qt viewer can inspect AMR bricks and owned EB cells and reports whether the composite pressure topology is ready. It deliberately refuses to run the legacy channel timestep for a loaded paraglider, but its controls remain substantially inherited from the building/channel product.
 - Skin-friction/wall-model force is absent; reported new-path force is pressure-only.
 - Required full-flow validations such as the opening-cavity case and AMR-versus-uniform force comparison remain outstanding.
 

@@ -26,7 +26,7 @@ The complete external-aero velocity timestep does not yet consume these fields.
 - Explicit complex-cell detection for refinement without cross-fabric merging.
 - Conservative same-side small-fragment merge.
 
-Next: connect topology across bricks and improve deterministic subdivision of cells containing multiple coplanar or meeting surface patches.
+The cross-brick atlas and deterministic multi-fragment fallback are implemented. Partial Cartesian-face coverage retains separate connected apertures. Remaining: exact cross-level EB topology where fabric reaches a 2:1 interface.
 
 ## D. One-level EB projection — implemented foundation
 
@@ -35,18 +35,23 @@ Next: connect topology across bricks and improve deterministic subdivision of ce
 - CPU-double reference/PCG and CUDA `Real` operator/CG.
 - Manufactured independent-side pressure/load and projection tests.
 
-Next: add robust nullspace treatment for every disconnected all-Neumann fluid component and integrate velocity-face correction into the full timestep.
+The composite CPU divergence/gradient reference and GPU pressure solve now cover EB fluxes. Remaining: robust component gauges and GPU velocity correction integrated into the timestep.
 
-## E. Static AMR — exchange primitives implemented, composite solve pending
+## E. Static AMR — composite pressure foundation implemented
 
 - 2:1 hierarchy, balancing, geometry/wake refinement, hash lookup.
+- Finest refinement is reserved for fabric; the configured volumetric near wake stops one level coarser.
 - Halo, restriction, prolongation, and aperture-aware reflux helpers.
+- Sparse cross-brick EB atlas with finest-owner selection.
+- One coupled matrix-free pressure graph spanning every level.
+- Compact conservative 2:1 face tiles and EB aperture connections.
+- CUDA operator/Jacobi-PCG plus manufactured coupled projection tests.
 
 Pending:
 
-- cross-brick and cross-level EB topology;
-- conservative composite divergence and pressure gradient;
-- multilevel matrix-free projection/preconditioner;
+- aperture-aware cross-level EB topology when fabric reaches a 2:1 interface;
+- GPU-resident composite divergence and velocity correction (CPU reference exists);
+- geometric multilevel preconditioner and disconnected-component gauges;
 - AMR-versus-uniform flow validation.
 
 ## F. FP32 production — storage/operator foundation implemented
@@ -66,9 +71,9 @@ Pending: port the entire timestep and quantify full-case convergence, memory, an
 
 Pending: obtain the pressure states from a complete converged paraglider flow and add surface field transfer/rendering.
 
-## H. GUI migration — pending
+## H. GUI migration — preview foundation implemented
 
-The STEP viewer and CUDA/OpenGL infrastructure remain useful. Particle/tracer fabric collision now uses the triangle BVH. The primary controls, scene schema, AMR/EB debug rendering, two-sided surface colouring, and aerodynamic dashboard still require migration.
+The STEP viewer and CUDA/OpenGL infrastructure remain useful. Particle/tracer fabric collision uses the triangle BVH. The viewer displays static AMR/owned-EB debug boxes and reports the composite pressure readiness/counts. It refuses to run the legacy timestep for a paraglider. Primary controls, scene schema, per-side surface colouring, and the aerodynamic dashboard still require migration.
 
 ## I. Obsolete-code removal — intentionally pending
 

@@ -73,7 +73,11 @@ namespace paracfd::core
 				const Aabb3d bb = brick_box(b, out.brick_size_);
 				const bool wing_region = l == 0 && box_overlap(bb, expanded(wb, c.wing_refinement_distance));
 				const bool surface_region = !bvh.query_aabb(expanded(bb, c.surface_refinement_distance)).empty();
-				const bool wake_region = box_overlap(bb, wake);
+				// The finest level is reserved for fabric topology. Refining the entire
+				// volumetric wake to that level multiplies memory while doing nothing to
+				// resolve ribs, openings, or trailing edges. Keep the near wake one level
+				// coarser; its length/radius remain independently configurable.
+				const bool wake_region = l + 1 < out.max_levels_ - 1 && box_overlap(bb, wake);
 				if (wing_region || surface_region || wake_region) out.refine_brick(l, static_cast<int>(id));
 			}
 			out.rebuild_level_tables_and_metadata(&bvh);

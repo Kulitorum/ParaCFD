@@ -1,13 +1,13 @@
 {
   "step": {
-    "path": "",
+    "path": "Test-Data/PlanBParakite.step",
     "tessellation_deflection_mm": 2.0
   },
   "placement": {
     "tx": 0.0,
     "ty": 0.0,
     "tz": 0.0,
-    "matrix": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    "matrix": [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   },
   "freestream": {
     "speed": 10.0,
@@ -29,7 +29,7 @@
     "surface_refinement_distance": 0.35,
     "wake_length": 8.0,
     "wake_radius": 2.0,
-	"complex_subdivisions": 4,
+    "complex_subdivisions": 4,
     "min_volume_fraction": 0.05
   },
   "solver": {

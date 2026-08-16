@@ -51,6 +51,7 @@ namespace paracfd::core
 				c.amr.wing_refinement_distance = number(*it, "wing_refinement_distance", c.amr.wing_refinement_distance);
 				c.amr.surface_refinement_distance = number(*it, "surface_refinement_distance", c.amr.surface_refinement_distance);
 				c.amr.wake_length = number(*it, "wake_length", c.amr.wake_length); c.amr.wake_radius = number(*it, "wake_radius", c.amr.wake_radius);
+				c.amr.complex_subdivisions = integer(*it, "complex_subdivisions", c.amr.complex_subdivisions);
 				c.amr.min_volume_fraction = number(*it, "min_volume_fraction", c.amr.min_volume_fraction);
 			}
 			if (auto it = root.find("solver"); it != root.end() && it->is_object())
@@ -67,7 +68,7 @@ namespace paracfd::core
 			if (!(c.tessellation_deflection_mm > 0 && c.freestream.speed >= 0 && c.freestream.rho > 0 && c.freestream.nu > 0 &&
 				c.domain.upstream_margin >= 0 && c.domain.downstream_margin >= 0 && c.domain.lateral_margin >= 0 && c.domain.vertical_margin >= 0 &&
 				c.amr.base_cell_size > 0 && c.amr.max_levels >= 1 && c.amr.max_levels <= 10 && c.amr.brick_size >= 4 && c.amr.brick_size <= 128 && c.amr.ghost_cells >= 1 && c.amr.ghost_cells <= 4 &&
-				c.amr.wing_refinement_distance >= 0 && c.amr.surface_refinement_distance >= 0 && c.amr.wake_length >= 0 && c.amr.wake_radius >= 0 && c.amr.min_volume_fraction > 0 && c.amr.min_volume_fraction < 0.5 &&
+				c.amr.wing_refinement_distance >= 0 && c.amr.surface_refinement_distance >= 0 && c.amr.wake_length >= 0 && c.amr.wake_radius >= 0 && c.amr.complex_subdivisions >= 0 && c.amr.complex_subdivisions <= 16 && c.amr.min_volume_fraction > 0 && c.amr.min_volume_fraction < 0.5 &&
 				c.solver.cfl > 0 && c.solver.smagorinsky_cs >= 0 && c.solver.projection_tolerance > 0 && c.solver.projection_max_iterations > 0 && c.reference.area >= 0 && c.reference.length >= 0))
 			{
 				if (error) *error = "invalid non-positive or out-of-range paraglider configuration value"; return false;
