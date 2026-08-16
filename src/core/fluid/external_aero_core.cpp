@@ -21,7 +21,7 @@ namespace paracfd::core
 
 	ExternalAeroStepStats ExternalAeroCore::project(bool warm_start)
 	{
-		ExternalAeroStepStats stats;stats.dt=config_.solver.cfl*hierarchy_.finest_cell_size()/std::max(1e-9,config_.freestream.speed);const auto begin=std::chrono::steady_clock::now();stats.pressure=projection_->project(static_cast<Real>(config_.freestream.rho),static_cast<Real>(stats.dt),config_.solver.projection_tolerance,config_.solver.projection_max_iterations,warm_start);const auto end=std::chrono::steady_clock::now();stats.projection_ms=elapsed_ms(begin,end);stats.gpu_step_ms=stats.projection_ms;stats.physical_time=physical_time_;return stats;
+		ExternalAeroStepStats stats;stats.dt=config_.solver.cfl*hierarchy_.finest_cell_size()/std::max(1e-9,config_.freestream.speed);const auto begin=std::chrono::steady_clock::now();projection_->sync_coarse_fine_from_fields();stats.pressure=projection_->project(static_cast<Real>(config_.freestream.rho),static_cast<Real>(stats.dt),config_.solver.projection_tolerance,config_.solver.projection_max_iterations,warm_start);const auto end=std::chrono::steady_clock::now();stats.projection_ms=elapsed_ms(begin,end);stats.gpu_step_ms=stats.projection_ms;stats.physical_time=physical_time_;return stats;
 	}
 
 	ExternalAeroStepStats ExternalAeroCore::initialize()

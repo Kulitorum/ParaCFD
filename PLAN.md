@@ -62,7 +62,7 @@ Pending:
 - Geometry preprocessing and force/reference calculations retain FP64 where valuable.
 - CUDA pressure operator has measured FP32/FP64 parity and timing probes.
 
-The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composite-projection path is GPU resident. Same-level interpolation, Smagorinsky gradients, eddy-viscosity access, and diffusion cross brick boundaries without stencil clamping; all levels build consistent forward states before correction and commit. The static fabric-protection band retains a first-order local state. Pending: higher-order same-side reconstruction inside that band, conservative coarse/fine face treatment, and full-case convergence validation.
+The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composite-projection path is GPU resident. Same-level interpolation, Smagorinsky gradients, eddy-viscosity access, and diffusion cross brick boundaries without stencil clamping; all levels build consistent forward states before correction and commit. Normal 2:1 flux tiles gather from transported fine MAC faces, then scatter projected values to the fine faces and their aperture-weighted coarse mean. The static fabric-protection band retains a first-order local state. Pending: higher-order same-side reconstruction inside that band, consistent general cross-level interpolation, compact EB aperture transport, and full-case convergence validation.
 
 ## G. Aerodynamics — manufactured load path implemented
 

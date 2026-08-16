@@ -153,6 +153,9 @@ namespace paracfd::core
 
 		void clear_special_fluxes();
 		void initialize_special_freestream(Real speed);
+		// Refresh each 2:1 tile velocity from its collocated fine MAC face after
+		// transport. EB aperture velocities remain independent compact states.
+		void sync_coarse_fine_from_fields();
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		void compute_divergence();
@@ -176,9 +179,13 @@ namespace paracfd::core
 		int *first_dof_ = nullptr, *second_dof_ = nullptr;
 		std::int8_t *direction_ = nullptr, *axis_ = nullptr;
 		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *special_velocity_ = nullptr;
+		int *cf_fine_level_ = nullptr, *cf_group_ = nullptr, *cf_group_level_ = nullptr;
+		std::uint64_t *cf_fine_index_ = nullptr, *cf_group_index_ = nullptr;
+		std::int8_t* cf_group_axis_ = nullptr;
+		Real *cf_group_area_ = nullptr, *cf_group_sum_ = nullptr;
 		std::vector<int> brick_counts_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
-		int coarse_fine_count_ = 0, special_count_ = 0;
+		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};

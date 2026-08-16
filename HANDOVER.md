@@ -17,6 +17,7 @@ Implemented:
 - CPU divergence/gradient reference operations and a persistent CUDA FP32/FP64 composite projection across all AMR levels;
 - pressure gauges for every active fluid component disconnected from the outlet and a two-level additive Galerkin PCG preconditioner that retains compact nonlocal aggregate edges;
 - bounded MacCormack/RK2 finest-brick GPU advection, a static no-cross-fabric protection band, and explicit molecular/Smagorinsky diffusion with continuous same-level cross-brick stencils and consistent old/forward states across levels;
+- conservative 2:1 velocity-state synchronization: transported fine MAC faces feed compact flux tiles, and projected tiles scatter back to fine faces plus an aperture-weighted coarse face;
 - `ExternalAeroCore`, which owns persistent device fields and runs advection -> LES/diffusion -> external BC -> composite projection without bulk per-step transfers;
 - composite surface-patch mappings to global p+/p- pressure states and pressure-only triangle/whole-wing load publication;
 - deterministic dynamic normal/parallel/inclined plate gates, opened/closed cavity pressure connectivity, and an equal-finest AMR-versus-uniform inclined-plate comparison;
@@ -39,15 +40,15 @@ At 2 mm tessellation, three AMR levels, 62.5 mm finest spacing, and `complex_sub
 - 4,484,367 composite pressure slots with 81,920 coarse/fine and 112,563 EB connections;
 - 124.14 MiB pooled FP32 field estimate;
 - an initial +X freestream projection converging in 168 PCG iterations to a 9.37e-5 global relative residual in about 138 ms on the RTX 4090;
-- 347.02 MiB estimated persistent GPU storage for fields plus projection (CUDA context/driver allocations excluded).
+- 348.68 MiB estimated persistent GPU storage for fields, projection, and conservative 2:1 velocity synchronization (CUDA context/driver allocations excluded).
 - 135,577 / 12,165,120 active MAC faces in the PlanB static fabric-protection band;
 - about 24.9 ms bounded MacCormack advection, 7.8 ms LES/diffusion, and 126 ms projection (192 iterations) for the first post-initialization step (individual projection timings vary);
-- 488.72 MiB total persistent estimate for fields, projection, two advection states/masks, and locator.
+- 490.38 MiB total persistent estimate for fields, projection, two advection states/masks, and locator.
 
 ## Next engineering work
 
-1. Replace the static fabric protection fallback with a higher-order same-side reconstruction and make the current interpolatory velocity treatment conservative at 2:1 interfaces.
-2. Advect/diffuse compact EB and coarse/fine aperture velocity states and tighten the existing normal/parallel/inclined plate and AMR-versus-uniform dynamic validations.
+1. Replace the static fabric protection fallback with a higher-order same-side reconstruction and make general cross-level interpolation consistent with the now-conservative normal 2:1 flux state.
+2. Advect/diffuse compact EB aperture velocity states and tighten the existing normal/parallel/inclined plate and AMR-versus-uniform dynamic validations.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity topology test into a developed internal mass-flow test once compact aperture velocities receive full advection/diffusion updates.
 5. Complete the Qt controls/slices/scene workflow and only then remove building/channel/ground/seabed/porous code.
