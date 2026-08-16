@@ -62,6 +62,19 @@ namespace paracfd::core
 			const Real candidate = advected + diffusion * (lower_node + upper_node - Real(2) * current);
 			return compact_max(stencil_min, compact_min(stencil_max, candidate));
 		}
+		PARACFD_AMR_HD inline Real bounded_compact_tangential_update(Real normal_update,
+			Real current, Real lower_node, Real upper_node, const Real* advector,
+			const Real* gradient, int component, Real dt)
+		{
+			Real tangential_rate = Real(0);
+			for (int derivative_axis=0; derivative_axis<3; ++derivative_axis)
+				if (derivative_axis != component)
+					tangential_rate += advector[derivative_axis] * gradient[component*3+derivative_axis];
+			const Real candidate = normal_update - dt*tangential_rate;
+			const Real stencil_min = compact_min(normal_update, compact_min(current, compact_min(lower_node,upper_node)));
+			const Real stencil_max = compact_max(normal_update, compact_max(current, compact_max(lower_node,upper_node)));
+			return compact_max(stencil_min,compact_min(stencil_max,candidate));
+		}
 	}
 
 	struct DeviceCompositeAmrLevelView;
