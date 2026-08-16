@@ -2,9 +2,13 @@
 #include "gui/main_window.h"
 
 #include "core/geometry/building.h"
+#include "core/fluid/amr_grid.h"
+#include "core/geometry/embedded_boundary.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/step_import.h"
+#include "core/geometry/triangle_bvh.h"
 #include "core/geometry/voxelize.h"
+#include "core/paraglider_config.h"
 #include "gui/slice_viewer.h"
 #include "gui/sim_worker.h"
 #include "gui/video_recorder.h"
@@ -97,7 +101,7 @@ namespace paracfd::gui
 		connect(closeStep, &QAction::triggered, this, [this] {
 			setModelAsObstacle(false); // remove the model obstacle, restoring the config obstacle (if any)
 			model_mesh_ = paracfd::core::TriMesh{};
-			if (viewer_) viewer_->clearMesh();
+			if (viewer_) { viewer_->clearMesh(); viewer_->clearParagliderDebugBoxes(); }
 			initPlacementHistory(); // no model ⇒ clear the undo/redo history + disable the placement gizmo
 			statusBar()->showMessage("model closed", 3000);
 		});
@@ -1218,6 +1222,7 @@ namespace paracfd::gui
 	{
 		if (restoring_placement_) { updateGizmoUi(); return; } // programmatic restore — just refresh the readout
 		commitPlacementEdit();
+		if (!model_mesh_.empty() && centerline_mesh_.empty()) buildParagliderPreviewGrid();
 	}
 
 	void MainWindow::undoPlacement()
@@ -1263,8 +1268,8 @@ namespace paracfd::gui
 		x.t += QVector3D((float)dx, (float)dy, (float)dz);
 		if (rzDeg != 0.0) x.rot = QQuaternion::fromAxisAndAngle(0.0f, 0.0f, 1.0f, (float)rzDeg) * x.rot;
 		if (scale > 0.0) x.scale *= (float)scale;
-		viewer_->setModelXform(x);
-		setModelAsObstacle(true); // re-voxelize where placed
+		viewer_->setModelXform(x); // placement is consumed by the new static BVH/AMR/EB preprocessing
+		buildParagliderPreviewGrid();
 		updateGizmoUi();
 		std::fprintf(stderr, "[G1] model placement: t=(%.3f %.3f %.3f) m, rz=%.1f deg, scale=%.3f\n",
 			x.t.x(), x.t.y(), x.t.z(), rzDeg, x.scale.x());
@@ -1321,13 +1326,15 @@ namespace paracfd::gui
 		model_mesh_ = keep_mesh;               // keep the loaded model (fluid re-inject)
 		spawnWorker(std::move(core));
 
-		// Fluid viewer with a loaded model: re-show it and re-voxelize it as the obstacle at the new h (it
-		// IS the obstacle).
+		// Paraglider STEP preview: re-show the smooth surface only. Never route an ordinary STEP
+		// through the legacy solid/parity voxelizer; the new EB grid is rebuilt separately.
 		if (had_model && viewer_)
 		{
 			viewer_->setMesh(paracfd::core::TriMesh(model_mesh_)); // display copy (model_mesh_ retained)
 			if (keep_x.valid) viewer_->setModelXform(keep_x);    // re-apply the user's placement (setMesh reset it)
-			setModelAsObstacle(true);                            // re-voxelizes at viewer_->modelPlacement()
+			viewer_->clearVoxelOverlay();
+			model_injected_ = false;
+			buildParagliderPreviewGrid();
 			updateGizmoUi();
 		}
 
@@ -1587,9 +1594,12 @@ namespace paracfd::gui
 
 	bool MainWindow::loadStepFile(const QString& path, bool noslip)
 	{
+		(void)noslip; // legacy CLI compatibility; zero-thickness fabric has no solid-wall mode here
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string err;
-		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 0.1, &err);
+		// A 2 mm display/preprocessing tessellation is already much finer than the current
+		// 62.5 mm finest CFD cell and avoids million-triangle previews from the old 0.1 mm default.
+		paracfd::core::TriMesh mesh = paracfd::core::load_step_mesh(path.toStdString(), 2.0, &err);
 		QApplication::restoreOverrideCursor();
 
 		if (mesh.empty())
@@ -1605,8 +1615,8 @@ namespace paracfd::gui
 			"[G1] loaded STEP %s: %zu triangles, bbox=[%.4f %.4f %.4f]..[%.4f %.4f %.4f] m\n",
 			path.toUtf8().constData(), mesh.triangle_count(),
 			lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-		statusBar()->showMessage(QString("loaded %1 (%2 triangles)")
-			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 5000);
+		statusBar()->showMessage(QString("loaded paraglider surface %1 (%2 triangles) — build AMR/EB before CFD")
+			.arg(QFileInfo(path).fileName()).arg(mesh.triangle_count()), 8000);
 
 		model_mesh_ = mesh;            // keep a CPU copy for voxelization (viewer frees its own)
 		scene_mesh_ = mesh;           // persist for a scene save (display mesh); placement recomputed below
@@ -1615,13 +1625,49 @@ namespace paracfd::gui
 		step_source_name_ = QFileInfo(path).fileName().toStdString();
 		scene_place_ = paracfd::core::place_model_on_bed(mesh, recipe_.info.Lx, recipe_.info.Ly);
 		if (viewer_) viewer_->setMesh(std::move(mesh));
+		// Place the face-only wing bbox at the configured aerodynamic margins. Standalone
+		// STEP curve/wire entities never entered model_mesh_, so pilot lines cannot enlarge
+		// this domain. Keep the gizmo transform editable rather than installing an override.
+		if (viewer_ && viewer_->hasModelPlacement())
+		{
+			const paracfd::core::DomainConfig margins;
+			const paracfd::core::AmrConfig amr_defaults;
+			const paracfd::core::TriMesh initially_placed=paracfd::core::placed_mesh(model_mesh_,viewer_->modelPlacement());
+			const double base_brick_width=amr_defaults.base_cell_size*amr_defaults.brick_size;
+			const double requested_y=(initially_placed.bbox_max[1]-initially_placed.bbox_min[1])+2.0*margins.lateral_margin;
+			const double requested_z=(initially_placed.bbox_max[2]-initially_placed.bbox_min[2])+2.0*margins.vertical_margin;
+			const double padding_y=std::ceil(requested_y/base_brick_width)*base_brick_width-requested_y;
+			const double padding_z=std::ceil(requested_z/base_brick_width)*base_brick_width-requested_z;
+			SliceViewer::ModelGizmoXform x=viewer_->modelXform();
+			x.t+=QVector3D(static_cast<float>(margins.upstream_margin-initially_placed.bbox_min[0]),static_cast<float>(margins.lateral_margin+0.5*padding_y-initially_placed.bbox_min[1]),static_cast<float>(margins.vertical_margin+0.5*padding_z-initially_placed.bbox_min[2]));
+			viewer_->setModelXform(x);scene_place_=viewer_->modelPlacement();
+		}
 		addRecentFile(path);          // remember it in the Recent Files menu (feature 1)
 
-		// The loaded model IS the obstacle: voxelize it on the sim grid and inject it into the flow,
-		// REPLACING the config obstacle (the default cylinder).
-		setModelAsObstacle(true, noslip);
+		// Fundamental paraglider invariant: this is fluid/fabric/fluid, not a solid volume.
+		// Clear any prior legacy model injection and keep the STEP as the visual/source surface.
+		if (model_injected_) setModelAsObstacle(false);
+		if (viewer_) viewer_->clearVoxelOverlay();
+		model_injected_ = false;
+		buildParagliderPreviewGrid();
 		updateGizmoUi(); // enable the placement gizmo for the freshly loaded model
 		return true;
+	}
+
+	void MainWindow::buildParagliderPreviewGrid()
+	{
+		using namespace paracfd::core;if(model_mesh_.empty()||!viewer_)return;
+		const TriMesh wing=placed_mesh(model_mesh_,viewer_->modelPlacement());TriangleBvh bvh(wing);ParagliderConfig cfg;const Aabb3d requested=automatic_flow_domain(wing,cfg.domain);AmrHierarchy amr=AmrHierarchy::build_static(requested,wing,bvh,cfg.amr);
+		std::vector<std::array<float,6>> brick_boxes,eb_boxes;std::size_t fragments=0,patches=0,apertures=0,unresolved=0;EmbeddedBoundaryBuildOptions options;options.min_volume_fraction=cfg.amr.min_volume_fraction;
+		for(const AmrLevel& level:amr.levels())for(int brick_id=0;brick_id<(int)level.bricks.size();++brick_id)
+		{
+			const BrickMetadata& brick=level.bricks[brick_id];if(!brick.active())continue;const float width=amr.brick_size()*brick.h;brick_boxes.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});if(!brick.embedded_boundary())continue;
+			UniformEbGrid grid{brick.origin,amr.brick_size(),amr.brick_size(),amr.brick_size(),brick.h};EmbeddedBoundary eb=build_embedded_boundary(wing,bvh,grid,options);fragments+=eb.fragments.size();patches+=eb.patches.size();apertures+=eb.apertures.size();unresolved+=eb.unresolved.size();
+			for(int cell:eb.irregular_cells){const auto q=grid.cell_coord(cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
+			for(const UnresolvedEbCell& problem:eb.unresolved){const auto q=grid.cell_coord(problem.parent_cell);const Aabb3d box=grid.cell_box(q[0],q[1],q[2]);eb_boxes.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}
+		}
+		viewer_->setShowSlice(false);viewer_->setParagliderDebugBoxes(brick_boxes,eb_boxes);const Vec3d requested_size=requested.hi-requested.lo;const Vec3d padded_size=amr.domain().hi-amr.domain().lo;setWindowTitle(QString("ParaCFD — paraglider geometry/AMR preview [%1 bricks, hmin=%2 m]").arg(amr.active_brick_count()).arg(amr.finest_cell_size(),0,'g',4));statusBar()->showMessage(QString("face-only padded domain %1 × %2 × %3 m; AMR %4 bricks; EB fragments %5, apertures %6, patches %7, unresolved %8 — CFD timestep not started").arg(padded_size.x,0,'f',2).arg(padded_size.y,0,'f',2).arg(padded_size.z,0,'f',2).arg(amr.active_brick_count()).arg(fragments).arg(apertures).arg(patches).arg(unresolved),15000);
+		std::fprintf(stderr,"[paraglider-preview] face-only requested domain %.3f x %.3f x %.3f m; padded AMR %.3f x %.3f x %.3f m, %zu bricks; EB fragments=%zu apertures=%zu patches=%zu unresolved=%zu\n",requested_size.x,requested_size.y,requested_size.z,padded_size.x,padded_size.y,padded_size.z,amr.active_brick_count(),fragments,apertures,patches,unresolved);
 	}
 
 	bool MainWindow::loadCenterlineFile(const QString& path, bool noslip)

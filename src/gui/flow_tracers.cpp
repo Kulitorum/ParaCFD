@@ -27,6 +27,11 @@ namespace paracfd::gui
 		return f.solid[(size_t)g.pidx(i, j, k)] != 0;
 	}
 
+	bool FlowTracers::crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const
+	{
+		return f.fabric && f.fabric->intersect_segment({ax, ay, az}, {bx, by, bz}, 1e-8).hit;
+	}
+
 	void FlowTracers::sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const
 	{
 		const MacGrid& g = f.grid;
@@ -147,7 +152,9 @@ namespace paracfd::gui
 			// Step by a fixed arc length ALONG the flow so vertex spacing is uniform regardless of
 			// speed (a clean line; speed is carried in the colour, not the spacing).
 			const float inv = (float)(ds / sp);
-			x += (float)vx * inv; y += (float)vy * inv; z += (float)vz * inv;
+			const float nx = x + (float)vx * inv, ny = y + (float)vy * inv, nz = z + (float)vz * inv;
+			if (crosses_fabric(f, x, y, z, nx, ny, nz)) break;
+			x = nx; y = ny; z = nz;
 		}
 		return (int)line_.size();
 	}

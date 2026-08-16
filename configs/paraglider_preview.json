@@ -1,0 +1,15 @@
+{
+  "name": "paraglider surface preview",
+  "_doc": "Temporary Qt/OpenGL surface-preview domain. Ordinary STEP loads are display-only and are not parity-filled or injected into the legacy channel solver.",
+  "domain_x": 16.0,
+  "domain_y": 16.0,
+  "domain_z": 16.0,
+  "voxel_h": 0.25,
+  "U": 0.0,
+  "rho": 1.225,
+  "nu": 1.5e-5,
+  "Cs": 0.1,
+  "v_blip": 0.0,
+  "proj_tol": 1e-3,
+  "proj_max_iter": 40
+}

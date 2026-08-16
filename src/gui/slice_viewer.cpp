@@ -23,6 +23,18 @@ namespace paracfd::gui
 {
 	namespace
 	{
+		std::vector<float> debug_box_lines(const std::vector<std::array<float, 6>>& boxes)
+		{
+			std::vector<float> lines;lines.reserve(boxes.size()*12*2*3);
+			static constexpr int edges[12][2]={{0,1},{0,2},{0,4},{1,3},{1,5},{2,3},{2,6},{3,7},{4,5},{4,6},{5,7},{6,7}};
+			for(const auto& b:boxes)
+			{
+				const float p[8][3]={{b[0],b[1],b[2]},{b[3],b[1],b[2]},{b[0],b[4],b[2]},{b[3],b[4],b[2]},{b[0],b[1],b[5]},{b[3],b[1],b[5]},{b[0],b[4],b[5]},{b[3],b[4],b[5]}};
+				for(const auto& edge:edges)for(int endpoint:edge)lines.insert(lines.end(),{p[endpoint][0],p[endpoint][1],p[endpoint][2]});
+			}
+			return lines;
+		}
+
 		const char* kVert = R"(#version 430 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec4 aColor;
@@ -75,6 +87,8 @@ in vec3 vColor;
 uniform vec3 uEye;
 uniform vec4 uBaseColor;
 uniform int  uUseVertexColor; // 0 = flat uBaseColor (STEP model / uniform voxels); !=0 = per-vertex Cp colour
+uniform int  uUseTriangleColor; // STEP surface: gl_PrimitiveID -> per-triangle Cp SSBO
+layout(std430, binding=3) readonly buffer TriangleColours { vec4 uTriangleColor[]; };
 out vec4 fragColor;
 void main()
 {
@@ -82,7 +96,8 @@ void main()
 	vec3 L = normalize(uEye - vWorld);
 	float diff = max(abs(dot(N, L)), 0.0); // two-sided
 	float ambient = 0.28;
-	vec3 base = (uUseVertexColor != 0) ? vColor : uBaseColor.rgb;
+	vec3 base = (uUseTriangleColor != 0) ? uTriangleColor[gl_PrimitiveID].rgb :
+		((uUseVertexColor != 0) ? vColor : uBaseColor.rgb);
 	vec3 c = base * (ambient + 0.72 * diff);
 	fragColor = vec4(c, uBaseColor.a);
 }
@@ -298,6 +313,9 @@ void main()
 		if (mesh_pos_vbo_) glDeleteBuffers(1, &mesh_pos_vbo_);
 		if (mesh_norm_vbo_) glDeleteBuffers(1, &mesh_norm_vbo_);
 		if (mesh_idx_ebo_) glDeleteBuffers(1, &mesh_idx_ebo_);
+		if (mesh_triangle_colour_ssbo_) glDeleteBuffers(1, &mesh_triangle_colour_ssbo_);
+		if (amr_debug_vbo_) glDeleteBuffers(1, &amr_debug_vbo_);
+		if (eb_debug_vbo_) glDeleteBuffers(1, &eb_debug_vbo_);
 		if (vox_pos_vbo_) glDeleteBuffers(1, &vox_pos_vbo_);
 		if (vox_norm_vbo_) glDeleteBuffers(1, &vox_norm_vbo_);
 		if (vox_color_vbo_) glDeleteBuffers(1, &vox_color_vbo_);
@@ -312,6 +330,8 @@ void main()
 		if (box_vao_) glDeleteVertexArrays(1, &box_vao_);
 		if (grid_vao_) glDeleteVertexArrays(1, &grid_vao_);
 		if (mesh_vao_) glDeleteVertexArrays(1, &mesh_vao_);
+		if (amr_debug_vao_) glDeleteVertexArrays(1, &amr_debug_vao_);
+		if (eb_debug_vao_) glDeleteVertexArrays(1, &eb_debug_vao_);
 		if (vox_vao_) glDeleteVertexArrays(1, &vox_vao_);
 		if (arrow_vao_) glDeleteVertexArrays(1, &arrow_vao_);
 		if (tracer_vao_) glDeleteVertexArrays(1, &tracer_vao_);
@@ -374,6 +394,9 @@ void main()
 
 	void SliceViewer::setMesh(paracfd::core::TriMesh mesh)
 	{
+		// Aerodynamic data belongs to a specific tessellation. Never let a newly loaded
+		// STEP accidentally inherit colours merely because it has the same triangle count.
+		clearTriangleSurfaceColouring();
 		// Seed the gizmo transform (centre-on-bed default) from the model bbox NOW — host-side, so
 		// modelPlacement() is valid even before the first paint (the CLI --load-step path voxelizes
 		// immediately). The GL upload is still deferred to uploadMesh().
@@ -381,7 +404,10 @@ void main()
 		gz_bbox_max_ = QVector3D(mesh.bbox_max[0], mesh.bbox_max[1], mesh.bbox_max[2]);
 		computeDefaultXform();
 		gz_drag_op_ = -1; gz_drag_axis_ = -1;
+		fabric_bvh_dirty_ = true;
 		gz_hover_op_ = -1; gz_hover_axis_ = -1;
+		fabric_mesh_ = mesh;
+		fabric_bvh_dirty_ = true;
 		pending_mesh_ = std::move(mesh);
 		mesh_upload_pending_ = true;
 		update(); // uploaded on the next paint (main thread, context current)
@@ -392,6 +418,10 @@ void main()
 		has_mesh_ = false;
 		mesh_upload_pending_ = false;
 		pending_mesh_ = paracfd::core::TriMesh{};
+		fabric_mesh_ = paracfd::core::TriMesh{};
+		clearTriangleSurfaceColouring();
+		fabric_bvh_.reset();
+		fabric_bvh_dirty_ = false;
 		mesh_index_count_ = 0;
 		mesh_override_ = false; // a fresh model (fluid viewer) is gizmo-editable again
 		gz_valid_ = false;
@@ -422,6 +452,7 @@ void main()
 		mesh_override_mat_ = QMatrix4x4();
 		mesh_override_mat_.translate((float)tx, (float)ty, (float)tz);
 		mesh_override_ = true;
+		fabric_bvh_dirty_ = true;
 		update();
 	}
 
@@ -434,6 +465,7 @@ void main()
 		m.setRow(3, QVector4D(0, 0, 0, 1));
 		mesh_override_mat_ = m;
 		mesh_override_ = true;
+		fabric_bvh_dirty_ = true;
 		update();
 	}
 
@@ -475,6 +507,7 @@ void main()
 		const float Ly = have_info_ ? (float)info_.Ly : (gz_bbox_min_.y() + gz_bbox_max_.y());
 		gz_t_ = QVector3D(0.5f * Lx, 0.5f * Ly, c.z() - gz_bbox_min_.z());
 		gz_valid_ = true;
+		fabric_bvh_dirty_ = true;
 	}
 
 	void SliceViewer::setGizmoEnabled(bool on)
@@ -506,6 +539,7 @@ void main()
 		if (!x.valid) return;
 		gz_pivot_ = x.pivot; gz_t_ = x.t; gz_scale_ = x.scale; gz_rot_ = x.rot; gz_valid_ = true;
 		mesh_override_ = false; // an explicit gizmo state supersedes any prior override
+		fabric_bvh_dirty_ = true;
 		update();
 	}
 
@@ -531,8 +565,58 @@ void main()
 			(float)(p.m[6] * gz_pivot_.x() + p.m[7] * gz_pivot_.y() + p.m[8] * gz_pivot_.z()));
 		gz_t_ = QVector3D((float)p.tx, (float)p.ty, (float)p.tz) + Mpiv;
 		mesh_override_ = false;
+		fabric_bvh_dirty_ = true;
 		update();
 		emit modelPlacementChanged();
+	}
+
+	void SliceViewer::setTriangleDeltaCp(const std::vector<float>& values, float range_min, float range_max)
+	{
+		if (!(range_max > range_min)) { range_min = -1.0f; range_max = 1.0f; }
+		mesh_triangle_colours_.resize(values.size() * 4);
+		const float span = range_max - range_min;
+		for (std::size_t triangle = 0; triangle < values.size(); ++triangle)
+		{
+			float r = 0.5f, g = 0.5f, b = 0.5f;
+			const float cp = values[triangle];
+			if (std::isfinite(cp)) scour_colormap((cp - range_min) / span, r, g, b);
+			mesh_triangle_colours_[4 * triangle + 0] = r;
+			mesh_triangle_colours_[4 * triangle + 1] = g;
+			mesh_triangle_colours_[4 * triangle + 2] = b;
+			mesh_triangle_colours_[4 * triangle + 3] = 1.0f;
+		}
+		mesh_triangle_colour_upload_pending_ = true;
+		update();
+	}
+
+	void SliceViewer::clearTriangleSurfaceColouring()
+	{
+		mesh_triangle_colours_.clear();
+		mesh_triangle_colour_upload_pending_ = true;
+		has_mesh_triangle_colours_ = false;
+		update();
+	}
+
+	void SliceViewer::setParagliderDebugBoxes(const std::vector<std::array<float,6>>& amr_bricks,
+		const std::vector<std::array<float,6>>& eb_cells)
+	{
+		pending_amr_debug_lines_=debug_box_lines(amr_bricks);pending_eb_debug_lines_=debug_box_lines(eb_cells);
+		paraglider_debug_upload_pending_=true;update();
+	}
+
+	void SliceViewer::clearParagliderDebugBoxes()
+	{
+		pending_amr_debug_lines_.clear();pending_eb_debug_lines_.clear();amr_debug_vertex_count_=0;eb_debug_vertex_count_=0;
+		paraglider_debug_upload_pending_=true;update();
+	}
+
+	void SliceViewer::ensureFabricBvh()
+	{
+		if (!fabric_bvh_dirty_) return;
+		fabric_bvh_dirty_ = false;
+		if (fabric_mesh_.empty()) { fabric_bvh_.reset(); return; }
+		paracfd::core::TriMesh placed = paracfd::core::placed_mesh(fabric_mesh_, modelPlacement());
+		fabric_bvh_ = std::make_unique<paracfd::core::TriangleBvh>(placed);
 	}
 
 	QVector3D SliceViewer::gizmoAxisDir(int a) const
@@ -964,6 +1048,8 @@ void main()
 		glGenVertexArrays(1, &box_vao_);
 		glGenVertexArrays(1, &grid_vao_);
 		glGenVertexArrays(1, &mesh_vao_);
+		glGenVertexArrays(1, &amr_debug_vao_);
+		glGenVertexArrays(1, &eb_debug_vao_);
 		glGenVertexArrays(1, &vox_vao_);
 		glGenVertexArrays(1, &arrow_vao_);
 		glGenVertexArrays(1, &tracer_vao_);
@@ -978,6 +1064,9 @@ void main()
 		glGenBuffers(1, &mesh_pos_vbo_);
 		glGenBuffers(1, &mesh_norm_vbo_);
 		glGenBuffers(1, &mesh_idx_ebo_);
+		glGenBuffers(1, &mesh_triangle_colour_ssbo_);
+		glGenBuffers(1, &amr_debug_vbo_);
+		glGenBuffers(1, &eb_debug_vbo_);
 		glGenBuffers(1, &vox_pos_vbo_);
 		glGenBuffers(1, &vox_norm_vbo_);
 		glGenBuffers(1, &vox_color_vbo_);
@@ -1093,7 +1182,8 @@ void main()
 			: 1.8f * (have_info_ ? (float)info_.U : 1.0f);
 		view.gain = 1.5f * arrow_speed_mult_; // user speed multiplier [0,1] (visual only)
 
-		bool got = worker_->withFlowField([&](const FlowField& f) { arrows_.advance(dt, view, f); });
+		ensureFabricBvh();
+		bool got = worker_->withFlowField([&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); arrows_.advance(dt, view, ff); });
 		if (!got) { arrow_draw_count_ = 0; return; }
 
 		const std::vector<float>& inst = arrows_.instance_data();
@@ -1210,7 +1300,8 @@ void main()
 		view.hold_seconds = 1.0f; // keep a tracer for 1 s after it was last interesting (anti-flicker)
 		view.instant = tracer_boring_instant_; // dragging the slider ⇒ bypass the hold (live filter)
 
-		bool got = worker_->withFlowField([&](const FlowField& f) { tracers_.advance(view, f); });
+		ensureFabricBvh();
+		bool got = worker_->withFlowField([&](const FlowField& f) { FlowField ff = f; ff.fabric = fabric_bvh_.get(); tracers_.advance(view, ff); });
 		if (!got) { tracer_strips_ = 0; return; }
 
 		tracer_strips_ = tracers_.strips();
@@ -1754,7 +1845,29 @@ void main()
 		// geometry. modelMatrix() supplies the placement at draw time.
 
 		has_mesh_ = true;
+		mesh_triangle_colour_upload_pending_ = true; // revalidate colours against the new triangle count
 		pending_mesh_ = paracfd::core::TriMesh{}; // free CPU copy; it lives in GL now
+	}
+
+	void SliceViewer::uploadTriangleSurfaceColours()
+	{
+		PARACFD_ASSERT_GL_THREAD();
+		if (!gl_ready_ || !mesh_triangle_colour_upload_pending_) return;
+		mesh_triangle_colour_upload_pending_ = false;
+		has_mesh_triangle_colours_ = has_mesh_ && mesh_index_count_ > 0 &&
+			mesh_triangle_colours_.size() == static_cast<std::size_t>(mesh_index_count_ / 3) * 4;
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, mesh_triangle_colour_ssbo_);
+		if (has_mesh_triangle_colours_)
+			glBufferData(GL_SHADER_STORAGE_BUFFER, mesh_triangle_colours_.size() * sizeof(float), mesh_triangle_colours_.data(), GL_DYNAMIC_DRAW);
+		else glBufferData(GL_SHADER_STORAGE_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+	}
+
+	void SliceViewer::uploadParagliderDebugBoxes()
+	{
+		PARACFD_ASSERT_GL_THREAD();if(!gl_ready_||!paraglider_debug_upload_pending_)return;paraglider_debug_upload_pending_=false;
+		auto upload=[&](unsigned vao,unsigned vbo,const std::vector<float>& lines,int& count){glBindVertexArray(vao);glBindBuffer(GL_ARRAY_BUFFER,vbo);glBufferData(GL_ARRAY_BUFFER,lines.size()*sizeof(float),lines.empty()?nullptr:lines.data(),GL_DYNAMIC_DRAW);glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,3*sizeof(float),(void*)0);glEnableVertexAttribArray(0);glBindVertexArray(0);count=static_cast<int>(lines.size()/3);};
+		upload(amr_debug_vao_,amr_debug_vbo_,pending_amr_debug_lines_,amr_debug_vertex_count_);upload(eb_debug_vao_,eb_debug_vbo_,pending_eb_debug_lines_,eb_debug_vertex_count_);
 	}
 
 	void SliceViewer::uploadVoxelOverlay()
@@ -1917,6 +2030,8 @@ void main()
 		}
 
 		if (mesh_upload_pending_) uploadMesh();
+		if (mesh_triangle_colour_upload_pending_) uploadTriangleSurfaceColours();
+		if (paraglider_debug_upload_pending_) uploadParagliderDebugBoxes();
 		if (vox_upload_pending_) uploadVoxelOverlay();
 
 		// CUDA writes the slice colours directly into the registered VBO (zero copy), sampling the
@@ -1984,6 +2099,8 @@ void main()
 		prog_.setUniformValue("uColor", QVector4D(0.55f, 0.58f, 0.62f, 1.0f));
 		glBindVertexArray(box_vao_);
 		glDrawArrays(GL_LINES, 0, box_vertex_count_);
+		if(amr_debug_vertex_count_>0){prog_.setUniformValue("uColor",QVector4D(0.10f,0.85f,1.0f,1.0f));glBindVertexArray(amr_debug_vao_);glDrawArrays(GL_LINES,0,amr_debug_vertex_count_);}
+		if(eb_debug_vertex_count_>0){glLineWidth(1.5f);prog_.setUniformValue("uColor",QVector4D(1.0f,0.25f,0.08f,1.0f));glBindVertexArray(eb_debug_vao_);glDrawArrays(GL_LINES,0,eb_debug_vertex_count_);glLineWidth(1.0f);}
 
 		glBindVertexArray(0);
 		prog_.release();
@@ -1996,12 +2113,15 @@ void main()
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
 			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.74f, 0.71f, 0.66f, 1.0f));
 			mesh_prog_.setUniformValue("uUseVertexColor", 0); // STEP model: flat base colour
+			mesh_prog_.setUniformValue("uUseTriangleColor", has_mesh_triangle_colours_ ? 1 : 0);
+			if (has_mesh_triangle_colours_) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, mesh_triangle_colour_ssbo_);
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // the STEP model is a SOLID ⇒ clipped
 			glBindVertexArray(mesh_vao_);
 			const QMatrix4x4 model = modelMatrix();
 			mesh_prog_.setUniformValue("uMVP", mvp * model);
 			mesh_prog_.setUniformValue("uModel", model);
 			glDrawElements(GL_TRIANGLES, mesh_index_count_, GL_UNSIGNED_INT, (void*)0);
+			if (has_mesh_triangle_colours_) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, 0);
 			glBindVertexArray(0);
 			glDisable(GL_CLIP_DISTANCE0);
 			mesh_prog_.release();
@@ -2023,6 +2143,7 @@ void main()
 			// uniform dark-blue solid. The overlay is re-extracted on toggle so has_vox_cp_ tracks the choice.
 			const bool cp_shade = colour_by_cp_ && has_vox_cp_;
 			mesh_prog_.setUniformValue("uUseVertexColor", cp_shade ? 1 : 0);
+			mesh_prog_.setUniformValue("uUseTriangleColor", 0);
 			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.13f, 0.28f, 0.68f, 1.0f)); // dark-blue solid (uUseVertexColor==0)
 			glDrawArrays(GL_TRIANGLES, 0, vox_vertex_count_);
 			glBindVertexArray(0);
@@ -2137,6 +2258,7 @@ void main()
 		{
 			gz_drag_op_ = -1;
 			gz_drag_axis_ = -1;
+			fabric_bvh_dirty_ = true;
 			emit modelPlacementChanged(); // re-voxelization happens on the next Apply, not per-drag
 			update();
 		}

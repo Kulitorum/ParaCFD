@@ -1,0 +1,121 @@
+#include "core/aero_loads.h"
+#include "core/fluid/amr_fields.h"
+#include "core/fluid/amr_exchange.h"
+#include "core/fluid/amr_grid.h"
+#include "core/fluid/eb_pressure.h"
+#include "core/geometry/embedded_boundary.h"
+#include "core/geometry/triangle_bvh.h"
+#include "core/paraglider_config.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <queue>
+#include <string>
+#include <vector>
+
+#include <cuda_runtime.h>
+
+using namespace paracfd::core;
+
+namespace
+{
+	int failures=0;
+	void check(bool ok,const char* name){std::printf("[paraglider] %-44s %s\n",name,ok?"PASS":"FAIL");if(!ok)++failures;}
+	bool near(double a,double b,double tol=1e-8){return std::abs(a-b)<=tol*std::max({1.0,std::abs(a),std::abs(b)});}
+
+	TriMesh mesh_from_quads(const std::vector<std::array<Vec3d,4>>& quads)
+	{
+		TriMesh m;float lo[3]={1e30f,1e30f,1e30f},hi[3]={-1e30f,-1e30f,-1e30f};
+		for(std::size_t q=0;q<quads.size();++q)
+		{
+			const std::uint32_t base=static_cast<std::uint32_t>(m.vertex_count());
+			for(Vec3d p:quads[q]){m.positions.insert(m.positions.end(),{(float)p.x,(float)p.y,(float)p.z});for(int c=0;c<3;++c){lo[c]=std::min(lo[c],(float)p[c]);hi[c]=std::max(hi[c],(float)p[c]);}}
+			m.indices.insert(m.indices.end(),{base,base+1,base+2,base,base+2,base+3});m.source_face_ids.push_back((std::uint32_t)q);m.source_face_ids.push_back((std::uint32_t)q);
+		}
+		m.bbox_min={lo[0],lo[1],lo[2]};m.bbox_max={hi[0],hi[1],hi[2]};return m;
+	}
+	TriMesh flat_x(double x=0.5){return mesh_from_quads({{{{x,0,0},{x,1,0},{x,1,1},{x,0,1}}}});}
+	TriMesh reversed(TriMesh m){for(std::size_t i=0;i<m.indices.size();i+=3)std::swap(m.indices[i+1],m.indices[i+2]);return m;}
+
+	EmbeddedBoundary make_eb(const TriMesh& m,UniformEbGrid g={{0,0,0},1,1,1,1.0}){TriangleBvh b(m);return build_embedded_boundary(m,b,g);}
+
+	bool connected(const EmbeddedBoundary& eb,FragmentRef begin,FragmentRef target)
+	{
+		std::vector<FragmentRef> todo{begin},seen;while(!todo.empty()){FragmentRef a=todo.back();todo.pop_back();if(a==target)return true;if(std::find(seen.begin(),seen.end(),a)!=seen.end())continue;seen.push_back(a);for(const auto& c:eb.connections){if(c.fragment_a==a)todo.push_back(c.fragment_b);else if(c.fragment_b==a)todo.push_back(c.fragment_a);}}return false;
+	}
+}
+
+int main()
+{
+	// BVH: exact cell query, two-sided segment crossing, and nearest-distance result.
+	TriMesh flat=flat_x();TriangleBvh bvh(flat);Aabb3d hitbox{{0.49,0.2,0.2},{0.51,0.8,0.8}},missbox{{0.0,0.2,0.2},{0.4,0.8,0.8}};
+	check(bvh.query_aabb(hitbox).size()==2&&bvh.query_aabb(missbox).empty(),"BVH exact AABB query");
+	SegmentHit sh=bvh.intersect_segment({0,0.3,0.4},{1,0.3,0.4});check(sh.hit&&near(sh.t,0.5,1e-12),"BVH two-sided segment intersection");
+	auto np=bvh.nearest({0.2,0.3,0.4});check(np.found&&near(np.distance,0.3,1e-12),"BVH nearest surface / distance");
+	TriMesh placement_source=flat;placement_source.normals.assign(placement_source.positions.size(),0);for(std::size_t v=0;v<placement_source.vertex_count();++v)placement_source.normals[3*v]=1;placement_source.vertex_uv.assign(2*placement_source.vertex_count(),0.25f);ModelPlacement reflected;reflected.m[0]=-1;TriMesh placement_mesh=placed_mesh(placement_source,reflected);check(placement_mesh.source_face_ids==placement_source.source_face_ids&&placement_mesh.vertex_uv==placement_source.vertex_uv&&near(placement_mesh.normals[0],1.0,1e-7),"placement preserves CAD metadata and winding normal");
+
+	// Flat membrane: two independent fluid CVs, exact patch geometry, no through connection.
+	EmbeddedBoundary eb=make_eb(flat);check(eb.ready_for_flow()&&eb.fragments.size()==2&&eb.cells[0].state==EbCellState::split,"flat membrane creates two fluid fragments");
+	check(near(eb.fragments[0].volume,0.5,1e-10)&&near(eb.fragments[1].volume,0.5,1e-10),"flat membrane fragment volumes");
+	double area=0;Vec3d an{};for(const auto& p:eb.patches){area+=p.area;an=an+p.normal*p.area;}check(near(area,1.0,1e-10)&&near(an.x,1.0,1e-10)&&near(an.y,0)&&near(an.z,0),"flat membrane area and normal");
+	check(!connected(eb,eb.fragment_for_side(0,-1),eb.fragment_for_side(0,1)),"no pressure/flux connection through fabric");
+
+	// Inclined analytical cut x+y=1: two half-volume fragments, section area sqrt(2).
+	TriMesh inclined=mesh_from_quads({{{{-1,2,-1},{2,-1,-1},{2,-1,2},{-1,2,2}}}});EmbeddedBoundary ie=make_eb(inclined);double ia=0;for(auto& p:ie.patches)ia+=p.area;
+	check(ie.ready_for_flow()&&ie.fragments.size()==2&&near(ie.fragments[0].volume,0.5,1e-9)&&near(ie.fragments[1].volume,0.5,1e-9),"inclined membrane analytical volumes");
+	check(near(ia,std::sqrt(2.0),1e-9),"inclined membrane analytical area");
+
+	// Deliberate one-cell opening: opposite sides connect only by travelling through the gap cell.
+	TriMesh pieces=mesh_from_quads({{{{0,0,0.5},{1,0,0.5},{1,1,0.5},{0,1,0.5}}},{{{2,0,0.5},{3,0,0.5},{3,1,0.5},{2,1,0.5}}}});UniformEbGrid g3{{0,0,0},3,1,1,1};EmbeddedBoundary oe=make_eb(pieces,g3);
+	check(oe.ready_for_flow()&&oe.cells[1].state==EbCellState::regular,"opening remains ordinary fluid (not auto-closed)");
+	check(connected(oe,oe.fragment_for_side(0,-1),oe.fragment_for_side(0,1)),"flow connectivity passes around fabric through opening");
+
+	// Multiple sheets in a cell are never collapsed into a fake two-fragment topology.
+	TriMesh tj=mesh_from_quads({{{{0.5,0,0},{0.5,1,0},{0.5,1,1},{0.5,0,1}}},{{{0,0.5,0},{1,0.5,0},{1,0.5,1},{0,0.5,1}}}});EmbeddedBoundary te=make_eb(tj);
+	check(!te.ready_for_flow()&&te.cells[0].state==EbCellState::unresolved,"rib/T-junction requests refinement");
+	TriMesh trailing=mesh_from_quads({{{{0,0,0.35},{1,0,0.48},{1,1,0.48},{0,1,0.35}}},{{{0,0,0.65},{1,0,0.52},{1,1,0.52},{0,1,0.65}}}});EmbeddedBoundary tre=make_eb(trailing);
+	check(!tre.ready_for_flow(),"thin trailing edge is reported, never joined");
+
+	// Manufactured two-pressure state and reversed winding: plus/minus swap, physical force does not.
+	auto pressure_by_world_side=[](const EmbeddedBoundary& x){EbPressureState p;p.regular.assign(x.grid.cell_count(),0);p.irregular.resize(x.fragments.size());for(std::size_t i=0;i<x.fragments.size();++i)p.irregular[i]=x.fragments[i].centroid.x<0.5?2.0:1.0;return p;};
+	FreestreamConfig fs;fs.speed=1;fs.rho=2;AeroReferenceConfig ar;ar.area=1;AerodynamicLoads fwd=compute_pressure_loads(eb,pressure_by_world_side(eb),flat.triangle_count(),fs,ar);
+	TriMesh rev=reversed(flat);EmbeddedBoundary reb=make_eb(rev);AerodynamicLoads back=compute_pressure_loads(reb,pressure_by_world_side(reb),rev.triangle_count(),fs,ar);
+	check(near(fwd.pressure_force.x,1.0,1e-10)&&near(fwd.pressure_force.x,back.pressure_force.x,1e-10)&&near(fwd.pressure_force.y,back.pressure_force.y)&&near(fwd.pressure_force.z,back.pressure_force.z),"pressure force invariant to triangle winding");
+	check(fwd.force_coefficients_valid&&near(fwd.cd_pressure,1.0,1e-10),"pressure-only Cp/CD with explicit reference area");
+	AeroReferenceConfig no_ref;AerodynamicLoads unscaled=compute_pressure_loads(eb,pressure_by_world_side(eb),flat.triangle_count(),fs,no_ref);check(!unscaled.force_coefficients_valid&&std::isnan(unscaled.cd_pressure),"CL/CD withheld without reference area");
+
+	// Hybrid finite-volume operator: regular stencil + compact aperture work list. Verify
+	// conservation, GPU FP32 agreement, and a complete pressure projection on aperture fluxes.
+	EbPressureSystem ops=build_eb_pressure_system(oe,false);std::vector<double> pv(ops.storage_size,0),cpu_A;for(int i=0;i<ops.storage_size;++i)if(ops.active[i])pv[i]=0.13*i-0.4;ops.apply_cpu(pv,cpu_A);double asum=0;for(double v:cpu_A)asum+=v;check(std::abs(asum)<1e-11,"Neumann EB pressure operator is conservative");
+	std::vector<Real> pf(pv.size()),gpu_A(pv.size());for(std::size_t i=0;i<pv.size();++i)pf[i]=(Real)pv[i];Real *dp=nullptr,*da=nullptr;cudaMalloc(&dp,pf.size()*sizeof(Real));cudaMalloc(&da,pf.size()*sizeof(Real));cudaMemcpy(dp,pf.data(),pf.size()*sizeof(Real),cudaMemcpyHostToDevice);DeviceEbPressureOperator dop(ops);dop.apply(dp,da);cudaMemcpy(gpu_A.data(),da,gpu_A.size()*sizeof(Real),cudaMemcpyDeviceToHost);cudaFree(dp);cudaFree(da);double op_err=0,op_scale=1;for(std::size_t i=0;i<gpu_A.size();++i){op_err=std::max(op_err,std::abs((double)gpu_A[i]-cpu_A[i]));op_scale=std::max(op_scale,std::abs(cpu_A[i]));}std::printf("[paraglider] EB operator %s vs FP64 rel-max = %.3e\n",sizeof(Real)==4?"FP32":"FP64",op_err/op_scale);check(op_err/op_scale<2e-6,sizeof(Real)==4?"FP32 GPU EB operator matches FP64 reference":"FP64 GPU EB operator matches FP64 reference");
+	std::vector<Real> br(cpu_A.size()),xs(cpu_A.size());for(std::size_t i=0;i<br.size();++i)br[i]=(Real)cpu_A[i];Real *db=nullptr,*dx=nullptr;cudaMalloc(&db,br.size()*sizeof(Real));cudaMalloc(&dx,xs.size()*sizeof(Real));cudaMemcpy(db,br.data(),br.size()*sizeof(Real),cudaMemcpyHostToDevice);DeviceEbPressureSolver gpu_solver(ops);const double gpu_tol=sizeof(Real)==4?1e-5:1e-10;EbGpuSolveResult gsr=gpu_solver.solve(dx,db,gpu_tol,200,false);std::printf("[paraglider] EB GPU CG iterations=%d relative-residual=%.3e\n",gsr.iterations,gsr.relative_residual);check(gsr.converged&&gsr.relative_residual<gpu_tol*1.1,"GPU-resident EB pressure CG converges");EbGpuSolveResult warm_gsr=gpu_solver.solve(dx,db,gpu_tol,20,true);check(warm_gsr.converged&&warm_gsr.relative_residual<gpu_tol*1.1,"GPU EB pressure warm start uses b - A p");cudaFree(db);cudaFree(dx);
+	EbFaceFluxes flux=make_zero_fluxes(oe);if(!flux.aperture_velocity.empty())flux.aperture_velocity[0]=0.2;std::vector<double> rhs,sol(ops.storage_size,0),div0,div1;eb_divergence_cpu(ops,flux,div0);eb_projection_rhs_cpu(ops,flux,1.225,0.01,rhs);EbCpuSolveResult sr=solve_eb_pressure_cpu(ops,rhs,sol,1e-11,500);eb_correct_fluxes_cpu(ops,sol,1.225,0.01,flux);eb_divergence_cpu(ops,flux,div1);double d0=0,d1=0;for(double x:div0)d0=std::max(d0,std::abs(x));for(double x:div1)d1=std::max(d1,std::abs(x));std::printf("[paraglider] EB projection max-divergence %.3e -> %.3e (CPU reference)\n",d0,d1);check(sr.converged&&d1<std::max(1e-10,d0*1e-9),"EB projection removes control-volume divergence");
+	EbPressureSystem flat_ops=build_eb_pressure_system(eb,false);EbFaceFluxes blocked=make_zero_fluxes(eb);std::vector<double> blocked_div;eb_divergence_cpu(flat_ops,blocked,blocked_div);double blocked_max=0;for(double x:blocked_div)blocked_max=std::max(blocked_max,std::abs(x));check(eb.apertures.empty()&&blocked_max==0,"impermeable plate has exactly zero fabric flux DOF");
+	// A membrane exactly coincident with a Cartesian face is a blocked cut face, not a
+	// pair of zero-volume fragments. The otherwise implicit regular stencil/flux is suppressed.
+	UniformEbGrid aligned_grid{{0,0,0},2,1,1,1};TriMesh aligned_mesh=flat_x(1.0);EmbeddedBoundary aligned_eb=make_eb(aligned_mesh,aligned_grid);check(aligned_eb.ready_for_flow()&&aligned_eb.fragments.empty()&&aligned_eb.cells[0].state==EbCellState::regular&&aligned_eb.cells[1].state==EbCellState::regular&&(aligned_eb.cut_face_mask[0]&1u),"face-aligned membrane uses blocked face, no tiny fragments");
+	EbPressureSystem aligned_ops=build_eb_pressure_system(aligned_eb,false);std::vector<double> aligned_pressure{2.0,1.0},aligned_A;aligned_ops.apply_cpu(aligned_pressure,aligned_A);EbFaceFluxes aligned_flux=make_zero_fluxes(aligned_eb);aligned_flux.x[1]=4.0;std::vector<double> aligned_div;eb_divergence_cpu(aligned_ops,aligned_flux,aligned_div);std::vector<Real> aligned_real{Real(2),Real(1)},aligned_gpu(2);Real *aligned_dp=nullptr,*aligned_da=nullptr;cudaMalloc(&aligned_dp,2*sizeof(Real));cudaMalloc(&aligned_da,2*sizeof(Real));cudaMemcpy(aligned_dp,aligned_real.data(),2*sizeof(Real),cudaMemcpyHostToDevice);DeviceEbPressureOperator aligned_device_op(aligned_ops);aligned_device_op.apply(aligned_dp,aligned_da);cudaMemcpy(aligned_gpu.data(),aligned_da,2*sizeof(Real),cudaMemcpyDeviceToHost);cudaFree(aligned_dp);cudaFree(aligned_da);check(near(aligned_A[0],0)&&near(aligned_A[1],0)&&near(aligned_div[0],0)&&near(aligned_div[1],0)&&near(aligned_gpu[0],0)&&near(aligned_gpu[1],0),"face-aligned fabric suppresses implicit CPU/GPU pressure/flux connection");
+	EbPressureState aligned_state;aligned_state.regular={2.0,1.0};AerodynamicLoads aligned_load=compute_pressure_loads(aligned_eb,aligned_state,aligned_mesh.triangle_count(),fs,ar);check(near(aligned_load.pressure_force.x,1.0,1e-10),"face-aligned fabric retains independent two-sided pressure load");
+	TriMesh near_face=flat_x(0.98);UniformEbGrid g2{{0,0,0},2,1,1,1};EmbeddedBoundary se=make_eb(near_face,g2);EbPressureSystem ss=build_eb_pressure_system(se,false);int merged=0;for(int fi=0;fi<(int)se.fragments.size();++fi)if(se.fragments[fi].merge_target!=irregular_fragment(fi))++merged;double active_volume=0;for(std::size_t i=0;i<ss.volume.size();++i)if(ss.active[i])active_volume+=ss.volume[i];check(se.ready_for_flow()&&merged==1&&near(active_volume,2.0,1e-10),"small fragment merges conservatively on same side");
+	EmbeddedBoundary chain;chain.grid={{0,0,0},1,1,1,1};chain.cells.resize(1);chain.cut_face_mask.assign(1,0);chain.cells[0].state=EbCellState::split;chain.cells[0].first_fragment=0;chain.cells[0].fragment_count=3;chain.fragments={{0,0.01,{0.1,0.5,0.5},-1,irregular_fragment(1)},{0,0.09,{0.2,0.5,0.5},-1,irregular_fragment(2)},{0,0.90,{0.6,0.5,0.5},-1,irregular_fragment(2)}};EbPressureSystem chain_system=build_eb_pressure_system(chain,false);check(chain_system.fragment_dof[0]==chain_system.fragment_dof[1]&&chain_system.fragment_dof[1]==chain_system.fragment_dof[2]&&near(chain_system.volume[chain_system.fragment_dof[2]],1.0,1e-12),"small-fragment merge chains resolve conservatively");
+
+	// One-level bricks equal a uniform Cartesian tiling; host and GPU halo paths agree.
+	AmrHierarchy uh=AmrHierarchy::uniform({{0,0,0},{8,4,4}},1.0,4,1);check(uh.levels().size()==1&&uh.levels()[0].active_bricks==2&&uh.active_cell_count()==128,"one AMR level equals uniform Cartesian grid");
+	AmrHierarchy padded=AmrHierarchy::uniform({{0,0,0},{13,15,9}},0.25,32,1);const Aabb3d padded_box=padded.domain();check(near(padded_box.lo.x,0)&&near(padded_box.hi.x,16)&&near(padded_box.lo.y,-0.5)&&near(padded_box.hi.y,15.5)&&near(padded_box.lo.z,-3.5)&&near(padded_box.hi.z,12.5),"base-brick padding is downstream in X and symmetric in Y/Z");
+	check(uh.locate_finest({6.2,1.2,2.2}).brick==1,"integer-coordinate finest-brick lookup");
+	AmrHostFields hf(uh);auto& lf=hf.levels()[0];for(int br=0;br<2;++br)for(int k=0;k<4;++k)for(int j=0;j<4;++j)for(int i=0;i<4;++i)lf.p[lf.layout.cell_index(br,i,j,k)]=(Real)(10+10*br);hf.exchange_same_level_pressure_halos(uh);check(near(lf.p[lf.layout.cell_index(0,4,2,2)],20),"same-level host halo exchange");
+	lf.p[lf.layout.cell_index(0,4,2,2)]=0;DeviceAmrFields df(uh);df.upload(hf);df.exchange_same_level_pressure_halos();df.download_pressure(hf);check(near(hf.levels()[0].p[lf.layout.cell_index(0,4,2,2)],20),"same-level CUDA halo exchange");
+	std::fill(lf.u.begin(),lf.u.end(),Real(0));std::fill(lf.v.begin(),lf.v.end(),Real(0));std::fill(lf.w.begin(),lf.w.end(),Real(0));std::fill(lf.p.begin(),lf.p.end(),Real(0));lf.p[lf.layout.cell_index(1,3,1,1)]=Real(3);lf.u[lf.layout.u_index(0,1,1,0)]=Real(7);lf.v[lf.layout.v_index(0,1,0,1)]=Real(5);lf.w[lf.layout.w_index(0,1,1,0)]=Real(5);df.upload(hf);df.apply_external_aero_boundaries(Real(10));df.download(hf);check(near(lf.u[lf.layout.u_index(0,0,1,1)],10)&&near(lf.p[lf.layout.cell_index(1,4,1,1)],-3)&&near(lf.u[lf.layout.u_index(0,1,1,-1)],7)&&near(lf.v[lf.layout.v_index(0,1,0,1)],0)&&near(lf.w[lf.layout.w_index(0,1,1,0)],0),"GPU external BC: +X inflow/outlet and free-slip Y/Z (no ground)");
+
+	// Static refinement stays 2:1 and point lookup resolves a fine brick near the membrane.
+	AmrConfig ac;ac.base_cell_size=0.5;ac.max_levels=3;ac.brick_size=4;ac.surface_refinement_distance=0.1;ac.wing_refinement_distance=0.2;ac.wake_length=1;ac.wake_radius=0.5;AmrHierarchy ah=AmrHierarchy::build_static({{-1,-1,-1},{3,3,3}},flat,bvh,ac);
+	check(ah.levels().size()==3&&ah.is_two_to_one_balanced(),"static AMR hierarchy is 2:1 balanced");check(ah.locate_finest({0.5,0.5,0.5}).level==2,"surface region reaches configured finest level");
+	DeviceAmrLocator locator(ah);std::vector<GpuAmrPoint> locator_points{{0.5f,0.5f,0.5f},{-2.0f,-2.0f,-2.0f}};std::vector<GpuBrickLocation> locator_result(2);GpuAmrPoint* device_locator_points=nullptr;GpuBrickLocation* device_locator_result=nullptr;cudaMalloc(&device_locator_points,locator_points.size()*sizeof(GpuAmrPoint));cudaMalloc(&device_locator_result,locator_result.size()*sizeof(GpuBrickLocation));cudaMemcpy(device_locator_points,locator_points.data(),locator_points.size()*sizeof(GpuAmrPoint),cudaMemcpyHostToDevice);locator.locate_points(device_locator_points,device_locator_result,(int)locator_points.size());cudaMemcpy(locator_result.data(),device_locator_result,locator_result.size()*sizeof(GpuBrickLocation),cudaMemcpyDeviceToHost);cudaFree(device_locator_points);cudaFree(device_locator_result);check(locator_result[0].level==2&&locator_result[0].brick>=0&&locator_result[1].brick<0,"GPU hash locates finest brick without tree traversal");
+	FluxMatchResult fm=match_two_to_one_flux(0.7,1.0,{1.0,2.0,3.0,4.0},{0.25,0.20,0.15,0.10});check(near(fm.corrected_coarse_velocity,fm.fine_flux_sum,1e-14)&&near(fm.corrected_coarse_velocity,fm.fine_flux_sum,1e-14),"AMR coarse flux equals aperture-weighted fine sum");
+	AmrHostFields ahf(ah);int covered_parent=-1;for(int q=0;q<(int)ah.levels()[0].bricks.size();++q)if(!ah.levels()[0].bricks[q].active()){covered_parent=q;break;}if(covered_parent>=0){auto& cp=ahf.levels()[0];for(int k=0;k<ah.brick_size();++k)for(int j=0;j<ah.brick_size();++j)for(int i=0;i<ah.brick_size();++i)cp.p[cp.layout.cell_index(covered_parent,i,j,k)]=(Real)3.25;prolong_coarse_pressure_to_fine(ah,ahf,1);restrict_fine_pressure_to_coarse(ah,ahf,1);}check(covered_parent>=0&&near(ahf.levels()[0].p[ahf.levels()[0].layout.cell_index(covered_parent,1,1,1)],3.25,1e-7),"AMR prolongation/restriction conserves cell mean");
+
+	ParagliderConfig cfg;std::string err;check(load_paraglider_config("configs/paraglider.json",cfg,&err)&&near(cfg.freestream.speed,10)&&cfg.amr.brick_size==32,"paraglider configuration schema/default");
+
+	std::printf("[paraglider] geometry/topology probe: %s (%d failures)\n",failures?"FAIL":"PASS",failures);return failures?1:0;
+}

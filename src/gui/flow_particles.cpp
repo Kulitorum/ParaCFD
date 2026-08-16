@@ -39,6 +39,11 @@ namespace paracfd::gui
 		return f.solid[(size_t)g.pidx(i, j, k)] != 0;
 	}
 
+	bool FlowParticles::crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const
+	{
+		return f.fabric && f.fabric->intersect_segment({ax, ay, az}, {bx, by, bz}, 1e-8).hit;
+	}
+
 	// Cell-centred velocity component helpers (average of the two bracketing MAC faces), with
 	// solid cells treated as zero flow so tracers slow + respawn into obstacles rather than
 	// tunnelling. Reads clamp to the valid index range.
@@ -163,7 +168,9 @@ namespace paracfd::gui
 				else if (view.axis == 0) { vx = 0; vy = vv; vz = ww; }
 				else if (view.axis == 1) { vx = uu; vy = 0; vz = ww; }
 				else { vx = uu; vy = vv; vz = 0; }
-				x += (float)vx * hstep; y += (float)vy * hstep; z += (float)vz * hstep;
+				const float nx = x + (float)vx * hstep, ny = y + (float)vy * hstep, nz = z + (float)vz * hstep;
+				if (crosses_fabric(f, x, y, z, nx, ny, nz)) { dead = true; break; }
+				x = nx; y = ny; z = nz;
 			}
 			if (dead) { spawn(k, view, f, false); continue; }
 

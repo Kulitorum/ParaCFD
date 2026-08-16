@@ -1,0 +1,45 @@
+{
+  "step": {
+    "path": "",
+    "tessellation_deflection_mm": 2.0
+  },
+  "placement": {
+    "tx": 0.0,
+    "ty": 0.0,
+    "tz": 0.0,
+    "matrix": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  },
+  "freestream": {
+    "speed": 10.0,
+    "rho": 1.225,
+    "nu": 1.5e-5
+  },
+  "domain": {
+    "upstream_margin": 3.0,
+    "downstream_margin": 8.0,
+    "lateral_margin": 3.0,
+    "vertical_margin": 3.0
+  },
+  "amr": {
+    "base_cell_size": 0.25,
+    "max_levels": 3,
+    "brick_size": 32,
+    "ghost_cells": 1,
+    "wing_refinement_distance": 1.0,
+    "surface_refinement_distance": 0.35,
+    "wake_length": 8.0,
+    "wake_radius": 2.0,
+    "min_volume_fraction": 0.05
+  },
+  "solver": {
+    "cfl": 0.7,
+    "smagorinsky_cs": 0.10,
+    "projection_tolerance": 1e-4,
+    "projection_max_iterations": 100
+  },
+  "reference": {
+    "area": 0.0,
+    "length": 0.0,
+    "moment_origin": [0.0, 0.0, 0.0]
+  }
+}

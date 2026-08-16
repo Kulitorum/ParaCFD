@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ParaCFD — 3D morphodynamic scour-protection simulator (C++/CUDA + Qt6).
-# Milestone M0: scaffold. Three targets (libparacfd, scour CLI, paracfd-gui stub),
-# GoogleTest via FetchContent, ctest wiring, JSON config loader, VTI writer.
+# ParaCFD — GPU paraglider aerodynamics from zero-thickness STEP fabric
+# (C++20/CUDA + Qt6/OpenGL + OpenCascade). The legacy channel/building sources
+# remain temporarily buildable as migration references; new development belongs
+# in the block-AMR/embedded-boundary path below.
 project(ParaCFD LANGUAGES CXX CUDA)
+
+option(PARACFD_VALIDATION_FP64 "Use FP64 fields in the new paraglider solver path" OFF)
 
 # --- Global standards -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -36,9 +39,11 @@ find_package(CUDAToolkit REQUIRED)
 # --- libparacfd (static core, no Qt) -----------------------------------------
 add_library(libparacfd STATIC
 	src/core/config.cpp
+	src/core/paraglider_config.cpp
 	src/core/vti_writer.cpp
 	src/core/vti_reader.cpp
-	# Wind loads — Cp + force/moment integration over the voxelized building.
+	src/core/aero_loads.cpp
+	# Legacy voxel-building wind loads (migration reference; not the new load path).
 	src/core/windloads.cpp
 	src/core/cuda_probe.cu
 	# M1 — fluid core (MAC + MacCormack + Smagorinsky + MGPCG)
@@ -56,6 +61,12 @@ add_library(libparacfd STATIC
 	src/core/fluid/channel_empty.cpp
 	# Graded structured grid — fine-core → per-axis metric arrays (host) + device upload owner.
 	src/core/fluid/grid_metrics.cpp
+	# Paraglider solver foundation — static 2:1 bricks and pooled FP32 SoA fields.
+	src/core/fluid/amr_grid.cpp
+	src/core/fluid/amr_fields.cu
+	src/core/fluid/amr_exchange.cpp
+	src/core/fluid/eb_pressure.cpp
+	src/core/fluid/eb_pressure.cu
 	# M3 — bed-shear wall function, periodic channel + body force, SEM inlet, precursor
 	src/core/fluid/bedshear.cu
 	src/core/fluid/channel_periodic.cu
@@ -63,8 +74,11 @@ add_library(libparacfd STATIC
 	src/core/fluid/sem_inlet.cu
 	src/core/fluid/channel_sem.cpp
 	src/core/fluid/precursor.cpp
-	# Geometry — watertight ray-parity voxelizer (STEP TriMesh → solid obstacle mask). OCC-free
-	# (needs only the mesh); the shared model placement + TriMesh headers live in core/geometry/.
+	# Paraglider geometry acceleration and zero-thickness embedded boundaries.
+	src/core/geometry/triangle_bvh.cpp
+	src/core/geometry/embedded_boundary.cpp
+	# Legacy solid voxelizer/building generators retained until the replacement UI
+	# and end-to-end timestep are operational.
 	src/core/geometry/voxelize.cpp
 	# Building — 3D-print centerline surface -> thickened wall + flat roof solid mask (distance-field).
 	src/core/geometry/building.cpp
@@ -75,6 +89,9 @@ set_target_properties(libparacfd PROPERTIES
 	POSITION_INDEPENDENT_CODE ON
 )
 target_compile_features(libparacfd PUBLIC cxx_std_20)
+if(PARACFD_VALIDATION_FP64)
+	target_compile_definitions(libparacfd PUBLIC PARACFD_REAL_DOUBLE=1)
+endif()
 # cudart_static is built against the static CRT; the rest of the build is /MD.
 # Prefer the dynamic CRT (MSVCRT) everywhere to silence the benign LNK4098.
 if(MSVC)
@@ -161,6 +178,10 @@ add_executable(building_probe tools/building_probe.cpp)
 target_link_libraries(building_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(building_probe)
 
+add_executable(paraglider_probe tools/paraglider_probe.cpp)
+target_link_libraries(paraglider_probe PRIVATE libparacfd paracfd_geometry)
+paracfd_deploy_occ_dlls(paraglider_probe)
+
 # --- parity_probe (Phase-0 migration oracle for the graded-structured-grid change) ---
 # Restores the CLAUDE.md "1e-5 GPU-vs-CPU parity per kernel" invariant (no test target had
 # existed — the CPU twins were defined but never run) AND adds the behaviour-preservation
@@ -176,6 +197,17 @@ set_target_properties(parity_probe PROPERTIES
 target_link_libraries(parity_probe PRIVATE libparacfd)
 add_test(NAME parity COMMAND parity_probe)
 set_tests_properties(parity PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+# Deterministic CPU geometry/EB/AMR gates plus a tiny CUDA halo parity check. This is the
+# zero-thickness membrane acceptance oracle; it does not use or bless legacy voxel goldens.
+add_executable(paraglider_geometry_probe tools/paraglider_geometry_probe.cpp)
+target_link_libraries(paraglider_geometry_probe PRIVATE libparacfd)
+add_test(NAME paraglider_geometry COMMAND paraglider_geometry_probe)
+set_tests_properties(paraglider_geometry PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(paraglider_gpu_probe tools/paraglider_gpu_probe.cpp)
+target_link_libraries(paraglider_gpu_probe PRIVATE libparacfd)
+add_test(NAME paraglider_gpu COMMAND paraglider_gpu_probe)
 
 # --- paracfd_gui_cuda (GUI CUDA half: slice colour kernel + CUDA-GL interop) ---
 # Kept Qt-free so nvcc never sees Qt's host flags, and so the fast unit suite can

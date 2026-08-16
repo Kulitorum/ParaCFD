@@ -17,6 +17,7 @@
 #pragma once
 
 #include "core/fluid/mac_grid.h"
+#include "core/geometry/triangle_bvh.h"
 
 #include <cstdint>
 #include <random>
@@ -33,6 +34,9 @@ namespace paracfd::gui
 		const double* v = nullptr;
 		const double* w = nullptr;
 		const unsigned char* solid = nullptr;
+		// Zero-thickness fabric has no inside/solid classification. Collision is a segment crossing
+		// against the static placed-mesh BVH, so particles cannot tunnel from one fluid side to the other.
+		const paracfd::core::TriangleBvh* fabric = nullptr;
 		paracfd::core::MacGrid grid;
 		// Current flow direction (ChannelBC::flow_sign): +1 ⇒ inlet at x-min (default), -1 ⇒ inlet at
 		// x-max (reversed tide). The tracers seed from whichever face is the inlet.
@@ -75,6 +79,7 @@ namespace paracfd::gui
 		// three components; caller projects for 2D.
 		void sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const;
 		bool is_solid(const FlowField& f, float x, float y, float z) const;
+		bool crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const;
 
 		int count_ = 0;
 		bool needs_reset_ = false;

@@ -1,22 +1,20 @@
 // step_import.cpp — see step_import.h. The ONLY translation unit that touches OpenCascade.
 //
-// Pipeline (PLAN §3 recipe, reference impl cobod-slicer src/app/widgets/render/mesh.cpp:494):
+// Paraglider CAD pipeline:
 //   STEPControl_Reader → ReadFile → TransferRoots → OneShape → BRepMesh_IncrementalMesh →
 //   per-face BRep_Tool::Triangulation (apply TopLoc_Location) → 1-based→0-based indices.
 //
 // Three correctness-critical traps, all handled here:
 //   (a) mm→m — OCC coordinates are millimetres; every node is multiplied by 0.001.
-//   (b) winding — OCC stores triangles in the surface's natural (u,v) sense; the solid's
-//       OUTWARD normal is that sense only when the face is FORWARD, so we swap two indices
-//       when face.Orientation() == TopAbs_REVERSED. (This is the OPPOSITE branch from the
-//       slicer, whose meshes are globally inverted — see PLAN §3 / CLAUDE.md.)
+//   (b) winding — OCC stores triangles in the surface's natural (u,v) sense. We apply the
+//       TopoDS face orientation so every patch has a stable local minus-to-plus normal. No
+//       globally outward or watertight shell orientation is assumed by the CFD model.
 //   (c) smooth normals — per-vertex normals are the area-weighted average of incident face
 //       normals (summing UN-normalised cross products naturally area-weights, then normalise).
 //
-// load_step_mesh() accumulates the whole shape; load_step_solids() reuses the SAME per-shape
-// accumulation once PER SOLID for the PLAN G3 drop/settle convex-piece decomposition (each solid
-// → one convex collision piece). Both share read_step_shape() (read+transfer+triangulate) and
-// mesh_from_faces() (faces → TriMesh) so the two entry points stay byte-for-byte consistent.
+// load_step_mesh() is the paraglider path and accumulates the whole shape, including open shells
+// and internal fabric. load_step_solids() remains temporarily for legacy consumers. Both share
+// read_step_shape() and mesh_from_faces() so tessellation/provenance stay consistent.
 #include "core/geometry/step_import.h"
 
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -34,6 +32,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 
 #include <algorithm>
@@ -106,7 +105,7 @@ namespace paracfd::core
 			return transfer_and_mesh(reader, deflection_mm, out, error);
 		}
 
-		// Accumulate every triangulated FACE of `shape` into one TriMesh (metres, outward winding,
+		// Accumulate every triangulated FACE of `shape` into one TriMesh (metres, face-local winding,
 		// area-weighted per-vertex normals, bbox). `shape` must ALREADY be meshed (BRepMesh run on
 		// it or an ancestor). Returns empty() if the shape contributes no triangles.
 		TriMesh mesh_from_faces(const TopoDS_Shape& shape)
@@ -115,7 +114,8 @@ namespace paracfd::core
 
 			// --- Accumulate faces into one flat mesh (metres) ----------------------
 			constexpr double kMmToM = 0.001;
-			for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next())
+			std::uint32_t source_face_id = 0;
+			for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next(), ++source_face_id)
 			{
 				TopoDS_Face face = TopoDS::Face(exp.Current());
 				TopLoc_Location loc;
@@ -133,6 +133,18 @@ namespace paracfd::core
 					mesh.positions.push_back(static_cast<float>(p.X() * kMmToM));
 					mesh.positions.push_back(static_cast<float>(p.Y() * kMmToM));
 					mesh.positions.push_back(static_cast<float>(p.Z() * kMmToM));
+					if (tri->HasUVNodes())
+					{
+						const gp_Pnt2d uv = tri->UVNode(i);
+						mesh.vertex_uv.push_back(static_cast<float>(uv.X()));
+						mesh.vertex_uv.push_back(static_cast<float>(uv.Y()));
+					}
+					else
+					{
+						const float nan = std::numeric_limits<float>::quiet_NaN();
+						mesh.vertex_uv.push_back(nan);
+						mesh.vertex_uv.push_back(nan);
+					}
 				}
 
 				for (Standard_Integer i = 1; i <= tri->NbTriangles(); ++i)
@@ -144,6 +156,7 @@ namespace paracfd::core
 					mesh.indices.push_back(base + static_cast<std::uint32_t>(n1));
 					mesh.indices.push_back(base + static_cast<std::uint32_t>(n2));
 					mesh.indices.push_back(base + static_cast<std::uint32_t>(n3));
+					mesh.source_face_ids.push_back(source_face_id);
 				}
 			}
 

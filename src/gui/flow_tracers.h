@@ -80,6 +80,7 @@ namespace paracfd::gui
 		struct Pt { float x, y, z, spd; }; // world position [m] + speed [m/s]
 		void sample(const FlowField& f, float x, float y, float z, double& uu, double& vv, double& ww) const;
 		bool is_solid(const FlowField& f, float x, float y, float z) const;
+		bool crosses_fabric(const FlowField& f, float ax, float ay, float az, float bx, float by, float bz) const;
 		// (Re)build the persistent inlet seed lattice when the config changes; resets the holds.
 		void build_seeds(const TracerView& view, const FlowField& f);
 		// Integrate one streamline from the seed into line_; returns the point count.

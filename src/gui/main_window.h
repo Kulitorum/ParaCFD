@@ -50,11 +50,10 @@ namespace paracfd::gui
 
 		SliceViewer* viewer() { return viewer_; }
 
-		// Load a STEP model (OpenCascade → metre-scale TriMesh), display it, and auto-voxelize it into
-		// the flow as the solid obstacle, REPLACING the config obstacle (the loaded model IS the
-		// obstacle; there is no separate toggle). `noslip` selects SOLID_NOSLIP; the shipping default is
-		// SOLID_FREESLIP (RESEARCH §3). Used by the File menu and the --load-step CLI flag. Logs a
-		// summary; returns false on load failure. Safe to call before the window is shown.
+		// Load a paraglider STEP model (OpenCascade → metre-scale TriMesh) for smooth two-sided
+		// display and new BVH/AMR/EB preprocessing. It is deliberately NOT sent through the legacy
+		// parity-filled solid voxelizer. `noslip` is retained only for command-line compatibility and
+		// has no effect on a surface preview. Safe to call before the window is shown.
 		bool loadStepFile(const QString& path, bool noslip = false);
 
 		// Load a 3D-printing CENTERLINE STEP (vertical wall ribbons) as a CENTERLINE — distinct from
@@ -149,6 +148,7 @@ namespace paracfd::gui
 		// the worker thread. `noslip` selects SOLID_NOSLIP (default SOLID_FREESLIP, RESEARCH §3).
 		// Internal: driven by loadStepFile (on), "Close model" (off) and the grid-Apply re-inject.
 		bool setModelAsObstacle(bool on, bool noslip = false);
+		void buildParagliderPreviewGrid(); // face-only bbox -> static AMR + local EB debug overlay
 
 		// (Re)generate the solid building from the stored centerline and inject it as the obstacle. Sizes
 		// the domain around the sectioned footprint (with wind clearance) and rebuilds the core at that

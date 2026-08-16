@@ -26,6 +26,9 @@
 #include <QVector4D>
 
 #include <cstdint>
+#include <array>
+#include <memory>
+#include <vector>
 
 class QPainter;
 
@@ -156,6 +159,16 @@ namespace paracfd::gui
 		void setMesh(paracfd::core::TriMesh mesh);
 		void clearMesh();
 		bool hasMesh() const { return has_mesh_; }
+		// Colour the actual STEP triangles by two-sided aerodynamic delta-Cp. Values are
+		// per source triangle (not per vertex), so shared CAD vertices never smear data
+		// across panel/rib edges. OpenGL gl_PrimitiveID indexes an SSBO at draw time.
+		void setTriangleDeltaCp(const std::vector<float>& delta_cp, float range_min, float range_max);
+		void clearTriangleSurfaceColouring();
+		// Static paraglider preprocessing overlay. Boxes are {xmin,ymin,zmin,xmax,ymax,zmax}
+		// in world metres. AMR bricks and EB/problem cells remain separate draw lists.
+		void setParagliderDebugBoxes(const std::vector<std::array<float, 6>>& amr_bricks,
+			const std::vector<std::array<float, 6>>& eb_cells);
+		void clearParagliderDebugBoxes();
 
 		// Solid-cell overlay: the staircase voxelization of the model, drawn as the exposed
 		// voxel-surface faces over/under the smooth mesh so the user can judge resolution. The
@@ -220,7 +233,10 @@ namespace paracfd::gui
 		void buildSliceGeometry(); // (re)generate static positions for axis/plane
 		void buildBoxGeometry();
 		void uploadMesh();        // push pending_mesh_ into GL buffers (main thread)
+		void uploadTriangleSurfaceColours();
+		void uploadParagliderDebugBoxes();
 		void uploadVoxelOverlay(); // build exposed voxel-surface faces into GL (main thread)
+		void ensureFabricBvh();     // rebuild placed zero-thickness collision geometry lazily
 		void updateRange();
 		void applyAutoRange(const FieldRange& fr); // EMA-fold a live reduction into [vmin_,vmax_]+speed scale
 		void setDefaultPlane();
@@ -300,11 +316,21 @@ namespace paracfd::gui
 		// STEP model (lit triangle mesh). Own shader + VAO/VBOs; model matrix places it on
 		// the domain floor centred in x/y. Upload deferred via mesh_upload_pending_.
 		QOpenGLShaderProgram mesh_prog_;
-		unsigned int mesh_vao_ = 0, mesh_pos_vbo_ = 0, mesh_norm_vbo_ = 0, mesh_idx_ebo_ = 0;
+		unsigned int mesh_vao_ = 0, mesh_pos_vbo_ = 0, mesh_norm_vbo_ = 0, mesh_idx_ebo_ = 0, mesh_triangle_colour_ssbo_ = 0;
 		int mesh_index_count_ = 0;
 		bool has_mesh_ = false;
 		bool mesh_upload_pending_ = false;
+		bool mesh_triangle_colour_upload_pending_ = false;
+		bool has_mesh_triangle_colours_ = false;
+		std::vector<float> mesh_triangle_colours_; // RGBA, one vec4 per source triangle
 		paracfd::core::TriMesh pending_mesh_;
+		paracfd::core::TriMesh fabric_mesh_; // retained CPU source for tracer segment collision
+		std::unique_ptr<paracfd::core::TriangleBvh> fabric_bvh_;
+		bool fabric_bvh_dirty_ = false;
+		unsigned int amr_debug_vao_ = 0, amr_debug_vbo_ = 0, eb_debug_vao_ = 0, eb_debug_vbo_ = 0;
+		int amr_debug_vertex_count_ = 0, eb_debug_vertex_count_ = 0;
+		bool paraglider_debug_upload_pending_ = false;
+		std::vector<float> pending_amr_debug_lines_, pending_eb_debug_lines_;
 
 		// Model transform. The model matrix comes from the gizmo TRS (gz_* below); an optional explicit
 		// override matrix can seat the model directly instead.

@@ -10,9 +10,8 @@
 //   --autoclose-ms <N>     quit after N ms with exit 0 (scripted gate run)
 //   --offscreen            request the Qt offscreen platform (best-effort; windowed is
 //                          the reliable path for a real GL 4.3 context on Windows)
-//   --load-step <path>     load a STEP model at startup (also available via File menu). The model
-//                          is auto-voxelized into the flow as the solid obstacle (replacing the
-//                          config obstacle); smoke-testable headlessly with --offscreen
+//   --load-step <path>     load a paraglider STEP surface at startup (also available via File menu).
+//                          It is displayed two-sided and is never parity-filled as a solid obstacle.
 //   --load-centerline <path>  load a 3D-printing CENTERLINE STEP at startup (also via File menu). A
 //                          solid building (thickened walls + overhanging flat roof, core/geometry/
 //                          building) is built into the CURRENT domain + injected as the obstacle. Set
