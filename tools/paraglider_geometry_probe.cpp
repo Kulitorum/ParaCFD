@@ -1,4 +1,5 @@
 #include "core/aero_loads.h"
+#include "core/aero_sweep.h"
 #include "core/fluid/amr_advection.h"
 #include "core/fluid/amr_fields.h"
 #include "core/fluid/amr_eb.h"
@@ -71,6 +72,7 @@ namespace
 
 int main()
 {
+	const std::vector<double> regular_sweep=inclusive_angle_sweep(0,10,2),endpoint_sweep=inclusive_angle_sweep(-1,1,0.6);bool sweep_limit_rejected=false;try{(void)inclusive_angle_sweep(0,10,0.1,10);}catch(const std::invalid_argument&){sweep_limit_rejected=true;}check(regular_sweep==std::vector<double>({0,2,4,6,8,10})&&endpoint_sweep.size()==5&&near(endpoint_sweep.back(),1)&&sweep_limit_rejected,"AoA sweep is inclusive, bounded, and deterministic");
 	ParagliderConfig saved_config;saved_config.step_path="wing.step";saved_config.placement.tx=1.25;saved_config.placement.m[1]=-1;saved_config.placement.m[3]=1;saved_config.freestream.speed=12.5;saved_config.domain.half_wing_symmetry=true;saved_config.amr.brick_size=16;saved_config.amr.min_aperture_area_fraction=2e-4;saved_config.reference.area=24.0;const std::filesystem::path config_path=std::filesystem::temp_directory_path()/(sizeof(Real)==4?"paracfd-config-fp32.json":"paracfd-config-fp64.json");std::string config_error;ParagliderConfig loaded_config;const bool config_saved=save_paraglider_config(config_path.string(),saved_config,&config_error),config_loaded=config_saved&&load_paraglider_config(config_path.string(),loaded_config,&config_error);std::error_code remove_error;std::filesystem::remove(config_path,remove_error);check(config_loaded&&loaded_config.step_path==saved_config.step_path&&near(loaded_config.placement.tx,1.25)&&near(loaded_config.placement.m[1],-1)&&near(loaded_config.freestream.speed,12.5)&&loaded_config.domain.half_wing_symmetry&&loaded_config.amr.brick_size==16&&near(loaded_config.amr.min_aperture_area_fraction,2e-4)&&near(loaded_config.reference.area,24.0),"paraglider JSON configuration round-trip");
 	// BVH: exact cell query, two-sided segment crossing, and nearest-distance result.
 	TriMesh flat=flat_x();TriangleBvh bvh(flat);Aabb3d hitbox{{0.49,0.2,0.2},{0.51,0.8,0.8}},missbox{{0.0,0.2,0.2},{0.4,0.8,0.8}};

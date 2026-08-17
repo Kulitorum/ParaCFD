@@ -19,6 +19,7 @@
 #include <QPoint>
 #include <QPointF>
 #include <QQuaternion>
+#include <QString>
 #include <QVector3D>
 #include <QVector4D>
 
@@ -52,7 +53,9 @@ namespace paracfd::gui
 		void frameSliceView();
 		bool frameWingView();
 		void setThinDebugState(bool enabled,int layers){thin_debug_=enabled;thin_debug_layers_=layers;update();}
-		void setSimulationStep(long long step){simulation_step_=step;update();}
+		void setSimulationStep(long long step){simulation_step_=step;simulation_physical_time_=simulation_wall_time_=0;update();}
+		void setSimulationProgress(long long step,double physical_time,double wall_time);
+		void setSimulationCaseLabel(const QString& label){simulation_case_label_=label;update();}
 		void setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,
 			bool settling_ready,double settling_score,double flow_throughs);
 
@@ -296,6 +299,8 @@ namespace paracfd::gui
 		bool thin_debug_ = false;
 		int thin_debug_layers_ = 0;
 		long long simulation_step_ = 0;
+		double simulation_physical_time_=0,simulation_wall_time_=0;
+		QString simulation_case_label_;
 		bool simulation_running_=false,simulation_auto_paused_=false,simulation_auto_pause_enabled_=false,simulation_settling_ready_=false;
 		double simulation_settling_score_=0,simulation_flow_throughs_=0;
 

@@ -232,6 +232,11 @@ void main()
 		simulation_running_=running;simulation_auto_paused_=auto_paused;simulation_auto_pause_enabled_=auto_pause_enabled;simulation_settling_ready_=settling_ready;simulation_settling_score_=settling_score;simulation_flow_throughs_=flow_throughs;update();
 	}
 
+	void SliceViewer::setSimulationProgress(long long step,double physical_time,double wall_time)
+	{
+		simulation_step_=step;simulation_physical_time_=std::max(0.0,physical_time);simulation_wall_time_=std::max(0.0,wall_time);update();
+	}
+
 	void SliceViewer::setShowArrows(bool on)
 	{
 		show_arrows_ = on;
@@ -1558,11 +1563,12 @@ void main()
 		{
 			QFont f = p.font(); f.setPointSizeF(10.0); f.setBold(true); p.setFont(f);
 			const QColor state_colour=simulation_running_?QColor(75,220,120):QColor(255,185,65);
-			const QRect state_cue(std::max(18,(width()-270)/2),16,270,50);p.fillRect(state_cue,QColor(18,20,24,220));p.setPen(state_colour);p.drawRect(state_cue.adjusted(0,0,-1,-1));p.setBrush(state_colour);p.setPen(Qt::NoPen);p.drawEllipse(QRect(state_cue.x()+10,state_cue.y()+10,12,12));p.setBrush(Qt::NoBrush);p.setPen(state_colour);
-			const QString state_text=simulation_running_?"RUNNING":(simulation_auto_paused_?"PAUSED — SETTLED":"PAUSED");p.drawText(state_cue.adjusted(30,2,-6,-24),Qt::AlignLeft|Qt::AlignVCenter,state_text);
+			const QRect state_cue(std::max(238,(width()-410)/2),16,410,70);p.fillRect(state_cue,QColor(18,20,24,220));p.setPen(state_colour);p.drawRect(state_cue.adjusted(0,0,-1,-1));p.setBrush(state_colour);p.setPen(Qt::NoPen);p.drawEllipse(QRect(state_cue.x()+10,state_cue.y()+10,12,12));p.setBrush(Qt::NoBrush);p.setPen(state_colour);
+			QString state_text=simulation_running_?"RUNNING":(simulation_auto_paused_?"PAUSED — SETTLED":"PAUSED");if(!simulation_case_label_.isEmpty())state_text+=QString(" — %1").arg(simulation_case_label_);p.drawText(state_cue.adjusted(30,2,-6,-44),Qt::AlignLeft|Qt::AlignVCenter,state_text);
 			QFont state_detail=f;state_detail.setBold(false);state_detail.setPointSizeF(8.5);p.setFont(state_detail);p.setPen(QColor(225,228,234));QString detail;
 			if(!simulation_auto_pause_enabled_)detail="auto-pause disabled";else if(simulation_settling_ready_&&simulation_flow_throughs_<kAutoPauseMinimumFlowThroughs)detail=QString("score %1 · warm-up %2 / %3").arg(simulation_settling_score_,0,'f',2).arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);else if(simulation_settling_ready_)detail=QString("settle score %1  (pause below 1)").arg(simulation_settling_score_,0,'f',2);else detail=QString("observing %1 / %2 flow-throughs").arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);
-			p.drawText(state_cue.adjusted(10,24,-6,-2),Qt::AlignLeft|Qt::AlignVCenter,detail);p.setFont(f);
+			p.drawText(state_cue.adjusted(10,24,-6,-24),Qt::AlignLeft|Qt::AlignVCenter,detail);
+			p.drawText(state_cue.adjusted(10,46,-6,-3),Qt::AlignLeft|Qt::AlignVCenter,QString("step %1  ·  simulation t=%2 s  ·  wall=%3 s").arg(simulation_step_).arg(simulation_physical_time_,0,'f',3).arg(simulation_wall_time_,0,'f',2));p.setFont(f);
 			const QRect cue(18, 16, 210, 28);
 			p.fillRect(cue, QColor(18, 20, 24, 190));
 			p.setPen(QColor(255, 120, 90));

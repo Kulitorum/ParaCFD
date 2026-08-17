@@ -15,6 +15,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QMenu;
+class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -27,6 +28,7 @@ namespace paracfd::gui
 {
 	class ParagliderSimWorker;
 	class SliceViewer;
+	struct ParagliderDisplaySnapshot;
 
 	// Purpose-built paraglider application shell. It owns no channel, seabed, solid
 	// voxel, or building state: STEP -> placed two-sided TriMesh -> static AMR/EB -> GPU.
@@ -45,6 +47,7 @@ namespace paracfd::gui
 		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		void setConservativeMomentum(bool enabled);
 		void setHalfWingSimulation(bool enabled);
+		bool startAoaSweep(double minimum_degrees,double maximum_degrees,double step_degrees);
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -61,6 +64,10 @@ namespace paracfd::gui
 		paracfd::core::ParagliderConfig configFromUi()const;
 		void normalizePlacementToDomain();
 		void rotateWing(double degrees,const paracfd::core::Vec3d& axis);
+		void toggleAoaSweep();
+		void startNextAoaSweepCase();
+		void finishAoaSweepCase(const ParagliderDisplaySnapshot& snapshot);
+		void cancelAoaSweep(const QString& reason=QString{});
 		void updateGridReadout();
 		void updateSnapshot();
 		void applySurfaceColour();
@@ -84,13 +91,18 @@ namespace paracfd::gui
 		QElapsedTimer build_wall_timer_;
 		qint64 paused_wall_ms_=-1;
 		bool build_wall_timer_active_=false,build_seen_running_=false;
+		paracfd::core::ModelPlacement aoa_sweep_baseline_;
+		std::vector<double> aoa_sweep_angles_;
+		std::size_t aoa_sweep_index_=0;
+		bool aoa_sweep_active_=false,aoa_sweep_waiting_=false,aoa_sweep_previous_auto_pause_=true;
 
 		QPushButton *build_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
 		QDoubleSpinBox *speed_=nullptr,*rho_=nullptr,*nu_=nullptr,*upstream_=nullptr,*downstream_=nullptr,
 			*lateral_=nullptr,*vertical_=nullptr,*base_h_=nullptr,*wing_refine_=nullptr,*surface_refine_=nullptr,
 			*wake_length_=nullptr,*wake_radius_=nullptr,*min_volume_fraction_=nullptr,*min_aperture_area_fraction_=nullptr,
 			*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
-			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr;
+			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr,
+			*aoa_sweep_min_=nullptr,*aoa_sweep_max_=nullptr,*aoa_sweep_step_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
 		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;
@@ -99,6 +111,8 @@ namespace paracfd::gui
 			*conservative_momentum_=nullptr,*half_wing_=nullptr;
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
 		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
+		QPushButton* aoa_sweep_button_=nullptr;
+		QPlainTextEdit* aoa_sweep_results_=nullptr;
 
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
 		std::vector<float> cp_plus_,cp_minus_,delta_cp_;
