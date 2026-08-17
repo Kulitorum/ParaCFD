@@ -220,6 +220,14 @@ namespace paracfd::core
 	void diffuse_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, double kinematic_viscosity,
 		double dt, CompositeCellMomentumState& state);
+	// Apply the finite-volume pressure impulse directly to the persistent control-volume
+	// momentum. Internal open faces are equal-and-opposite; zero-thickness fabric adds
+	// the reaction opposite to its reported pressure load. Physical-domain pressure
+	// faces can be omitted for closed-system conservation/manufactured tests.
+	void apply_composite_cell_pressure_impulse_cpu(
+		const CompositeAmrPressureSystem& system, const std::vector<double>& pressure,
+		double dt, double density, CompositeCellMomentumState& state,
+		bool include_physical_boundaries = true);
 	void reconstruct_composite_cell_fluxes_cpu(
 		const CompositeAmrPressureSystem& system,
 		const CompositeCellMomentumState& state, AmrHostFields& fields,
@@ -242,6 +250,8 @@ namespace paracfd::core
 		void step(const Real* embedded_velocity, Real dt, bool external_aero = false,
 			Real freestream_speed = Real(0));
 		void diffuse(Real kinematic_viscosity, Real dt);
+		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
+			bool include_physical_boundaries = true);
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
 		// domain boundary values remain the caller's external-BC responsibility.
 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
@@ -272,10 +282,13 @@ namespace paracfd::core
 		Real *regular_area_ = nullptr, *regular_conductance_ = nullptr;
 		std::int8_t* regular_axis_ = nullptr;
 		Real* regular_upper_weight_ = nullptr;
+		int* surface_dof_ = nullptr;
+		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
 		int storage_size_ = 0;
-		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0;
+		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
+			surface_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 
