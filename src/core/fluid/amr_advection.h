@@ -324,7 +324,7 @@ namespace paracfd::core
 			*baseline_y_ = nullptr, *baseline_z_ = nullptr, *max_abs_scratch_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
 		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr,
-			*outflow_scratch_ = nullptr;
+			*outflow_scratch_ = nullptr, *wall_matrix_ = nullptr;
 		unsigned char *active_ = nullptr, *cut_face_mask_ = nullptr,
 			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
@@ -344,7 +344,8 @@ namespace paracfd::core
 		int* pressure_closure_dof_ = nullptr;
 		Real* pressure_closure_coefficient_ = nullptr;
 		Real *surface_normal_ = nullptr, *surface_area_ = nullptr,
-			*surface_distance_ = nullptr, *surface_wall_force_per_density_ = nullptr;
+			*surface_distance_ = nullptr, *surface_wall_coefficient_ = nullptr,
+			*surface_wall_force_per_density_ = nullptr;
 		std::vector<std::uint32_t> surface_source_triangle_id_, surface_source_face_id_;
 		std::vector<Vec3d> surface_centroid_;
 		int *gradient_special_dof_ = nullptr, *gradient_incidence_special_ = nullptr,

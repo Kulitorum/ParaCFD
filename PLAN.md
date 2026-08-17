@@ -58,6 +58,8 @@ Pending:
 
 ## F. FP32 production — storage/operator foundation implemented
 
+The production Spalding update is now implicit on each fluid control volume. Static preprocessing still supplies the compact two-sided patch list; each GPU step freezes the patch coefficients, sums their symmetric tangential drag tensors, and solves a three-component backward-Euler system. This removed the real-wing alternating-pressure/collapse mode caused by explicit overshoot when several patches shared a small CV. A stiff manufactured test verifies dissipation, no velocity reversal, CPU/GPU agreement, and exact fluid/fabric reaction. Full-wing PlanB remains bounded through 1,500 steps at -6 and -3 degrees AoA without a speed guard. Compacting the current six-coefficient-per-pressure-slot scratch allocation is the next wall-path memory optimization; grid/domain/force convergence remains mandatory before aerodynamic use.
+
 - New production scalar is FP32 with an optional FP64 validation build.
 - Geometry preprocessing and force/reference calculations retain FP64 where valuable.
 - CUDA pressure operator has measured FP32/FP64 parity and timing probes.
