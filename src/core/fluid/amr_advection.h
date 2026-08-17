@@ -17,6 +17,10 @@ namespace paracfd::core
 		int component = -1;
 		int i = -1, j = -1, k = -1;
 	};
+	// Same-level bricks duplicate their shared component-normal MAC face. Compact
+	// topology owns that physical face once, on the negative-coordinate brick.
+	AmrMacFaceAddress canonical_amr_mac_face_address(const AmrHierarchy& hierarchy,
+		AmrMacFaceAddress address);
 	// Volume owned by the regular portion of a staggered face control volume: one
 	// half of each active same-level pressure cell adjacent along the component axis.
 	// A normal 2:1 interface tile adds/replaces the missing covered-side contribution
@@ -68,6 +72,39 @@ namespace paracfd::core
 		std::int8_t direction = 1;
 	};
 	std::vector<AmrMacFaceDirectionalLink> build_momentum_interface_replaced_links(
+		const CompositeAmrPressureSystem& system);
+
+	struct CompositeAmrMomentumInterfaceConnection
+	{
+		int lower_node = -1;
+		int upper_node = -1;
+		double open_area = 0.0;
+		std::int8_t transport_axis = 0;
+		std::int8_t component = 0;
+	};
+
+	struct CompositeAmrMomentumCoarseAlias
+	{
+		AmrMacFaceAddress coarse_face;
+		int fine_owned_node = -1;
+		double area = 0.0;
+	};
+
+	// One compact ownership graph for every 2:1 momentum interface. Normal fine
+	// tiles and tangential coarse/fine states share the same canonical node table,
+	// including faces at intersections of two or three refinement boundaries.
+	// Connections are oriented lower -> upper along transport_axis. Coarse normal
+	// faces are aliases only and are reconstructed from fine-owned tile states.
+	struct CompositeAmrMomentumInterfaceTopology
+	{
+		std::vector<AmrMacFaceAddress> nodes;
+		std::vector<double> dual_volume;
+		std::vector<std::uint8_t> interface_axis_mask;
+		std::vector<CompositeAmrMomentumInterfaceConnection> connections;
+		std::vector<CompositeAmrMomentumCoarseAlias> coarse_aliases;
+	};
+
+	CompositeAmrMomentumInterfaceTopology build_composite_amr_momentum_interface_topology(
 		const CompositeAmrPressureSystem& system);
 
 	// Persistent GPU indirection only for compact interface/EB work. Ordinary regular
