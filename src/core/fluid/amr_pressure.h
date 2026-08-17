@@ -265,6 +265,11 @@ namespace paracfd::core
 		void transport_embedded_internal_momentum(Real dt);
 		// Validation-only D2H reduction of the compact fragment-side momentum map.
 		std::array<double, 3> embedded_transport_momentum() const;
+		// Validation-only GPU reduction of the integrated mass-flux imbalance at
+		// compact EB pressure nodes. This combines independent aperture states with
+		// the exact ordinary MAC faces on the regular/compact perimeter.
+		double max_embedded_transport_mass_imbalance() const;
+		int embedded_regular_connection_count() const { return embedded_regular_connection_count_; }
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		double max_abs_special_velocity() const;
@@ -314,6 +319,10 @@ namespace paracfd::core
 		int *eb_carrier_node_ = nullptr, *eb_carrier_level_ = nullptr;
 		std::uint64_t* eb_carrier_index_ = nullptr;
 		std::int8_t* eb_carrier_axis_ = nullptr;
+		int *eb_regular_lower_node_ = nullptr, *eb_regular_upper_node_ = nullptr,
+			*eb_regular_level_ = nullptr;
+		std::uint64_t* eb_regular_index_ = nullptr;
+		std::int8_t* eb_regular_axis_ = nullptr;
 		Real *eb_carrier_area_ = nullptr, *eb_carrier_mass_ = nullptr,
 			*eb_carrier_unmapped_mass_ = nullptr, *eb_node_axis_sum_ = nullptr,
 			*eb_node_axis_weight_ = nullptr, *eb_node_gradient_sum_ = nullptr,
@@ -321,7 +330,8 @@ namespace paracfd::core
 			*eb_edge_ls_weight_ = nullptr, *eb_transport_length_ = nullptr,
 			*eb_transport_scratch_ = nullptr, *eb_diffusion_rate_ = nullptr,
 			*eb_node_diffusion_sum_ = nullptr, *eb_node_neighbor_count_ = nullptr,
-			*eb_diffusion_scratch_ = nullptr;
+			*eb_diffusion_scratch_ = nullptr, *eb_regular_area_ = nullptr,
+			*eb_node_flux_balance_ = nullptr;
 		int *wall_edge_node_a_ = nullptr, *wall_edge_node_b_ = nullptr;
 		int *wall_carrier_node_ = nullptr, *wall_carrier_level_ = nullptr;
 		std::uint64_t* wall_carrier_index_ = nullptr;
@@ -333,7 +343,8 @@ namespace paracfd::core
 		std::vector<std::uint8_t> embedded_gradient_rank_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
 		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
-		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0;
+		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0,
+			embedded_regular_connection_count_ = 0;
 		int embedded_high_order_stencil_count_ = 0;
 		int embedded_least_squares_full_rank_count_ = 0;
 		int fabric_wall_node_count_ = 0, fabric_wall_carrier_count_ = 0;
