@@ -9,6 +9,29 @@
 #include <limits>
 #include <stdexcept>
 
+namespace
+{
+	float robust_surface_range(const std::vector<float>& first,
+		const std::vector<float>* second = nullptr)
+	{
+		std::vector<float> magnitude;
+		magnitude.reserve(first.size() + (second ? second->size() : 0));
+		auto append = [&](const std::vector<float>& values)
+		{
+			for (float value : values)
+				if (std::isfinite(value)) magnitude.push_back(std::abs(value));
+		};
+		append(first);if(second)append(*second);
+		if(magnitude.empty())return 1e-5f;
+		// A few sharp-edge/sliver triangles can legitimately have much larger Cp than
+		// the rest of the canopy. Let the upper one percent saturate instead of
+		// collapsing all useful surface contrast into the green midpoint.
+		const std::size_t index=static_cast<std::size_t>(0.99*(magnitude.size()-1));
+		std::nth_element(magnitude.begin(),magnitude.begin()+index,magnitude.end());
+		return std::max(magnitude[index],1e-5f);
+	}
+}
+
 namespace paracfd::gui
 {
 	ParagliderSimWorker::ParagliderSimWorker(
@@ -345,16 +368,15 @@ namespace paracfd::gui
 			cp_plus.assign(loads.triangles.size(),missing);
 			cp_minus.assign(loads.triangles.size(),missing);
 			delta_cp.assign(loads.triangles.size(),missing);
-			float maximum = 0.0f,side_maximum=0.0f;
 			for (std::size_t triangle = 0; triangle < loads.triangles.size(); ++triangle)
 			{
 				const auto& source=loads.triangles[triangle];
-				if(std::isfinite(source.cp_plus)){cp_plus[triangle]=static_cast<float>(source.cp_plus);side_maximum=std::max(side_maximum,std::abs(cp_plus[triangle]));}
-				if(std::isfinite(source.cp_minus)){cp_minus[triangle]=static_cast<float>(source.cp_minus);side_maximum=std::max(side_maximum,std::abs(cp_minus[triangle]));}
-				if(std::isfinite(source.delta_cp)){delta_cp[triangle]=static_cast<float>(source.delta_cp);maximum=std::max(maximum,std::abs(delta_cp[triangle]));}
+				if(std::isfinite(source.cp_plus))cp_plus[triangle]=static_cast<float>(source.cp_plus);
+				if(std::isfinite(source.cp_minus))cp_minus[triangle]=static_cast<float>(source.cp_minus);
+				if(std::isfinite(source.delta_cp))delta_cp[triangle]=static_cast<float>(source.delta_cp);
 			}
-			maximum = std::max(maximum, 1e-5f);
-			side_maximum = std::max(side_maximum, 1e-5f);
+			const float maximum=robust_surface_range(delta_cp);
+			const float side_maximum=robust_surface_range(cp_plus,&cp_minus);
 			cp_min = -maximum;
 			cp_max = maximum;
 			side_cp_min=-side_maximum;

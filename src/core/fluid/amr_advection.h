@@ -313,6 +313,7 @@ namespace paracfd::core
 		int gradient_incidence_count() const { return gradient_incidence_count_; }
 		int clamped_flux_interpolation_count() const { return clamped_flux_interpolation_count_; }
 		int pressure_closure_correction_count() const { return pressure_closure_count_; }
+		int wall_control_volume_count() const { return wall_count_; }
 		double max_pressure_closure_acceleration() const { return max_pressure_closure_acceleration_; }
 		std::size_t bytes() const;
 
@@ -339,7 +340,7 @@ namespace paracfd::core
 		Real *regular_area_ = nullptr, *regular_conductance_ = nullptr;
 		std::int8_t* regular_axis_ = nullptr;
 		Real* regular_upper_weight_ = nullptr;
-		int* surface_dof_ = nullptr;
+		int *surface_dof_ = nullptr, *surface_wall_node_ = nullptr, *wall_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
 		int* pressure_closure_dof_ = nullptr;
 		Real* pressure_closure_coefficient_ = nullptr;
@@ -356,7 +357,7 @@ namespace paracfd::core
 		std::vector<unsigned char> active_host_;
 		int storage_size_ = 0;
 		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
-			surface_count_ = 0, gradient_special_count_ = 0,
+			surface_count_ = 0, wall_count_ = 0, gradient_special_count_ = 0,
 			gradient_incidence_count_ = 0, clamped_flux_interpolation_count_ = 0,
 			pressure_closure_count_ = 0;
 		double max_pressure_closure_acceleration_ = 0.0;
