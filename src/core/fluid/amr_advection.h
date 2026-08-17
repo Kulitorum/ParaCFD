@@ -292,10 +292,10 @@ namespace paracfd::core
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
 		// domain boundary values remain the caller's external-BC responsibility.
 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
-		// Increment the already projected face fluxes only by the explicit change in
-		// cell momentum since step() began. This is the pressure-increment form used
-		// by the collocated production path; it does not re-interpolate the previous
-		// pressure impulse onto faces and therefore avoids pressure/velocity feedback.
+		// Diagnostic alternative that retains the previous projected face-only mode
+		// and adds the explicit cell-state increment. The imported-wing path uses the
+		// absolute reconstruction above: retaining an aperture correction that cannot
+		// be represented by the collocated state accumulates a spurious null mode.
 		void reconstruct_flux_increments(Real* coarse_fine_velocity, Real* embedded_velocity);
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
