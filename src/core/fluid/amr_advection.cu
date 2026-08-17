@@ -60,6 +60,16 @@ namespace paracfd::core
 		{
 			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const DeviceAmrFieldLevelView view=levels[level[q]];if(component[q]==0)view.u[index[q]]=compact[q];else if(component[q]==1)view.v[index[q]]=compact[q];else view.w[index[q]]=compact[q];
 		}
+		__global__ void accumulate_momentum_alias_kernel(const int* node,const int* group,
+			const Real* area,const Real* state,Real* sum,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)atomicAdd(sum+group[q],area[q]*state[node[q]]);
+		}
+		__global__ void normalize_momentum_alias_kernel(const Real* sum,const Real* area,
+			Real* value,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)value[q]=area[q]>Real(0)?sum[q]/area[q]:Real(0);
+		}
 
 		__host__ __device__ std::uint64_t coordinate_hash(int x,int y,int z)
 		{
@@ -368,6 +378,7 @@ namespace paracfd::core
 		{
 			const AmrMacFaceAddress coarse=canonical_amr_mac_face_address(hierarchy,connection.coarse),fine=canonical_amr_mac_face_address(hierarchy,connection.fine);const int coarse_node=add_node(coarse,regular_mac_dual_volume(hierarchy,coarse),false),fine_node=add_node(fine,regular_mac_dual_volume(hierarchy,fine),false);add_connection(coarse_node,fine_node,connection.open_area,connection.interface_axis,connection.direction);
 		}
+		for(const CompositeAmrMomentumCoarseAlias& alias:output.coarse_aliases){const AmrMacFaceAddress address=canonical_amr_mac_face_address(hierarchy,alias.coarse_face);if(node_index.find({address.level,address.brick,address.component,address.i,address.j,address.k})!=node_index.end())throw std::runtime_error("coarse normal momentum alias is also independently owned at a refinement corner");}
 		return output;
 	}
 
@@ -409,6 +420,29 @@ namespace paracfd::core
 	void DevicePairwiseMomentumTransport::step_scalar(Real* velocity,const Real* connection_normal_velocity,Real dt)
 	{
 		if(!velocity||(!connection_normal_velocity&&connection_count_))throw std::invalid_argument("pairwise GPU scalar transport has null state");if(!(dt>Real(0)))throw std::invalid_argument("pairwise GPU scalar transport timestep must be positive");check(cudaMemset(delta_x_,0,node_count_*sizeof(Real)),"clear pairwise scalar scratch");if(connection_count_)accumulate_pairwise_scalar_kernel<<<(connection_count_+255)/256,256>>>(a_,b_,area_,connection_normal_velocity,velocity,dt,delta_x_,connection_count_);apply_pairwise_scalar_kernel<<<(node_count_+255)/256,256>>>(volume_,delta_x_,velocity,node_count_);check(cudaDeviceSynchronize(),"pairwise conservative scalar transport");
+	}
+
+	DeviceCompositeAmrMomentumInterfaceTransport::DeviceCompositeAmrMomentumInterfaceTransport(
+		const CompositeAmrPressureSystem& system,DeviceAmrFields& fields)
+	{
+		const CompositeAmrMomentumInterfaceTopology topology=build_composite_amr_momentum_interface_topology(system);node_count_=static_cast<int>(topology.nodes.size());connection_count_=static_cast<int>(topology.connections.size());alias_count_=static_cast<int>(topology.coarse_aliases.size());if(!node_count_||!connection_count_)throw std::invalid_argument("composite AMR momentum transport requires a non-empty 2:1 interface");std::vector<PairwiseMomentumConnection> connections;connections.reserve(connection_count_);for(const auto& edge:topology.connections)connections.push_back({edge.lower_node,edge.upper_node,edge.open_area,0});node_map_=std::make_unique<DeviceAmrMacFaceMap>(fields,topology.nodes);transport_=std::make_unique<DevicePairwiseMomentumTransport>(topology.dual_volume,connections);node_state_=allocate<Real>(node_count_,"allocate composite momentum node state");
+		struct Key{int level,brick,component,i,j,k;bool operator==(const Key& other)const{return level==other.level&&brick==other.brick&&component==other.component&&i==other.i&&j==other.j&&k==other.k;}};struct Hash{std::size_t operator()(const Key& key)const{std::size_t h=0;for(int value:{key.level,key.brick,key.component,key.i,key.j,key.k})h=(h*1315423911u)^static_cast<std::uint32_t>(value);return h;}};std::unordered_map<Key,int,Hash> group_index;std::vector<AmrMacFaceAddress> group_address;std::vector<double> group_area;std::vector<int> alias_node(alias_count_),alias_group(alias_count_);std::vector<Real> alias_area(alias_count_);
+		for(int q=0;q<alias_count_;++q){const CompositeAmrMomentumCoarseAlias& alias=topology.coarse_aliases[q];const Key key{alias.coarse_face.level,alias.coarse_face.brick,alias.coarse_face.component,alias.coarse_face.i,alias.coarse_face.j,alias.coarse_face.k};const auto found=group_index.find(key);int group;if(found==group_index.end()){group=static_cast<int>(group_address.size());group_index.emplace(key,group);group_address.push_back(alias.coarse_face);group_area.push_back(0);}else group=found->second;alias_node[q]=alias.fine_owned_node;alias_group[q]=group;alias_area[q]=static_cast<Real>(alias.area);group_area[group]+=alias.area;}alias_group_count_=static_cast<int>(group_address.size());if(!alias_group_count_)throw std::runtime_error("composite AMR momentum topology has no coarse alias groups");std::vector<Real> group_area_real(alias_group_count_);for(int q=0;q<alias_group_count_;++q){if(!(group_area[q]>0))throw std::runtime_error("composite momentum coarse alias has zero area");group_area_real[q]=static_cast<Real>(group_area[q]);}alias_map_=std::make_unique<DeviceAmrMacFaceMap>(fields,group_address);alias_node_=upload(alias_node,"upload momentum alias nodes");alias_group_=upload(alias_group,"upload momentum alias groups");alias_area_=upload(alias_area,"upload momentum alias areas");alias_group_area_=upload(group_area_real,"upload momentum alias group areas");alias_sum_=allocate<Real>(alias_group_count_,"allocate momentum alias sum");alias_value_=allocate<Real>(alias_group_count_,"allocate momentum alias values");bytes_=static_cast<std::size_t>(node_count_)*sizeof(Real)+static_cast<std::size_t>(alias_count_)*(2*sizeof(int)+sizeof(Real))+static_cast<std::size_t>(alias_group_count_)*3*sizeof(Real);
+	}
+
+	DeviceCompositeAmrMomentumInterfaceTransport::~DeviceCompositeAmrMomentumInterfaceTransport()
+	{
+		for(void* pointer:{(void*)node_state_,(void*)alias_sum_,(void*)alias_value_,(void*)alias_node_,(void*)alias_group_,(void*)alias_area_,(void*)alias_group_area_})if(pointer)cudaFree(pointer);
+	}
+
+	void DeviceCompositeAmrMomentumInterfaceTransport::step(const Real* connection_normal_velocity,Real dt)
+	{
+		if(!connection_normal_velocity)throw std::invalid_argument("composite momentum connection velocity is null");if(!(dt>Real(0)))throw std::invalid_argument("composite momentum timestep must be positive");node_map_->gather(node_state_);transport_->step_scalar(node_state_,connection_normal_velocity,dt);node_map_->scatter(node_state_);check(cudaMemset(alias_sum_,0,static_cast<std::size_t>(alias_group_count_)*sizeof(Real)),"clear momentum coarse alias sums");accumulate_momentum_alias_kernel<<<(alias_count_+255)/256,256>>>(alias_node_,alias_group_,alias_area_,node_state_,alias_sum_,alias_count_);normalize_momentum_alias_kernel<<<(alias_group_count_+255)/256,256>>>(alias_sum_,alias_group_area_,alias_value_,alias_group_count_);alias_map_->scatter(alias_value_);
+	}
+
+	std::size_t DeviceCompositeAmrMomentumInterfaceTransport::bytes()const
+	{
+		return bytes_+(node_map_?node_map_->bytes():0)+(alias_map_?alias_map_->bytes():0)+(transport_?transport_->bytes():0);
 	}
 
 	DeviceAmrAdvection::DeviceAmrAdvection(const AmrHierarchy& hierarchy,const TriangleBvh& fabric,double protection_cells,const CompositeAmrPressureSystem* composite_system):locator_(hierarchy)

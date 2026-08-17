@@ -4,6 +4,7 @@
 #include "core/geometry/triangle_bvh.h"
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace paracfd::core
@@ -180,6 +181,39 @@ namespace paracfd::core
 		Real *volume_ = nullptr, *area_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
 		int node_count_ = 0, connection_count_ = 0;
+		std::size_t bytes_ = 0;
+	};
+
+	// Persistent GPU driver for the compact 2:1 interface graph. It gathers each
+	// canonical pooled MAC state once, advances one pairwise scalar momentum flux per
+	// connection, scatters the owned states, then rebuilds coarse normal-face aliases
+	// as aperture-area means. The caller supplies one +transport-axis velocity for
+	// every connection; deriving those velocities from composite mass flux is the next
+	// coupling layer.
+	class DeviceCompositeAmrMomentumInterfaceTransport
+	{
+	public:
+		DeviceCompositeAmrMomentumInterfaceTransport(const CompositeAmrPressureSystem& system,
+			DeviceAmrFields& fields);
+		~DeviceCompositeAmrMomentumInterfaceTransport();
+		DeviceCompositeAmrMomentumInterfaceTransport(const DeviceCompositeAmrMomentumInterfaceTransport&) = delete;
+		DeviceCompositeAmrMomentumInterfaceTransport& operator=(const DeviceCompositeAmrMomentumInterfaceTransport&) = delete;
+
+		void step(const Real* connection_normal_velocity, Real dt);
+		int node_count() const { return node_count_; }
+		int connection_count() const { return connection_count_; }
+		int coarse_alias_group_count() const { return alias_group_count_; }
+		std::size_t bytes() const;
+
+	private:
+		std::unique_ptr<DeviceAmrMacFaceMap> node_map_;
+		std::unique_ptr<DeviceAmrMacFaceMap> alias_map_;
+		std::unique_ptr<DevicePairwiseMomentumTransport> transport_;
+		Real *node_state_ = nullptr, *alias_sum_ = nullptr, *alias_value_ = nullptr;
+		int *alias_node_ = nullptr, *alias_group_ = nullptr;
+		Real *alias_area_ = nullptr, *alias_group_area_ = nullptr;
+		int node_count_ = 0, connection_count_ = 0;
+		int alias_count_ = 0, alias_group_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 
