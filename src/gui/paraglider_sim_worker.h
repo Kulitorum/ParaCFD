@@ -26,7 +26,7 @@ namespace paracfd::gui
 		double max_abs_regular_velocity = 0,max_abs_special_velocity = 0;
 		double max_embedded_cfl_rate = 0,effective_cfl = 0;
 		int pressure_iterations = 0;
-		bool initialized = false,converged = false;
+		bool initialized = false,converged = false,conservative_cell_momentum = false;
 		bool conservation_valid = false;
 		double max_abs_divergence = 0,volume_weighted_rms_divergence = 0;
 		double max_integrated_flux_error = 0,absolute_integrated_flux_error = 0;

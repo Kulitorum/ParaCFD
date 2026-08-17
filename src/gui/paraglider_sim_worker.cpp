@@ -240,6 +240,7 @@ namespace paracfd::gui
 		out.pressure_iterations = snapshot_.pressure_iterations;
 		out.initialized = snapshot_.initialized;
 		out.converged = snapshot_.converged;
+		out.conservative_cell_momentum = snapshot_.conservative_cell_momentum;
 		out.conservation_valid = snapshot_.conservation_valid;
 		out.max_abs_divergence = snapshot_.max_abs_divergence;
 		out.volume_weighted_rms_divergence = snapshot_.volume_weighted_rms_divergence;
@@ -326,6 +327,7 @@ namespace paracfd::gui
 		snapshot_.gpu_bytes = core_->gpu_bytes();
 		snapshot_.initialized = core_->initialized();
 		snapshot_.converged = stats.pressure.converged;
+		snapshot_.conservative_cell_momentum = core_->uses_conservative_cell_momentum();
 		snapshot_.playing=playing_.load();snapshot_.auto_pause_enabled=auto_pause_enabled_.load();snapshot_.auto_paused=auto_paused_.load();snapshot_.settling_ready=settling_ready_;
 		snapshot_.flow_change=latest_flow_change_;snapshot_.settling_score=settling_score_;snapshot_.settling_force_drift=settling_force_drift_;snapshot_.settling_force_rms=settling_force_rms_;snapshot_.flow_throughs=flow_throughs_;
 		snapshot_.error.clear();
