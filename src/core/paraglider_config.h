@@ -20,6 +20,7 @@ namespace paracfd::core
 		double downstream_margin = 8.0; // m
 		double lateral_margin = 3.0;    // m per side
 		double vertical_margin = 3.0;   // m per side; there is no ground plane
+		bool half_wing_symmetry = false; // input mesh is +Y half; Y-min is its mirror plane
 	};
 
 	struct AmrConfig

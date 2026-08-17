@@ -43,6 +43,7 @@ namespace paracfd::core
 				c.domain.downstream_margin = number(*it, "downstream_margin", c.domain.downstream_margin);
 				c.domain.lateral_margin = number(*it, "lateral_margin", c.domain.lateral_margin);
 				c.domain.vertical_margin = number(*it, "vertical_margin", c.domain.vertical_margin);
+				if(auto value=it->find("half_wing_symmetry");value!=it->end()&&value->is_boolean())c.domain.half_wing_symmetry=value->get<bool>();
 			}
 			if (auto it = root.find("amr"); it != root.end() && it->is_object())
 			{
@@ -88,7 +89,7 @@ namespace paracfd::core
 			root["placement"]={{"tx",c.placement.tx},{"ty",c.placement.ty},{"tz",c.placement.tz},
 				{"matrix",{c.placement.m[0],c.placement.m[1],c.placement.m[2],c.placement.m[3],c.placement.m[4],c.placement.m[5],c.placement.m[6],c.placement.m[7],c.placement.m[8]}}};
 			root["freestream"]={{"speed",c.freestream.speed},{"rho",c.freestream.rho},{"nu",c.freestream.nu}};
-			root["domain"]={{"upstream_margin",c.domain.upstream_margin},{"downstream_margin",c.domain.downstream_margin},{"lateral_margin",c.domain.lateral_margin},{"vertical_margin",c.domain.vertical_margin}};
+			root["domain"]={{"upstream_margin",c.domain.upstream_margin},{"downstream_margin",c.domain.downstream_margin},{"lateral_margin",c.domain.lateral_margin},{"vertical_margin",c.domain.vertical_margin},{"half_wing_symmetry",c.domain.half_wing_symmetry}};
 			root["amr"]={{"base_cell_size",c.amr.base_cell_size},{"max_levels",c.amr.max_levels},{"brick_size",c.amr.brick_size},{"ghost_cells",c.amr.ghost_cells},{"wing_refinement_distance",c.amr.wing_refinement_distance},{"surface_refinement_distance",c.amr.surface_refinement_distance},{"wake_length",c.amr.wake_length},{"wake_radius",c.amr.wake_radius},{"complex_subdivisions",c.amr.complex_subdivisions},{"min_volume_fraction",c.amr.min_volume_fraction},{"min_aperture_area_fraction",c.amr.min_aperture_area_fraction}};
 			root["solver"]={{"cfl",c.solver.cfl},{"smagorinsky_cs",c.solver.smagorinsky_cs},{"projection_tolerance",c.solver.projection_tolerance},{"projection_max_iterations",c.solver.projection_max_iterations}};
 			root["reference"]={{"area",c.reference.area},{"length",c.reference.length},{"moment_origin",{c.reference.moment_origin.x,c.reference.moment_origin.y,c.reference.moment_origin.z}}};
@@ -101,7 +102,7 @@ namespace paracfd::core
 	{
 		Aabb3d b;
 		if (m.empty()) return b;
-		b.lo = {m.bbox_min[0] - d.upstream_margin, m.bbox_min[1] - d.lateral_margin, m.bbox_min[2] - d.vertical_margin};
+		b.lo = {m.bbox_min[0] - d.upstream_margin, m.bbox_min[1] - (d.half_wing_symmetry?0.0:d.lateral_margin), m.bbox_min[2] - d.vertical_margin};
 		b.hi = {m.bbox_max[0] + d.downstream_margin, m.bbox_max[1] + d.lateral_margin, m.bbox_max[2] + d.vertical_margin};
 		return b;
 	}

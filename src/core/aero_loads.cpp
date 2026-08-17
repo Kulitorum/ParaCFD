@@ -51,4 +51,33 @@ namespace paracfd::core
 		}
 		out.viscous_drag=out.viscous_force.x;out.viscous_side=out.viscous_force.y;out.viscous_lift=out.viscous_force.z;out.total_force=out.pressure_force+out.viscous_force;out.total_moment=out.pressure_moment+out.viscous_moment;out.drag=out.total_force.x;out.side=out.total_force.y;out.lift=out.total_force.z;out.viscous_loads_valid=true;const double q=0.5*fs.rho*fs.speed*fs.speed;if(q>0&&ref.area>0){out.cd_viscous=out.viscous_drag/(q*ref.area);out.cs_viscous=out.viscous_side/(q*ref.area);out.cl_viscous=out.viscous_lift/(q*ref.area);out.cd=out.drag/(q*ref.area);out.cs=out.side/(q*ref.area);out.cl=out.lift/(q*ref.area);}
 	}
+
+	void reconstruct_y_symmetric_integrated_loads(AerodynamicLoads& out,double symmetry_plane_y,double moment_origin_y)
+	{
+		const double centre_offset=2.0*(symmetry_plane_y-moment_origin_y);
+		auto mirror_pair=[centre_offset](Vec3d& force,Vec3d& moment)
+		{
+			const Vec3d half_force=force;
+			force={2.0*half_force.x,0.0,2.0*half_force.z};
+			moment={centre_offset*half_force.z,2.0*moment.y,-centre_offset*half_force.x};
+		};
+		mirror_pair(out.pressure_force,out.pressure_moment);
+		out.pressure_drag=out.pressure_force.x;out.pressure_side=0.0;out.pressure_lift=out.pressure_force.z;
+		if(std::isfinite(out.cd_pressure))out.cd_pressure*=2.0;
+		if(std::isfinite(out.cl_pressure))out.cl_pressure*=2.0;
+		if(out.force_coefficients_valid)out.cs_pressure=0.0;
+		if(out.viscous_loads_valid)
+		{
+			mirror_pair(out.viscous_force,out.viscous_moment);
+			mirror_pair(out.total_force,out.total_moment);
+			out.viscous_drag=out.viscous_force.x;out.viscous_side=0.0;out.viscous_lift=out.viscous_force.z;
+			out.drag=out.total_force.x;out.side=0.0;out.lift=out.total_force.z;
+			if(std::isfinite(out.cd_viscous))out.cd_viscous*=2.0;
+			if(std::isfinite(out.cl_viscous))out.cl_viscous*=2.0;
+			if(std::isfinite(out.cs_viscous))out.cs_viscous=0.0;
+			if(std::isfinite(out.cd))out.cd*=2.0;
+			if(std::isfinite(out.cl))out.cl*=2.0;
+			if(std::isfinite(out.cs))out.cs=0.0;
+		}
+	}
 }

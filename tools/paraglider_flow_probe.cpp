@@ -1,4 +1,5 @@
 #include "core/fluid/external_aero_core.h"
+#include "core/geometry/mesh_clip.h"
 
 #include <algorithm>
 #include <cmath>
@@ -52,14 +53,16 @@ namespace
 
 int main()
 {
-	const TriMesh normal=quad({0,-0.5,-0.5},{0,0.5,-0.5},{0,0.5,0.5},{0,-0.5,0.5});
+	TriMesh normal=quad({0,-0.5,-0.5},{0,0.5,-0.5},{0,0.5,0.5},{0,-0.5,0.5});normal.bbox_min={0,-0.5f,-0.5f};normal.bbox_max={0,0.5f,0.5f};
 	const TriMesh parallel=quad({-0.5,-0.5,0},{0.5,-0.5,0},{0.5,0.5,0},{-0.5,0.5,0});
 	const TriMesh inclined=rotate_y(parallel,15.0*3.14159265358979323846/180.0);
 	// The impulsively initialized normal plate needs a longer pressure adjustment than
 	// the tangential cases before its force reaches the downstream-sign regime.
 	const CaseResult normal_result=run_case("normal plate",normal,16),parallel_result=run_case("parallel plate",parallel),inclined_result=run_case("inclined plate",inclined);
+	const TriMesh half_normal=clip_mesh_to_axis_slab(normal,1,0,0.5);ParagliderConfig half_normal_config=flow_config();half_normal_config.domain.half_wing_symmetry=true;const CaseResult half_normal_result=run_case("half normal plate symmetry",half_normal,16,half_normal_config);
 	ParagliderConfig uniform_fine=flow_config();uniform_fine.domain={3,4,3,3};uniform_fine.amr.base_cell_size=0.125;ParagliderConfig refined=uniform_fine;refined.amr.base_cell_size=0.25;refined.amr.max_levels=2;refined.amr.wing_refinement_distance=0.1;refined.amr.surface_refinement_distance=0.1;refined.amr.wake_length=0;refined.amr.wake_radius=0;const CaseResult uniform_fine_result=run_case("uniform-fine inclined plate",inclined,8,uniform_fine),refined_result=run_case("2:1 AMR inclined plate",inclined,8,refined);
 	check(normal_result.converged&&parallel_result.converged&&inclined_result.converged,"all manufactured plate timesteps converge");
+	check(half_normal_result.converged&&std::abs(half_normal_result.loads.pressure_side)<1e-12&&std::abs(half_normal_result.loads.pressure_force.x-normal_result.loads.pressure_force.x)<0.005*std::max(1e-12,std::abs(normal_result.loads.pressure_force.x)),"half-domain symmetry reconstructs the full normal-plate force");
 	check(normal_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9)&&parallel_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9)&&inclined_result.effective_cfl<=flow_config().solver.cfl*(1+1e-9),"global timestep obeys configured CFL using current regular velocity");
 	check(std::isfinite(normal_result.loads.pressure_force.x)&&std::isfinite(parallel_result.loads.pressure_force.x)&&std::isfinite(inclined_result.loads.pressure_force.z),"plate pressure loads are finite");
 	check(normal_result.loads.pressure_force.x>0&&normal_result.max_divergence<2e-4,"normal plate has downstream pressure force and projected flow");

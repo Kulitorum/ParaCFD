@@ -71,7 +71,8 @@ namespace paracfd::core
 	{
 	public:
 		static AmrHierarchy uniform(const Aabb3d& requested_domain, double cell_size, int brick_size = 32, int ghost_cells = 1);
-		static AmrHierarchy build_static(const Aabb3d& requested_domain, const TriMesh& wing, const TriangleBvh& bvh, const AmrConfig& config);
+		static AmrHierarchy build_static(const Aabb3d& requested_domain, const TriMesh& wing, const TriangleBvh& bvh,
+			const AmrConfig& config, bool anchor_y_min = false);
 
 		const Aabb3d& domain() const { return domain_; }
 		int brick_size() const { return brick_size_; }
@@ -87,7 +88,7 @@ namespace paracfd::core
 
 	private:
 		static std::uint64_t coord_hash(Int3 c);
-		void initialize_base(const Aabb3d& requested_domain, double h);
+		void initialize_base(const Aabb3d& requested_domain, double h, bool anchor_y_min = false);
 		void rebuild_level_tables_and_metadata(const TriangleBvh* bvh);
 		void refine_brick(int level, int brick_id);
 		void enforce_balance();

@@ -154,4 +154,27 @@ namespace paracfd::core
 		result.tz = static_cast<double>(static_cast<float>(result.tz));
 		return result;
 	}
+
+	// Frame an already selected positive-span half wing. Its inner cut edge is placed
+	// exactly on Y=0; the AMR domain anchors Y-min there and pads only toward the tip.
+	// This is a symmetry plane, not a fabric cap, so the clipped mesh must remain open.
+	inline ModelPlacement frame_positive_y_half_for_external_domain(const TriMesh& source,
+		const ModelPlacement& orientation, double upstream_margin, double vertical_margin,
+		double base_brick_width)
+	{
+		ModelPlacement result = orientation;
+		for (double& value : result.m) value = static_cast<double>(static_cast<float>(value));
+		result.tx = result.ty = result.tz = 0.0;
+		if (source.empty() || !(base_brick_width > 0.0)) return result;
+		const TriMesh placed = placed_mesh(source, result);
+		const double requested_z = (placed.bbox_max[2] - placed.bbox_min[2]) + 2.0 * vertical_margin;
+		const double pad_z = std::ceil(requested_z / base_brick_width) * base_brick_width - requested_z;
+		result.tx = upstream_margin - placed.bbox_min[0];
+		result.ty = -placed.bbox_min[1];
+		result.tz = vertical_margin + 0.5 * pad_z - placed.bbox_min[2];
+		result.tx = static_cast<double>(static_cast<float>(result.tx));
+		result.ty = static_cast<double>(static_cast<float>(result.ty));
+		result.tz = static_cast<double>(static_cast<float>(result.tz));
+		return result;
+	}
 }

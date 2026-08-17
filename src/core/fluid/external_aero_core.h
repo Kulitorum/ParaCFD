@@ -88,9 +88,11 @@ namespace paracfd::core
 		int pressure_closure_correction_count() const;
 		double max_pressure_closure_acceleration() const;
 		bool uses_conservative_cell_momentum() const { return use_conservative_cell_momentum_; }
+		bool uses_half_wing_symmetry() const { return config_.domain.half_wing_symmetry; }
 
 	private:
 		ExternalAeroStepStats project(bool warm_start, double dt, bool sync_coarse_fine = true);
+		AerodynamicLoads unscaled_pressure_loads(double pressure_reference) const;
 
 		ParagliderConfig config_;
 		std::size_t source_triangle_count_ = 0;
@@ -102,6 +104,7 @@ namespace paracfd::core
 		std::unique_ptr<DeviceCompositeAmrProjection> projection_;
 		std::unique_ptr<DeviceCompositeCellMomentumTransport> cell_momentum_;
 		double physical_time_ = 0.0;
+		double symmetry_plane_y_ = 0.0;
 		bool initialized_ = false;
 		bool smooth_fabric_wall_applied_ = false;
 		bool use_conservative_cell_momentum_ = false;

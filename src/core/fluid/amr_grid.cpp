@@ -28,7 +28,7 @@ namespace paracfd::core
 		x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull; x = (x ^ (x >> 27)) * 0x94d049bb133111ebull; return x ^ (x >> 31);
 	}
 
-	void AmrHierarchy::initialize_base(const Aabb3d& requested, double h)
+	void AmrHierarchy::initialize_base(const Aabb3d& requested, double h, bool anchor_y_min)
 	{
 		if (!requested.valid() || !(h > 0.0) || brick_size_ <= 0) throw std::invalid_argument("invalid AMR domain/cell/brick size");
 		const double bw = h * brick_size_;
@@ -41,7 +41,10 @@ namespace paracfd::core
 		// or Z: distribute padding symmetrically so the aerodynamic object does not
 		// drift into a corner merely because the requested domain is not an exact
 		// multiple of a base-brick width.
-		domain_.lo = {requested.lo.x, requested.lo.y - 0.5 * excess.y, requested.lo.z - 0.5 * excess.z};
+		// A half-wing run uses Y-min as its exact mirror plane. Put any indivisible
+		// base-brick padding on the outer-span side so the symmetry plane cannot drift.
+		domain_.lo = {requested.lo.x, anchor_y_min ? requested.lo.y : requested.lo.y - 0.5 * excess.y,
+			requested.lo.z - 0.5 * excess.z};
 		domain_.hi = domain_.lo + padded_size;
 		levels_.assign(max_levels_, {});
 		for (int l = 0; l < max_levels_; ++l) { levels_[l].level = l; levels_[l].h = static_cast<float>(h / static_cast<double>(1 << l)); }
@@ -57,9 +60,10 @@ namespace paracfd::core
 		AmrHierarchy out; out.brick_size_ = bs; out.ghost_cells_ = ghosts; out.max_levels_ = 1; out.initialize_base(domain, h); out.rebuild_level_tables_and_metadata(nullptr); return out;
 	}
 
-	AmrHierarchy AmrHierarchy::build_static(const Aabb3d& domain, const TriMesh& wing, const TriangleBvh& bvh, const AmrConfig& c)
+	AmrHierarchy AmrHierarchy::build_static(const Aabb3d& domain, const TriMesh& wing, const TriangleBvh& bvh,
+		const AmrConfig& c, bool anchor_y_min)
 	{
-		AmrHierarchy out; out.brick_size_ = c.brick_size; out.ghost_cells_ = c.ghost_cells; out.max_levels_ = std::max(1, c.max_levels); out.initialize_base(domain, c.base_cell_size);
+		AmrHierarchy out; out.brick_size_ = c.brick_size; out.ghost_cells_ = c.ghost_cells; out.max_levels_ = std::max(1, c.max_levels); out.initialize_base(domain, c.base_cell_size, anchor_y_min);
 		out.rebuild_level_tables_and_metadata(&bvh);
 		Aabb3d wb; wb.lo = {wing.bbox_min[0], wing.bbox_min[1], wing.bbox_min[2]}; wb.hi = {wing.bbox_max[0], wing.bbox_max[1], wing.bbox_max[2]};
 		const Vec3d wc = (wb.lo + wb.hi) * 0.5;

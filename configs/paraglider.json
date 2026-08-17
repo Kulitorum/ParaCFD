@@ -18,7 +18,8 @@
     "upstream_margin": 3.0,
     "downstream_margin": 8.0,
     "lateral_margin": 3.0,
-    "vertical_margin": 3.0
+    "vertical_margin": 3.0,
+    "half_wing_symmetry": false
   },
   "amr": {
     "base_cell_size": 0.25,

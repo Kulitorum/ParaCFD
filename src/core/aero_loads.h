@@ -63,4 +63,8 @@ namespace paracfd::core
 	void accumulate_viscous_loads(AerodynamicLoads& loads,
 		const std::vector<SmoothFabricWallPatchLoad>& patches,
 		const FreestreamConfig& freestream, const AeroReferenceConfig& reference);
+	// Convert integrated loads from the retained +Y half to their full-wing mirror pair.
+	// Per-triangle fields remain the actually simulated half and are not duplicated.
+	void reconstruct_y_symmetric_integrated_loads(AerodynamicLoads& loads,
+		double symmetry_plane_y, double moment_origin_y);
 }

@@ -14,7 +14,7 @@ namespace paracfd::core
 
 	ExternalAeroCore::ExternalAeroCore(const TriMesh& wing,const TriangleBvh& bvh,const ParagliderConfig& config,ExternalAeroExecutionOptions options):config_(config),source_triangle_count_(wing.triangle_count()),use_conservative_cell_momentum_(options.conservative_cell_momentum),enable_smooth_fabric_wall_(options.smooth_fabric_wall),enable_pressure_impulse_(options.pressure_impulse)
 	{
-		if(wing.empty()||bvh.empty())throw std::invalid_argument("external aerodynamic core requires a placed fabric mesh");hierarchy_=AmrHierarchy::build_static(automatic_flow_domain(wing,config_.domain),wing,bvh,config_.amr);EmbeddedBoundaryBuildOptions eb_options;eb_options.min_volume_fraction=config_.amr.min_volume_fraction;eb_options.min_aperture_area_fraction=config_.amr.min_aperture_area_fraction;eb_options.complex_subdivisions=config_.amr.complex_subdivisions;embedded_boundary_=build_amr_embedded_boundary_atlas(hierarchy_,wing,bvh,eb_options);if(!embedded_boundary_.ready_for_flow())throw std::runtime_error("external aerodynamic core has unresolved finest-level embedded-boundary topology");pressure_system_=build_composite_amr_pressure_system(hierarchy_,embedded_boundary_,true);fields_=std::make_unique<DeviceAmrFields>(hierarchy_);projection_=std::make_unique<DeviceCompositeAmrProjection>(pressure_system_,*fields_);if(use_conservative_cell_momentum_)cell_momentum_=std::make_unique<DeviceCompositeCellMomentumTransport>(pressure_system_,*fields_);else advection_=std::make_unique<DeviceAmrAdvection>(hierarchy_,bvh,2.5,&pressure_system_);
+		if(wing.empty()||bvh.empty())throw std::invalid_argument("external aerodynamic core requires a placed fabric mesh");symmetry_plane_y_=wing.bbox_min[1];hierarchy_=AmrHierarchy::build_static(automatic_flow_domain(wing,config_.domain),wing,bvh,config_.amr,config_.domain.half_wing_symmetry);EmbeddedBoundaryBuildOptions eb_options;eb_options.min_volume_fraction=config_.amr.min_volume_fraction;eb_options.min_aperture_area_fraction=config_.amr.min_aperture_area_fraction;eb_options.complex_subdivisions=config_.amr.complex_subdivisions;embedded_boundary_=build_amr_embedded_boundary_atlas(hierarchy_,wing,bvh,eb_options);if(!embedded_boundary_.ready_for_flow())throw std::runtime_error("external aerodynamic core has unresolved finest-level embedded-boundary topology");pressure_system_=build_composite_amr_pressure_system(hierarchy_,embedded_boundary_,true);fields_=std::make_unique<DeviceAmrFields>(hierarchy_);projection_=std::make_unique<DeviceCompositeAmrProjection>(pressure_system_,*fields_);if(use_conservative_cell_momentum_)cell_momentum_=std::make_unique<DeviceCompositeCellMomentumTransport>(pressure_system_,*fields_);else advection_=std::make_unique<DeviceAmrAdvection>(hierarchy_,bvh,2.5,&pressure_system_);
 	}
 
 	ExternalAeroCore::~ExternalAeroCore()=default;
@@ -49,13 +49,17 @@ namespace paracfd::core
 		stats.max_abs_regular_velocity=regular_maximum;stats.max_abs_special_velocity=special_maximum;stats.max_embedded_cfl_rate=embedded_cfl_rate;stats.max_abs_velocity=std::max(regular_maximum,special_maximum);stats.cfl_velocity=cfl_velocity;stats.effective_cfl=cfl_rate*dt_value;stats.advection_ms=elapsed_ms(advection_begin,advection_end);stats.turbulence_ms=elapsed_ms(advection_end,turbulence_end);stats.embedded_transport_ms=elapsed_ms(turbulence_end,embedded_transport_end);stats.les_applied=true;stats.embedded_transport_applied=true;stats.smooth_fabric_wall_applied=smooth_fabric_wall_applied_;stats.gpu_step_ms=elapsed_ms(step_begin,step_end);if(stats.pressure.converged)physical_time_+=stats.dt;stats.physical_time=physical_time_;return stats;
 	}
 
-	AerodynamicLoads ExternalAeroCore::pressure_loads(double reference_pressure) const
+	AerodynamicLoads ExternalAeroCore::unscaled_pressure_loads(double reference_pressure) const
 	{
 		std::vector<Real> device_pressure;projection_->download_pressure(device_pressure);std::vector<double> pressure(device_pressure.size());for(std::size_t q=0;q<pressure.size();++q)pressure[q]=static_cast<double>(device_pressure[q]);return compute_pressure_loads(pressure_system_,pressure,source_triangle_count_,config_.freestream,config_.reference,reference_pressure);
 	}
+	AerodynamicLoads ExternalAeroCore::pressure_loads(double reference_pressure) const
+	{
+		AerodynamicLoads loads=unscaled_pressure_loads(reference_pressure);if(config_.domain.half_wing_symmetry)reconstruct_y_symmetric_integrated_loads(loads,symmetry_plane_y_,config_.reference.moment_origin.y);return loads;
+	}
 	AerodynamicLoads ExternalAeroCore::aerodynamic_loads(double reference_pressure) const
 	{
-		AerodynamicLoads loads=pressure_loads(reference_pressure);if(smooth_fabric_wall_applied_){std::vector<SmoothFabricWallPatchLoad> viscous;if(cell_momentum_)cell_momentum_->download_smooth_fabric_wall_loads(static_cast<Real>(config_.freestream.rho),viscous);else projection_->download_smooth_fabric_wall_loads(static_cast<Real>(config_.freestream.rho),viscous);accumulate_viscous_loads(loads,viscous,config_.freestream,config_.reference);}return loads;
+		AerodynamicLoads loads=unscaled_pressure_loads(reference_pressure);if(smooth_fabric_wall_applied_){std::vector<SmoothFabricWallPatchLoad> viscous;if(cell_momentum_)cell_momentum_->download_smooth_fabric_wall_loads(static_cast<Real>(config_.freestream.rho),viscous);else projection_->download_smooth_fabric_wall_loads(static_cast<Real>(config_.freestream.rho),viscous);accumulate_viscous_loads(loads,viscous,config_.freestream,config_.reference);}if(config_.domain.half_wing_symmetry)reconstruct_y_symmetric_integrated_loads(loads,symmetry_plane_y_,config_.reference.moment_origin.y);return loads;
 	}
 
 	void ExternalAeroCore::download_fields(AmrHostFields& host) const{fields_->download(host);}

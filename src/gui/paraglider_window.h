@@ -4,6 +4,7 @@
 #include "core/paraglider_config.h"
 
 #include <QMainWindow>
+#include <QElapsedTimer>
 
 #include <cstdint>
 #include <memory>
@@ -43,6 +44,7 @@ namespace paracfd::gui
 		bool buildGrid();
 		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		void setConservativeMomentum(bool enabled);
+		void setHalfWingSimulation(bool enabled);
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -79,6 +81,9 @@ namespace paracfd::gui
 		std::uint64_t snapshot_generation_=0,surface_generation_=0;
 		long long last_steps_=0;
 		double last_time_=0;
+		QElapsedTimer build_wall_timer_;
+		qint64 paused_wall_ms_=-1;
+		bool build_wall_timer_active_=false,build_seen_running_=false;
 
 		QPushButton *build_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
 		QDoubleSpinBox *speed_=nullptr,*rho_=nullptr,*nu_=nullptr,*upstream_=nullptr,*downstream_=nullptr,
@@ -91,7 +96,7 @@ namespace paracfd::gui
 		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
 			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*clip_slice_=nullptr,*thin_y_debug_=nullptr,*auto_pause_=nullptr,
-			*conservative_momentum_=nullptr;
+			*conservative_momentum_=nullptr,*half_wing_=nullptr;
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
 		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
 
@@ -99,5 +104,6 @@ namespace paracfd::gui
 		std::vector<float> cp_plus_,cp_minus_,delta_cp_;
 		float delta_cp_range_=1,side_cp_range_=1;
 		bool thin_debug_display_=false;
+		bool half_wing_display_=false;
 	};
 }
