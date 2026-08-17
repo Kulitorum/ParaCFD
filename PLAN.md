@@ -66,6 +66,8 @@ The bounded MacCormack/RK2 AMR advection, Smagorinsky, external-BC, and composit
 
 A separate one-level external-aero finite-volume gate now applies prescribed +X inflow momentum, convective X-max export, zero Y/Z normal flux, and exact half-width boundary staggered volumes. Its uniform-freestream and localized-transverse-export manufactured cases pass in FP32 and FP64. The remaining boundary work is to attach that contract to the multilevel composite ownership graph rather than the current production semi-Lagrangian timestep.
 
+The compact EB mass map now also has a separately callable internal first-order donor operator. It reconstructs fragment-centred vectors from aperture and regular-carrier half masses, applies equal-and-opposite `dt A u_n u_donor` transfers on embedded apertures, and scatters back to shared states. The manufactured global physical-carrier momentum error is `1.19e-7` FP32 and zero FP64. It is intentionally not a production step: an explicit constant-state gate showed a `7.6e-3` error when the ordinary regular/compact perimeter fluxes were omitted. Those perimeter links must be owned jointly with the structured update before switching transport.
+
 ## G. Aerodynamics — manufactured load path implemented
 
 - Per-triangle plus/minus pressure and Cp, delta-Cp, force, whole-wing force/moment.

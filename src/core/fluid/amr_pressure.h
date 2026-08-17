@@ -7,6 +7,7 @@
 #include "core/fluid/amr_fields.h"
 #include "core/fluid/real.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -255,6 +256,15 @@ namespace paracfd::core
 		// reconstruction supplies all nine irregular-region velocity gradients. The
 		// combined update obeys local same-side stencil bounds.
 		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
+		// Validation path for the internal conservative compact momentum contract. It gathers
+		// fragment-centred vector momentum from actual aperture/carrier dual masses,
+		// applies one equal-and-opposite first-order donor transfer per EB aperture,
+		// and scatters the increments back to the existing staggered states. Ordinary
+		// regular/compact perimeter fluxes are deliberately not included yet, so this
+		// is not a standalone production transport step.
+		void transport_embedded_internal_momentum(Real dt);
+		// Validation-only D2H reduction of the compact fragment-side momentum map.
+		std::array<double, 3> embedded_transport_momentum() const;
 		void upload_special_fluxes(const CompositeAmrFluxes& host);
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		double max_abs_special_velocity() const;
@@ -304,7 +314,8 @@ namespace paracfd::core
 		int *eb_carrier_node_ = nullptr, *eb_carrier_level_ = nullptr;
 		std::uint64_t* eb_carrier_index_ = nullptr;
 		std::int8_t* eb_carrier_axis_ = nullptr;
-		Real *eb_carrier_area_ = nullptr, *eb_carrier_mass_ = nullptr, *eb_node_axis_sum_ = nullptr,
+		Real *eb_carrier_area_ = nullptr, *eb_carrier_mass_ = nullptr,
+			*eb_carrier_unmapped_mass_ = nullptr, *eb_node_axis_sum_ = nullptr,
 			*eb_node_axis_weight_ = nullptr, *eb_node_gradient_sum_ = nullptr,
 			*eb_node_gradient_inverse_ = nullptr, *eb_edge_ls_displacement_ = nullptr,
 			*eb_edge_ls_weight_ = nullptr, *eb_transport_length_ = nullptr,
