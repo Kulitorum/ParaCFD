@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/aero_convergence.h"
 #include "core/fluid/external_aero_core.h"
 #include "gui/flow_particles.h"
 #include "gui/slice_field.h"
@@ -21,6 +22,14 @@ namespace paracfd::gui
 	// the streamwise domain. The score is computed earlier for live diagnostics.
 	inline constexpr double kAutoPauseMinimumFlowThroughs = 0.5;
 
+	enum class SimulationPauseReason
+	{
+		None,
+		Steady,
+		MeanConverged,
+		MaximumFlowThroughs
+	};
+
 	struct ParagliderDisplaySnapshot
 	{
 		std::uint64_t generation = 0;
@@ -37,8 +46,11 @@ namespace paracfd::gui
 		double net_integrated_flux_error = 0;
 		double flow_change = 0,settling_score = 0,settling_force_drift = 0,settling_force_rms = 0;
 		double flow_throughs = 0;
+		paracfd::core::Vec3d mean_force{};
+		double mean_force_drift = 0,mean_force_rms = 0;
 		std::size_t gpu_bytes = 0;
-		bool playing = false,auto_pause_enabled = false,auto_paused = false,settling_ready = false;
+		bool playing = false,auto_pause_enabled = false,auto_paused = false,settling_ready = false,mean_force_ready = false;
+		SimulationPauseReason pause_reason = SimulationPauseReason::None;
 		std::string error;
 		std::vector<float> cp_plus,cp_minus,delta_cp;
 		float cp_min = -1,cp_max = 1;
@@ -62,6 +74,7 @@ namespace paracfd::gui
 		void setPlaying(bool playing);
 		void stepOnce();
 		void configureAutoPause(bool enabled,double sensitivity);
+		void configureSweepExit(bool enabled,double relative_mean_tolerance,double maximum_flow_throughs);
 		bool latestSnapshot(std::uint64_t& generation, std::uint64_t& surface_generation,
 			ParagliderDisplaySnapshot& out) const;
 		// Borrow the latest coarse, uniform display resampling of the live AMR fields.
@@ -89,7 +102,9 @@ namespace paracfd::gui
 		mutable std::mutex display_amr_mutex_;
 		bool display_amr_ready_ = false;
 		std::atomic<bool> stop_{false},playing_{false},auto_pause_enabled_{true},auto_paused_{false},settling_reset_{true};
+		std::atomic<bool> sweep_exit_enabled_{false};
 		std::atomic<double> auto_pause_sensitivity_{0.65};
+		std::atomic<double> sweep_mean_tolerance_{0.02},sweep_max_flow_throughs_{2.5};
 		std::atomic<int> step_requests_{0};
 		mutable std::mutex snapshot_mutex_;
 		ParagliderDisplaySnapshot snapshot_;
@@ -100,9 +115,12 @@ namespace paracfd::gui
 		std::uint64_t flow_generation_ = 0;
 		double latest_flow_change_ = 0;
 		std::deque<SettlingSample> settling_history_;
-		int settling_consecutive_=0;
+		std::deque<paracfd::core::TimedAerodynamicForce> mean_force_history_;
+		paracfd::core::AerodynamicMeanConvergence mean_convergence_;
+		int settling_consecutive_=0,mean_consecutive_=0;
 		double settling_score_=0,settling_force_drift_=0,settling_force_rms_=0,flow_throughs_=0,settling_epoch_time_=0;
 		bool settling_ready_=false;
+		SimulationPauseReason pause_reason_=SimulationPauseReason::None;
 		long long steps_ = 0;
 	};
 }

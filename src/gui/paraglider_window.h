@@ -102,7 +102,8 @@ namespace paracfd::gui
 			*wake_length_=nullptr,*wake_radius_=nullptr,*min_volume_fraction_=nullptr,*min_aperture_area_fraction_=nullptr,
 			*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
 			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr,
-			*aoa_sweep_min_=nullptr,*aoa_sweep_max_=nullptr,*aoa_sweep_step_=nullptr;
+			*aoa_sweep_min_=nullptr,*aoa_sweep_max_=nullptr,*aoa_sweep_step_=nullptr,
+			*aoa_mean_tolerance_=nullptr,*aoa_max_flow_throughs_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
 		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;

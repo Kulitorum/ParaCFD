@@ -220,16 +220,16 @@ void main()
 	void SliceViewer::setParagliderWorker(ParagliderSimWorker* w)
 	{
 		paraglider_worker_ = w;
-		if(!w){simulation_running_=simulation_auto_paused_=simulation_settling_ready_=false;}
+		if(!w){simulation_running_=simulation_auto_paused_=simulation_settling_ready_=false;simulation_pause_label_.clear();}
 		range_valid_ = false;
 		arrows_.reset();
 		tracers_.reset();
 		update();
 	}
 
-	void SliceViewer::setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,bool settling_ready,double settling_score,double flow_throughs)
+	void SliceViewer::setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,bool settling_ready,double settling_score,double flow_throughs,const QString& automatic_pause_label)
 	{
-		simulation_running_=running;simulation_auto_paused_=auto_paused;simulation_auto_pause_enabled_=auto_pause_enabled;simulation_settling_ready_=settling_ready;simulation_settling_score_=settling_score;simulation_flow_throughs_=flow_throughs;update();
+		simulation_running_=running;simulation_auto_paused_=auto_paused;simulation_auto_pause_enabled_=auto_pause_enabled;simulation_settling_ready_=settling_ready;simulation_settling_score_=settling_score;simulation_flow_throughs_=flow_throughs;simulation_pause_label_=automatic_pause_label;update();
 	}
 
 	void SliceViewer::setSimulationProgress(long long step,double physical_time,double wall_time)
@@ -1564,7 +1564,11 @@ void main()
 			QFont f = p.font(); f.setPointSizeF(10.0); f.setBold(true); p.setFont(f);
 			const QColor state_colour=simulation_running_?QColor(75,220,120):QColor(255,185,65);
 			const QRect state_cue(std::max(238,(width()-410)/2),16,410,70);p.fillRect(state_cue,QColor(18,20,24,220));p.setPen(state_colour);p.drawRect(state_cue.adjusted(0,0,-1,-1));p.setBrush(state_colour);p.setPen(Qt::NoPen);p.drawEllipse(QRect(state_cue.x()+10,state_cue.y()+10,12,12));p.setBrush(Qt::NoBrush);p.setPen(state_colour);
-			QString state_text=simulation_running_?"RUNNING":(simulation_auto_paused_?"PAUSED — SETTLED":"PAUSED");if(!simulation_case_label_.isEmpty())state_text+=QString(" — %1").arg(simulation_case_label_);p.drawText(state_cue.adjusted(30,2,-6,-44),Qt::AlignLeft|Qt::AlignVCenter,state_text);
+			QString state_text;
+			if(simulation_running_)state_text="RUNNING";
+			else if(simulation_auto_paused_)state_text=QString("PAUSED — %1").arg(simulation_pause_label_.isEmpty()?QString("AUTOMATIC"):simulation_pause_label_);
+			else state_text="PAUSED";
+			if(!simulation_case_label_.isEmpty())state_text+=QString(" — %1").arg(simulation_case_label_);p.drawText(state_cue.adjusted(30,2,-6,-44),Qt::AlignLeft|Qt::AlignVCenter,state_text);
 			QFont state_detail=f;state_detail.setBold(false);state_detail.setPointSizeF(8.5);p.setFont(state_detail);p.setPen(QColor(225,228,234));QString detail;
 			if(!simulation_auto_pause_enabled_)detail="auto-pause disabled";else if(simulation_settling_ready_&&simulation_flow_throughs_<kAutoPauseMinimumFlowThroughs)detail=QString("score %1 · warm-up %2 / %3").arg(simulation_settling_score_,0,'f',2).arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);else if(simulation_settling_ready_)detail=QString("settle score %1  (pause below 1)").arg(simulation_settling_score_,0,'f',2);else detail=QString("observing %1 / %2 flow-throughs").arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);
 			p.drawText(state_cue.adjusted(10,24,-6,-24),Qt::AlignLeft|Qt::AlignVCenter,detail);

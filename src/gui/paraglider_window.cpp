@@ -118,6 +118,18 @@ namespace paracfd::gui
 			}
 			return QFileInfo(config_path).absoluteDir().absoluteFilePath(candidate);
 		}
+
+		QString pause_reason_label(SimulationPauseReason reason)
+		{
+			switch(reason)
+			{
+			case SimulationPauseReason::Steady:return "SETTLED";
+			case SimulationPauseReason::MeanConverged:return "MEAN CONVERGED";
+			case SimulationPauseReason::MaximumFlowThroughs:return "MAX FLOW";
+			case SimulationPauseReason::None:return {};
+			}
+			return {};
+		}
 	}
 
 	ParagliderWindow::ParagliderWindow(QWidget* parent):QMainWindow(parent)
@@ -165,7 +177,37 @@ namespace paracfd::gui
 		wing_label_=new QLabel("No STEP wing loaded");wing_label_->setWordWrap(true);column->addWidget(wing_label_);
 		auto* wind_hint=new QLabel(QString::fromUtf8("FREESTREAM +X  →\nBBox infers span/chord; leading/trailing needs confirmation."));wind_hint->setStyleSheet("font-weight:600;color:#ff9a75;background:#20242a;padding:6px;");column->addWidget(wind_hint);
 		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
-		auto* aoa_group=new QGroupBox("Aerodynamic reference / AoA sweep");auto* aoa_column=new QVBoxLayout(aoa_group);auto* aoa_reference_form=new QFormLayout;reference_area_=real_spin(0,10000,0,3," m²");reference_area_->setToolTip("Whole-wing aerodynamic reference area. Use the published flat or projected area consistently; it changes CL/CD, never the force solution.");aoa_reference_form->addRow("Wing reference area",reference_area_);aoa_column->addLayout(aoa_reference_form);auto* aoa_angles=new QWidget;auto* aoa_grid=new QGridLayout(aoa_angles);aoa_grid->setContentsMargins(0,0,0,0);aoa_grid->setHorizontalSpacing(6);aoa_sweep_min_=real_spin(-30,30,0,1,"°");aoa_sweep_max_=real_spin(-30,30,10,1,"°");aoa_sweep_step_=real_spin(0.1,20,2,1,"°");for(auto* spin:{aoa_sweep_min_,aoa_sweep_max_,aoa_sweep_step_})spin->setKeyboardTracking(false);aoa_grid->addWidget(new QLabel("Minimum"),0,0);aoa_grid->addWidget(new QLabel("Maximum"),0,1);aoa_grid->addWidget(new QLabel("Step"),0,2);aoa_grid->addWidget(aoa_sweep_min_,1,0);aoa_grid->addWidget(aoa_sweep_max_,1,1);aoa_grid->addWidget(aoa_sweep_step_,1,2);aoa_column->addWidget(aoa_angles);aoa_sweep_button_=new QPushButton("Run settled AoA sweep");aoa_sweep_button_->setToolTip("Treat the current placed CAD orientation as 0°, rebuild each requested pitch, run until the existing settle criterion auto-pauses, and record whole-wing forces.");aoa_column->addWidget(aoa_sweep_button_);aoa_sweep_results_=new QPlainTextEdit;aoa_sweep_results_->setReadOnly(true);aoa_sweep_results_->setLineWrapMode(QPlainTextEdit::NoWrap);aoa_sweep_results_->setMaximumHeight(150);aoa_sweep_results_->setStyleSheet("font-family:Consolas;color:#000;");aoa_sweep_results_->setPlainText("Angles are relative to the current CAD placement.\nSet wing area above to obtain CL/CD.");aoa_column->addWidget(aoa_sweep_results_);column->addWidget(aoa_group);connect(aoa_sweep_button_,&QPushButton::clicked,this,&ParagliderWindow::toggleAoaSweep);
+		auto* aoa_group=new QGroupBox("Aerodynamic reference / AoA sweep");
+		auto* aoa_column=new QVBoxLayout(aoa_group);
+		auto* aoa_reference_form=new QFormLayout;
+		reference_area_=real_spin(0,10000,0,3," m²");
+		reference_area_->setToolTip("Whole-wing aerodynamic reference area. Use the published flat or projected area consistently; it changes CL/CD, never the force solution.");
+		aoa_reference_form->addRow("Wing reference area",reference_area_);
+		aoa_column->addLayout(aoa_reference_form);
+		auto* aoa_angles=new QWidget;
+		auto* aoa_grid=new QGridLayout(aoa_angles);
+		aoa_grid->setContentsMargins(0,0,0,0);aoa_grid->setHorizontalSpacing(6);
+		aoa_sweep_min_=real_spin(-30,30,0,1,"°");aoa_sweep_max_=real_spin(-30,30,10,1,"°");aoa_sweep_step_=real_spin(0.1,20,2,1,"°");
+		for(auto* spin:{aoa_sweep_min_,aoa_sweep_max_,aoa_sweep_step_})spin->setKeyboardTracking(false);
+		aoa_grid->addWidget(new QLabel("Minimum"),0,0);aoa_grid->addWidget(new QLabel("Maximum"),0,1);aoa_grid->addWidget(new QLabel("Step"),0,2);
+		aoa_grid->addWidget(aoa_sweep_min_,1,0);aoa_grid->addWidget(aoa_sweep_max_,1,1);aoa_grid->addWidget(aoa_sweep_step_,1,2);
+		aoa_column->addWidget(aoa_angles);
+		auto* exit_form=new QFormLayout;
+		aoa_mean_tolerance_=real_spin(0.1,20,2.0,1," %");
+		aoa_mean_tolerance_->setToolTip("Finish a sweep case when adjacent half-flow-time mean-force windows differ by less than this amount. Instantaneous wake oscillation is allowed.");
+		aoa_max_flow_throughs_=real_spin(1,20,2.5,1);
+		aoa_max_flow_throughs_->setToolTip("Always finish a sweep case after this many domain flow-through times. Such a result is explicitly labelled MAX FLOW, not converged.");
+		exit_form->addRow("Mean-force tolerance",aoa_mean_tolerance_);
+		exit_form->addRow("Maximum flow-throughs",aoa_max_flow_throughs_);
+		aoa_column->addLayout(exit_form);
+		aoa_sweep_button_=new QPushButton("Run aerodynamic AoA sweep");
+		aoa_sweep_button_->setToolTip("Treat the current placed CAD orientation as 0°, rebuild each requested pitch, and record time-averaged whole-wing forces. Each case exits steady, mean-converged, or explicitly at the maximum flow time.");
+		aoa_column->addWidget(aoa_sweep_button_);
+		aoa_sweep_results_=new QPlainTextEdit;
+		aoa_sweep_results_->setReadOnly(true);aoa_sweep_results_->setLineWrapMode(QPlainTextEdit::NoWrap);aoa_sweep_results_->setMaximumHeight(150);aoa_sweep_results_->setStyleSheet("font-family:Consolas;color:#000;");
+		aoa_sweep_results_->setPlainText("Angles are relative to the current CAD placement.\nSet wing area above to obtain CL/CD.");
+		aoa_column->addWidget(aoa_sweep_results_);column->addWidget(aoa_group);
+		connect(aoa_sweep_button_,&QPushButton::clicked,this,&ParagliderWindow::toggleAoaSweep);
 
 		auto* run_group=new QGroupBox("Run");auto* run_column=new QVBoxLayout(run_group);build_button_=new QPushButton("Build CFD Grid + Run");build_button_->setToolTip("Build the static AMR/embedded-boundary grid, initialize the pressure field, and immediately run the CFD simulation.");play_button_=new QPushButton("Play");play_button_->setCheckable(true);step_button_=new QPushButton("Step");play_button_->setEnabled(false);step_button_->setEnabled(false);conservative_momentum_=new QCheckBox("Conservative control-volume momentum");conservative_momentum_->setChecked(true);conservative_momentum_->setToolTip("Recommended/default solver. Uncheck only to run the legacy staggered-MAC reference, whose static fabric mask makes grid construction much slower.");half_wing_=new QCheckBox("Use HalfWing Simulation");half_wing_->setToolTip("Simulate the +Y span half with a free-slip mirror plane at the wing centre. Use only for symmetric geometry at zero sideslip. Integrated loads are reconstructed for the whole wing.");auto_pause_=new QCheckBox("Auto-pause when settled");auto_pause_->setChecked(true);auto_pause_->setToolTip(QString("Pause while preserving GPU state after force and velocity statistics remain stationary. Auto-pause is allowed after %1 domain flow-through; the settle score is shown during warm-up.").arg(kAutoPauseMinimumFlowThroughs,0,'f',2));auto_pause_sensitivity_=new ScrollSafeSlider(Qt::Horizontal);auto_pause_sensitivity_->setRange(0,100);auto_pause_sensitivity_->setValue(65);auto_pause_sensitivity_->setToolTip("Left is cautious (requires a nearly steady field); right pauses earlier and tolerates more fluctuation.");connect(build_button_,&QPushButton::clicked,this,[this]{buildGrid();});connect(play_button_,&QPushButton::toggled,this,[this](bool on){play_button_->setText(on?"Pause":"Play");if(worker_)worker_->setPlaying(on);});connect(step_button_,&QPushButton::clicked,this,[this]{if(worker_)worker_->stepOnce();});connect(auto_pause_,&QCheckBox::toggled,this,[this](bool){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});connect(auto_pause_sensitivity_,&QSlider::valueChanged,this,[this](int){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});connect(half_wing_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&thin_y_debug_->isChecked())thin_y_debug_->setChecked(false);updateGridReadout();});auto* run_row=new QHBoxLayout;run_row->addWidget(play_button_);run_row->addWidget(step_button_);auto* sensitivity_form=new QFormLayout;sensitivity_form->addRow("Settle sensitivity",auto_pause_sensitivity_);run_column->addWidget(build_button_);run_column->addLayout(run_row);run_column->addWidget(conservative_momentum_);run_column->addWidget(half_wing_);run_column->addWidget(auto_pause_);run_column->addLayout(sensitivity_form);column->addWidget(run_group);
 		auto* thin_group=new QGroupBox("Cropped Y-span diagnosis");auto* thin_form=new QFormLayout(thin_group);thin_y_debug_=new QCheckBox("Run cropped Y volume");thin_y_debug_->setToolTip("Crop the oriented wing and CFD domain to a configurable Y width at one span station. This uses the real uniform EB solver but is a diagnostic case, not a physical whole-wing result.");thin_y_fraction_=real_spin(0.05,0.95,0.5,3);thin_y_fraction_->setSingleStep(0.025);thin_y_fraction_->setToolTip("Span station through the oriented wing bbox: 0 is one tip, 0.5 is centre, 1 is the other tip.");thin_y_width_=real_spin(0.001,100.0,0.125,4," m");thin_y_width_->setSingleStep(0.125);thin_y_width_->setToolTip("Requested physical Y width. It is rounded upward to an integer number of configured finest cells; the actual width is shown below.");thin_form->addRow(thin_y_debug_);thin_form->addRow("Span station",thin_y_fraction_);thin_form->addRow("Y volume width",thin_y_width_);column->addWidget(thin_group);connect(thin_y_debug_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&half_wing_->isChecked())half_wing_->setChecked(false);updateGridReadout();});connect(thin_y_fraction_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(thin_y_width_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});
@@ -243,7 +285,7 @@ namespace paracfd::gui
 		try{aoa_sweep_angles_=inclusive_angle_sweep(aoa_sweep_min_->value(),aoa_sweep_max_->value(),aoa_sweep_step_->value(),31);}
 		catch(const std::exception& exception){QMessageBox::critical(this,"Invalid AoA sweep",exception.what());return;}
 		restoreFullWingDisplay();aoa_sweep_baseline_=viewer_->modelPlacement();aoa_sweep_index_=0;aoa_sweep_active_=true;aoa_sweep_waiting_=false;aoa_sweep_previous_auto_pause_=auto_pause_->isChecked();auto_pause_->setChecked(true);build_button_->setEnabled(false);aoa_sweep_button_->setText("Cancel AoA sweep");
-		aoa_sweep_results_->setPlainText(QString("AoA       D [N]       L [N]      L/D       CD       CL   sim [s]  wall [s]\n%1").arg(reference_area_->value()>0?QString("reference area = %1 m²").arg(reference_area_->value(),0,'g',8):QString("reference area = 0: CL/CD withheld; force L/D remains available")));
+		aoa_sweep_results_->setPlainText(QString("AoA       <D> [N]     <L> [N]    L/D       CD       CL   sim [s]  wall [s]  exit\n%1\nmean tolerance = %2%; maximum = %3 flow-throughs").arg(reference_area_->value()>0?QString("reference area = %1 m²").arg(reference_area_->value(),0,'g',8):QString("reference area = 0: CL/CD withheld; force L/D remains available")).arg(aoa_mean_tolerance_->value(),0,'g',4).arg(aoa_max_flow_throughs_->value(),0,'g',4));
 		statusBar()->showMessage(QString("Starting %1-case AoA sweep; current CAD placement is 0°.").arg(aoa_sweep_angles_.size()),8000);QTimer::singleShot(0,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
 
@@ -251,25 +293,34 @@ namespace paracfd::gui
 	{
 		if(!aoa_sweep_active_||aoa_sweep_index_>=aoa_sweep_angles_.size())return;
 		restoreFullWingDisplay();const double angle=aoa_sweep_angles_[aoa_sweep_index_];config_.placement=left_rotation(aoa_sweep_baseline_,angle,{0,1,0});normalizePlacementToDomain();viewer_->setSimulationCaseLabel(QString("AoA %1°  [%2/%3]").arg(angle,0,'f',1).arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()));aoa_sweep_waiting_=false;
-		statusBar()->showMessage(QString("AoA sweep %1/%2: %3° — building and running until settled.").arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()).arg(angle,0,'f',1));
+		statusBar()->showMessage(QString("AoA sweep %1/%2: %3° — building and gathering mean-force statistics.").arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()).arg(angle,0,'f',1));
 		if(!buildGrid()){cancelAoaSweep("grid construction failed");return;}aoa_sweep_waiting_=true;
 	}
 
 	void ParagliderWindow::finishAoaSweepCase(const ParagliderDisplaySnapshot& snapshot)
 	{
 		if(!aoa_sweep_active_||!aoa_sweep_waiting_||aoa_sweep_index_>=aoa_sweep_angles_.size())return;aoa_sweep_waiting_=false;
-		const Vec3d force=snapshot.viscous_loads_valid?snapshot.total_force:snapshot.pressure_force;const double ratio=std::abs(force.x)>1e-12?force.z/force.x:std::numeric_limits<double>::quiet_NaN();const QString cd=snapshot.coefficients_valid?QString::number(snapshot.cd,'f',4):QString("--"),cl=snapshot.coefficients_valid?QString::number(snapshot.cl,'f',4):QString("--");const double wall=paused_wall_ms_>=0?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);
-		const double angle=aoa_sweep_angles_[aoa_sweep_index_];aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4  %5  %6  %7  %8").arg(angle,6,'f',1).arg(force.x,10,'f',3).arg(force.z,10,'f',3).arg(ratio,8,'f',3).arg(cd,8).arg(cl,8).arg(snapshot.physical_time,8,'f',3).arg(wall,8,'f',2));std::fprintf(stderr,"[paraglider-aoa-sweep] angle=%.6g D=%.9g L=%.9g L/D=%.9g CD=%s CL=%s sim=%.9g wall=%.3f\n",angle,force.x,force.z,ratio,cd.toUtf8().constData(),cl.toUtf8().constData(),snapshot.physical_time,wall);++aoa_sweep_index_;
+		const Vec3d force=snapshot.mean_force_ready?snapshot.mean_force:(snapshot.viscous_loads_valid?snapshot.total_force:snapshot.pressure_force);
+		const double ratio=std::abs(force.x)>1e-12?force.z/force.x:std::numeric_limits<double>::quiet_NaN();
+		const double area=reference_area_->value(),dynamic_pressure=0.5*rho_->value()*speed_->value()*speed_->value();
+		const bool coefficients_valid=area>0&&dynamic_pressure>0;
+		const QString cd=coefficients_valid?QString::number(force.x/(dynamic_pressure*area),'f',4):QString("--");
+		const QString cl=coefficients_valid?QString::number(force.z/(dynamic_pressure*area),'f',4):QString("--");
+		const QString exit_label=pause_reason_label(snapshot.pause_reason);
+		const double wall=paused_wall_ms_>=0?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);
+		const double angle=aoa_sweep_angles_[aoa_sweep_index_];
+		aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4  %5  %6  %7  %8  %9").arg(angle,6,'f',1).arg(force.x,10,'f',3).arg(force.z,10,'f',3).arg(ratio,8,'f',3).arg(cd,8).arg(cl,8).arg(snapshot.physical_time,8,'f',3).arg(wall,8,'f',2).arg(exit_label));
+		std::fprintf(stderr,"[paraglider-aoa-sweep] angle=%.6g mean-D=%.9g mean-L=%.9g L/D=%.9g CD=%s CL=%s sim=%.9g wall=%.3f exit=%s mean-drift=%.6g mean-rms=%.6g\n",angle,force.x,force.z,ratio,cd.toUtf8().constData(),cl.toUtf8().constData(),snapshot.physical_time,wall,exit_label.toUtf8().constData(),snapshot.mean_force_drift,snapshot.mean_force_rms);++aoa_sweep_index_;
 		if(aoa_sweep_index_>=aoa_sweep_angles_.size())
 		{
-			aoa_sweep_active_=false;aoa_sweep_button_->setText("Run settled AoA sweep");build_button_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);aoa_sweep_results_->appendPlainText("Sweep complete. The viewer retains the final-angle settled solution.");statusBar()->showMessage(QString("AoA sweep complete: %1 settled cases.").arg(aoa_sweep_angles_.size()),10000);return;
+			aoa_sweep_active_=false;if(worker_)worker_->configureSweepExit(false,0.02,2.5);aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);aoa_sweep_results_->appendPlainText("Sweep complete. The viewer retains the final-angle solution.");statusBar()->showMessage(QString("AoA sweep complete: %1 cases.").arg(aoa_sweep_angles_.size()),10000);return;
 		}
 		QTimer::singleShot(100,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
 
 	void ParagliderWindow::cancelAoaSweep(const QString& reason)
 	{
-		if(!aoa_sweep_active_)return;aoa_sweep_active_=false;aoa_sweep_waiting_=false;aoa_sweep_button_->setText("Run settled AoA sweep");build_button_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("Sweep stopped: %1.").arg(reason));statusBar()->showMessage(reason.isEmpty()?"AoA sweep stopped.":QString("AoA sweep stopped: %1.").arg(reason),7000);
+		if(!aoa_sweep_active_)return;aoa_sweep_active_=false;aoa_sweep_waiting_=false;if(worker_)worker_->configureSweepExit(false,0.02,2.5);aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("Sweep stopped: %1.").arg(reason));statusBar()->showMessage(reason.isEmpty()?"AoA sweep stopped.":QString("AoA sweep stopped: %1.").arg(reason),7000);
 	}
 
 	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation,bool remember_file)
@@ -368,7 +419,7 @@ namespace paracfd::gui
 
 	void ParagliderWindow::spawnWorker(std::unique_ptr<ExternalAeroCore> core)
 	{
-		shutdownWorker();snapshot_generation_=surface_generation_=0;worker_=new ParagliderSimWorker(std::move(core));worker_->configureAutoPause(auto_pause_&&auto_pause_->isChecked(),auto_pause_sensitivity_?auto_pause_sensitivity_->value()/100.0:0.65);viewer_->setParagliderWorker(worker_);worker_thread_=new QThread(this);worker_->moveToThread(worker_thread_);connect(worker_thread_,&QThread::started,worker_,&ParagliderSimWorker::run);connect(worker_,&ParagliderSimWorker::finished,worker_thread_,&QThread::quit);worker_thread_->start();
+		shutdownWorker();snapshot_generation_=surface_generation_=0;worker_=new ParagliderSimWorker(std::move(core));worker_->configureAutoPause(auto_pause_&&auto_pause_->isChecked(),auto_pause_sensitivity_?auto_pause_sensitivity_->value()/100.0:0.65);worker_->configureSweepExit(aoa_sweep_active_,aoa_mean_tolerance_?aoa_mean_tolerance_->value()/100.0:0.02,aoa_max_flow_throughs_?aoa_max_flow_throughs_->value():2.5);viewer_->setParagliderWorker(worker_);worker_thread_=new QThread(this);worker_->moveToThread(worker_thread_);connect(worker_thread_,&QThread::started,worker_,&ParagliderSimWorker::run);connect(worker_,&ParagliderSimWorker::finished,worker_thread_,&QThread::quit);worker_thread_->start();
 	}
 
 	void ParagliderWindow::shutdownWorker()
@@ -393,12 +444,13 @@ namespace paracfd::gui
 		}
 		{QSignalBlocker blocker(play_button_);play_button_->setChecked(s.playing);play_button_->setText(s.playing?"Pause":"Play");}
 		if(build_wall_timer_active_){if(s.playing){build_seen_running_=true;paused_wall_ms_=-1;}else if(build_seen_running_){paused_wall_ms_=build_wall_timer_.elapsed();build_seen_running_=false;}}
-		const double wall_seconds=paused_wall_ms_>=0&&!s.playing?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);viewer_->setSimulationState(s.playing,s.auto_paused,s.auto_pause_enabled,s.settling_ready,s.settling_score,s.flow_throughs);last_steps_=s.steps;last_time_=s.physical_time;viewer_->setSimulationProgress(s.steps,s.physical_time,wall_seconds);
+		const double wall_seconds=paused_wall_ms_>=0&&!s.playing?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);const QString pause_label=pause_reason_label(s.pause_reason);viewer_->setSimulationState(s.playing,s.auto_paused,s.auto_pause_enabled,s.settling_ready,s.settling_score,s.flow_throughs,pause_label);last_steps_=s.steps;last_time_=s.physical_time;viewer_->setSimulationProgress(s.steps,s.physical_time,wall_seconds);
 		if(!s.initialized){solver_readout_->setText("Initializing pressure field on GPU...");return;}
 		if(!s.delta_cp.empty()){cp_plus_=std::move(s.cp_plus);cp_minus_=std::move(s.cp_minus);delta_cp_=std::move(s.delta_cp);delta_cp_range_=std::max(std::abs(s.cp_min),std::abs(s.cp_max));side_cp_range_=std::max(std::abs(s.side_cp_min),std::abs(s.side_cp_max));applySurfaceColour();}
 		QString solver=QString("%1%2\nstep %3   t=%4 s   dt=%5 ms   CFL=%6\nGPU step %7 ms; projection %8 ms / %9 it\nresidual %10; regular/EB max %11 / %12 m/s\nEB transport rate %13 1/s; GPU %14 MiB").arg(half_wing_display_?"HALF-WING Y-SYMMETRY — WHOLE LOADS RECONSTRUCTED\n":"").arg(s.conservative_cell_momentum?"CONSERVATIVE CONTROL-VOLUME — DEFAULT":"STAGGERED MAC — LEGACY REFERENCE").arg(s.steps).arg(s.physical_time,0,'f',4).arg(s.dt*1e3,0,'f',3).arg(s.effective_cfl,0,'f',2).arg(s.step_ms,0,'f',1).arg(s.projection_ms,0,'f',1).arg(s.pressure_iterations).arg(s.residual,0,'g',3).arg(s.max_abs_regular_velocity,0,'g',4).arg(s.max_abs_special_velocity,0,'g',4).arg(s.max_embedded_cfl_rate,0,'g',4).arg(s.gpu_bytes/(1024.0*1024.0),0,'f',1);
 		if(s.auto_pause_enabled){if(s.settling_ready){solver+=QString("\nauto-pause score %1; force drift/RMS %2 / %3; field Δ %4").arg(s.settling_score,0,'f',2).arg(s.settling_force_drift,0,'g',3).arg(s.settling_force_rms,0,'g',3).arg(s.flow_change,0,'g',3);if(s.flow_throughs<kAutoPauseMinimumFlowThroughs)solver+=QString("; warm-up %1 / %2 flow-throughs").arg(s.flow_throughs,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);}else solver+=QString("\nauto-pause observing %1 / %2 flow-throughs").arg(s.flow_throughs,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);}
-		if(paused_wall_ms_>=0&&!s.playing)solver+=QString("\n%1 after %2 s wall time from Build").arg(s.auto_paused?"AUTO-PAUSED":"PAUSED").arg(paused_wall_ms_/1000.0,0,'f',2);
+		if(s.mean_force_ready)solver+=QString("\nmean-force drift/RMS %1 / %2 over adjacent windows").arg(s.mean_force_drift,0,'g',3).arg(s.mean_force_rms,0,'g',3);
+		if(paused_wall_ms_>=0&&!s.playing)solver+=QString("\n%1 after %2 s wall time from Build").arg(s.auto_paused?(pause_label.isEmpty()?"AUTO-PAUSED":QString("AUTO-PAUSED — %1").arg(pause_label)):"PAUSED").arg(paused_wall_ms_/1000.0,0,'f',2);
 		solver_readout_->setText(solver);
 		QString loads=half_wing_display_?"WHOLE-WING LOADS (mirrored from simulated +Y half)\n":"";if(s.viscous_loads_valid){loads+=QString("TOTAL LOADS (pressure + smooth-wall skin friction)\nD +X %1 N   S +Y %2 N   L +Z %3 N\npressure D/S/L %4 / %5 / %6 N\nskin D/S/L %7 / %8 / %9 N\nΔCp %10 ... %11").arg(s.total_force.x,0,'f',3).arg(s.total_force.y,0,'f',3).arg(s.total_force.z,0,'f',3).arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.viscous_force.x,0,'f',3).arg(s.viscous_force.y,0,'f',3).arg(s.viscous_force.z,0,'f',3).arg(s.cp_min,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd/Cs/Cl %1 / %2 / %3 (pressure %4 / %5 / %6)").arg(s.cd,0,'f',4).arg(s.cs,0,'f',4).arg(s.cl,0,'f',4).arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}else{loads+=QString("PRESSURE-ONLY LOADS (wall model has not stepped)\nD +X %1 N   S +Y %2 N   L +Z %3 N\nΔCp %4 ... %5").arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.cp_min,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd,p %1   Cs,p %2   Cl,p %3").arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}if(!s.coefficients_valid)loads+="\nCL/CD withheld: reference area is zero";if(s.conservation_valid)loads+=QString("\nflux error max/sum/net %1 / %2 / %3 m³/s").arg(s.max_integrated_flux_error,0,'g',3).arg(s.absolute_integrated_flux_error,0,'g',3).arg(s.net_integrated_flux_error,0,'g',3);if(s.max_abs_special_velocity>std::max(50.0,3*s.max_abs_regular_velocity))loads+="\nWARNING: compact-EB hotspot; loads not trustworthy";load_readout_->setText(loads);if(aoa_sweep_active_&&aoa_sweep_waiting_&&s.auto_paused&&!s.playing)finishAoaSweepCase(s);
 	}

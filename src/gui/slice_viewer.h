@@ -57,7 +57,8 @@ namespace paracfd::gui
 		void setSimulationProgress(long long step,double physical_time,double wall_time);
 		void setSimulationCaseLabel(const QString& label){simulation_case_label_=label;update();}
 		void setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,
-			bool settling_ready,double settling_score,double flow_throughs);
+			bool settling_ready,double settling_score,double flow_throughs,
+			const QString& automatic_pause_label=QString{});
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
@@ -300,7 +301,7 @@ namespace paracfd::gui
 		int thin_debug_layers_ = 0;
 		long long simulation_step_ = 0;
 		double simulation_physical_time_=0,simulation_wall_time_=0;
-		QString simulation_case_label_;
+		QString simulation_case_label_,simulation_pause_label_;
 		bool simulation_running_=false,simulation_auto_paused_=false,simulation_auto_pause_enabled_=false,simulation_settling_ready_=false;
 		double simulation_settling_score_=0,simulation_flow_throughs_=0;
 

@@ -24,20 +24,28 @@ namespace paracfd::gui
 		playing_.store(playing);if(playing){auto_paused_.store(false);settling_reset_.store(true);}
 		else if(!auto_paused_.load())settling_reset_.store(true);
 		std::lock_guard lock(snapshot_mutex_);snapshot_.playing=playing;snapshot_.auto_paused=auto_paused_.load();
-		if(playing){snapshot_.settling_ready=false;snapshot_.settling_score=0;snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;snapshot_.flow_throughs=0;}
+		if(playing){snapshot_.settling_ready=false;snapshot_.mean_force_ready=false;snapshot_.pause_reason=SimulationPauseReason::None;snapshot_.settling_score=0;snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;snapshot_.flow_throughs=0;}
 		++snapshot_.generation;
 	}
 
 	void ParagliderSimWorker::stepOnce()
 	{
 		auto_paused_.store(false);settling_reset_.store(true);step_requests_.fetch_add(1);
-		std::lock_guard lock(snapshot_mutex_);snapshot_.auto_paused=false;++snapshot_.generation;
+		std::lock_guard lock(snapshot_mutex_);snapshot_.auto_paused=false;snapshot_.pause_reason=SimulationPauseReason::None;++snapshot_.generation;
 	}
 
 	void ParagliderSimWorker::configureAutoPause(bool enabled,double sensitivity)
 	{
 		auto_pause_enabled_.store(enabled);auto_pause_sensitivity_.store(std::clamp(sensitivity,0.0,1.0));settling_reset_.store(true);
 		std::lock_guard lock(snapshot_mutex_);snapshot_.auto_pause_enabled=enabled;++snapshot_.generation;
+	}
+
+	void ParagliderSimWorker::configureSweepExit(bool enabled,double relative_mean_tolerance,double maximum_flow_throughs)
+	{
+		sweep_exit_enabled_.store(enabled);
+		sweep_mean_tolerance_.store(std::clamp(relative_mean_tolerance,0.001,0.2));
+		sweep_max_flow_throughs_.store(std::clamp(maximum_flow_throughs,1.0,20.0));
+		settling_reset_.store(true);
 	}
 
 	bool ParagliderSimWorker::withFlowField(
@@ -196,15 +204,38 @@ namespace paracfd::gui
 
 	void ParagliderSimWorker::updateSettling(double physical_time,const paracfd::core::Vec3d& force,const paracfd::core::ExternalAeroConservationStats& conservation)
 	{
-		if(settling_reset_.exchange(false)){settling_history_.clear();settling_consecutive_=0;settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;settling_epoch_time_=physical_time;settling_ready_=false;}
-		if(!auto_pause_enabled_.load())return;
+		if(settling_reset_.exchange(false))
+		{
+			settling_history_.clear();mean_force_history_.clear();
+			settling_consecutive_=mean_consecutive_=0;
+			settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;
+			settling_epoch_time_=physical_time;settling_ready_=false;
+			mean_convergence_={};pause_reason_=SimulationPauseReason::None;
+		}
+		const bool steady_exit_enabled=auto_pause_enabled_.load();
+		const bool sweep_exit_enabled=sweep_exit_enabled_.load();
+		if(!steady_exit_enabled&&!sweep_exit_enabled)return;
 		const double speed=std::max(1e-9,std::abs(core_->config().freestream.speed));
 		const double flow_time=(core_->hierarchy().domain().hi.x-core_->hierarchy().domain().lo.x)/speed;
-		if(!(flow_time>0)||!std::isfinite(latest_flow_change_))return;
-		flow_throughs_=std::max(0.0,physical_time-settling_epoch_time_)/flow_time;settling_history_.push_back({physical_time,force,latest_flow_change_});
+		if(!(flow_time>0))return;
+		flow_throughs_=std::max(0.0,physical_time-settling_epoch_time_)/flow_time;
+		mean_force_history_.push_back({physical_time,force});
+		const double mean_window=std::max(0.5,flow_time),mean_oldest=physical_time-mean_window;
+		while(mean_force_history_.size()>2&&mean_force_history_[1].time<mean_oldest)mean_force_history_.pop_front();
+		mean_convergence_=paracfd::core::assess_aerodynamic_mean_convergence(mean_force_history_,physical_time,mean_window);
+
+		if(!std::isfinite(latest_flow_change_))return;
+		settling_history_.push_back({physical_time,force,latest_flow_change_});
 		const double window=std::max(0.25,0.5*flow_time),oldest=physical_time-window;
 		while(!settling_history_.empty()&&settling_history_.front().time<oldest)settling_history_.pop_front();
-		if(settling_history_.size()<10)return;
+		if(settling_history_.size()<10)
+		{
+			if(sweep_exit_enabled&&flow_throughs_>=sweep_max_flow_throughs_.load())
+			{
+				playing_.store(false);auto_paused_.store(true);pause_reason_=SimulationPauseReason::MaximumFlowThroughs;
+			}
+			return;
+		}
 		const double history_span=physical_time-settling_history_.front().time;
 		if(!(history_span>0.1*window))return;
 		const double analysis_window=std::min(window,history_span);
@@ -220,8 +251,22 @@ namespace paracfd::gui
 		settling_score_=std::max({settling_force_drift_/drift_tolerance,settling_force_rms_/noise_tolerance,flow_change/flow_tolerance});settling_ready_=true;
 		const bool conservative=conservation.volume_weighted_rms_divergence<1e-3;
 		const bool observation_complete=flow_throughs_>=kAutoPauseMinimumFlowThroughs&&history_span>=0.9*window;
-		if(observation_complete&&settling_score_<1.0&&conservative)++settling_consecutive_;else settling_consecutive_=0;
-		if(settling_consecutive_>=3){playing_.store(false);auto_paused_.store(true);std::fprintf(stderr,"[paraglider] auto-pause: t=%.6g s, flow-throughs=%.3f, settle-score=%.4g\n",physical_time,flow_throughs_,settling_score_);}
+		if(steady_exit_enabled&&observation_complete&&settling_score_<1.0&&conservative)++settling_consecutive_;else settling_consecutive_=0;
+		if(sweep_exit_enabled&&flow_throughs_>=1.0&&mean_convergence_.ready&&conservative&&mean_convergence_.relative_drift<sweep_mean_tolerance_.load())++mean_consecutive_;else mean_consecutive_=0;
+
+		SimulationPauseReason reason=SimulationPauseReason::None;
+		// Sweeps always retain at least one complete force window, even if the
+		// instantaneous-field criterion happens to trigger earlier.
+		const bool mean_force_converged=mean_convergence_.ready&&mean_convergence_.relative_drift<sweep_mean_tolerance_.load();
+		if(settling_consecutive_>=3&&(!sweep_exit_enabled||mean_force_converged))reason=SimulationPauseReason::Steady;
+		else if(mean_consecutive_>=3)reason=SimulationPauseReason::MeanConverged;
+		else if(sweep_exit_enabled&&flow_throughs_>=sweep_max_flow_throughs_.load())reason=SimulationPauseReason::MaximumFlowThroughs;
+		if(reason!=SimulationPauseReason::None)
+		{
+			playing_.store(false);auto_paused_.store(true);pause_reason_=reason;
+			const char* label=reason==SimulationPauseReason::Steady?"steady":reason==SimulationPauseReason::MeanConverged?"mean-converged":"maximum-flow-throughs";
+			std::fprintf(stderr,"[paraglider] auto-pause: reason=%s, t=%.6g s, flow-throughs=%.3f, settle-score=%.4g, mean-drift=%.4g, mean-rms=%.4g\n",label,physical_time,flow_throughs_,settling_score_,mean_convergence_.relative_drift,mean_convergence_.current_rms_fraction);
+		}
 	}
 
 	bool ParagliderSimWorker::latestSnapshot(std::uint64_t& generation,
@@ -252,6 +297,7 @@ namespace paracfd::gui
 		out.absolute_integrated_flux_error = snapshot_.absolute_integrated_flux_error;
 		out.net_integrated_flux_error = snapshot_.net_integrated_flux_error;
 		out.flow_change=snapshot_.flow_change;out.settling_score=snapshot_.settling_score;out.settling_force_drift=snapshot_.settling_force_drift;out.settling_force_rms=snapshot_.settling_force_rms;out.flow_throughs=snapshot_.flow_throughs;
+		out.mean_force=snapshot_.mean_force;out.mean_force_drift=snapshot_.mean_force_drift;out.mean_force_rms=snapshot_.mean_force_rms;out.mean_force_ready=snapshot_.mean_force_ready;out.pause_reason=snapshot_.pause_reason;
 		out.gpu_bytes = snapshot_.gpu_bytes;
 		out.playing=snapshot_.playing;out.auto_pause_enabled=snapshot_.auto_pause_enabled;out.auto_paused=snapshot_.auto_paused;out.settling_ready=snapshot_.settling_ready;
 		out.error = snapshot_.error;
@@ -334,6 +380,7 @@ namespace paracfd::gui
 		snapshot_.conservative_cell_momentum = core_->uses_conservative_cell_momentum();
 		snapshot_.playing=playing_.load();snapshot_.auto_pause_enabled=auto_pause_enabled_.load();snapshot_.auto_paused=auto_paused_.load();snapshot_.settling_ready=settling_ready_;
 		snapshot_.flow_change=latest_flow_change_;snapshot_.settling_score=settling_score_;snapshot_.settling_force_drift=settling_force_drift_;snapshot_.settling_force_rms=settling_force_rms_;snapshot_.flow_throughs=flow_throughs_;
+		snapshot_.mean_force=(mean_convergence_.previous_mean+mean_convergence_.current_mean)*0.5;snapshot_.mean_force_drift=mean_convergence_.relative_drift;snapshot_.mean_force_rms=mean_convergence_.current_rms_fraction;snapshot_.mean_force_ready=mean_convergence_.ready;snapshot_.pause_reason=pause_reason_;
 		snapshot_.error.clear();
 		if (have_surface)
 		{
