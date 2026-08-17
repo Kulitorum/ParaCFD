@@ -205,6 +205,13 @@ namespace paracfd::core
 	{
 		std::vector<Real> x, y, z;
 	};
+	// Interpolate a collocated control-volume value to a Cartesian aperture. Normal
+	// coordinate interpolation is exact when the two centroids straddle the face.
+	// Strongly non-orthogonal/collocated projections use bounded inverse-distance
+	// weighting to the real face centroid instead of an undefined axial division.
+	double composite_face_interpolation_weight(const Vec3d& lower_centroid,
+		const Vec3d& upper_centroid, const Vec3d& face_centroid, int axis,
+		bool* used_distance_weighting = nullptr);
 
 	void conservative_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,

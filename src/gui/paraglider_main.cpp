@@ -14,7 +14,7 @@
 
 int main(int argc,char** argv)
 {
-	std::string config,step,screenshot;int autoclose_ms=0;double thin_y_fraction=-1,thin_y_width=0.125;bool offscreen=false,thin_y_width_explicit=false,conservative_momentum=false;
+	std::string config,step,screenshot;int autoclose_ms=0;double thin_y_fraction=-1,thin_y_width=0.125;bool offscreen=false,thin_y_width_explicit=false,conservative_momentum=true;
 	for(int i=1;i<argc;++i)
 	{
 		const std::string argument=argv[i];
@@ -25,6 +25,7 @@ int main(int argc,char** argv)
 		else if(argument=="--thin-y-fraction"&&i+1<argc)thin_y_fraction=std::atof(argv[++i]);
 		else if(argument=="--thin-y-width"&&i+1<argc){thin_y_width=std::atof(argv[++i]);thin_y_width_explicit=true;}
 		else if(argument=="--conservative-momentum")conservative_momentum=true;
+		else if(argument=="--staggered-momentum")conservative_momentum=false;
 		else if(argument=="--offscreen")offscreen=true;
 		else if(!argument.empty()&&argument[0]!='-')config=argument;
 	}

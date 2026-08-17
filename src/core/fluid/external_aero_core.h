@@ -44,7 +44,9 @@ namespace paracfd::core
 	};
 	struct ExternalAeroExecutionOptions
 	{
-		bool conservative_cell_momentum = false;
+		// The conservative control-volume solver is the production default. The
+		// staggered path remains available only as an explicit validation reference.
+		bool conservative_cell_momentum = true;
 		bool smooth_fabric_wall = true;
 		bool pressure_impulse = true;
 	};
