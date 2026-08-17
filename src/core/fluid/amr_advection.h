@@ -292,11 +292,12 @@ namespace paracfd::core
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
 		// domain boundary values remain the caller's external-BC responsibility.
 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
-		// Diagnostic alternative that retains the previous projected face-only mode
-		// and adds the explicit cell-state increment. The imported-wing path uses the
-		// absolute reconstruction above: retaining an aperture correction that cannot
-		// be represented by the collocated state accumulates a spurious null mode.
-		void reconstruct_flux_increments(Real* coarse_fine_velocity, Real* embedded_velocity);
+		// Rhie-Chow-style reconstruction: remove the cell-averaged correction from the
+		// previous projection and restore its exact face-normal pressure correction.
+		// A projected steady state therefore reconstructs identically without retaining
+		// unrelated face-only aperture modes.
+		void reconstruct_pressure_consistent_fluxes(const Real* pressure,
+			Real* coarse_fine_velocity, Real* embedded_velocity);
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
@@ -351,6 +352,8 @@ namespace paracfd::core
 			gradient_incidence_count_ = 0, clamped_flux_interpolation_count_ = 0,
 			pressure_closure_count_ = 0;
 		double max_pressure_closure_acceleration_ = 0.0;
+		Real pressure_scale_ = Real(0);
+		bool pressure_correction_ready_ = false;
 		std::size_t bytes_ = 0;
 	};
 

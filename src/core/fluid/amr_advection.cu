@@ -193,19 +193,22 @@ namespace paracfd::core
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge];const Real weight=upper_weight[edge];velocity[edge]=(Real(1)-weight)*cell_component(x,y,z,a[edge],component)+weight*cell_component(x,y,z,b[edge],component);
 		}
-		__global__ void increment_regular_cell_flux_kernel(DeviceAmrFieldLevelView view,
-			int level_offset,const unsigned char* active,const unsigned char* cut_face_mask,
+		__global__ void reconstruct_regular_pressure_consistent_flux_kernel(DeviceAmrFieldLevelView view,
+			Real h,int level_offset,const unsigned char* active,const unsigned char* cut_face_mask,
 			const unsigned char* compact_plus_mask,const Real* x,const Real* y,const Real* z,
-			const Real* old_x,const Real* old_y,const Real* old_z)
+			const Real* pressure_x,const Real* pressure_y,const Real* pressure_z,
+			const Real* pressure,Real pressure_scale)
 		{
-			const int bs=view.layout.brick_size,cells=bs*bs*bs,q=blockIdx.x*blockDim.x+threadIdx.x,total=view.brick_count*cells;if(q>=total)return;const int brick=q/cells,local=q%cells;if(view.flags[brick]&BRICK_COVERED)return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs),a=level_offset+q;if(!active[a])return;for(int axis=0;axis<3;++axis){if((cut_face_mask[a]&(1u<<axis))||(compact_plus_mask[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=view.neighbors[brick*6+2*axis+1];if(other_brick<0||(view.flags[other_brick]&BRICK_COVERED))continue;c[axis]=0;}const int b=level_offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!active[b])continue;const Real increment=Real(0.5)*((cell_component(x,y,z,a,axis)-cell_component(old_x,old_y,old_z,a,axis))+(cell_component(x,y,z,b,axis)-cell_component(old_x,old_y,old_z,b,axis)));Real value=increment;if(axis==0)value+=view.u[view.layout.u_index(brick,i+1,j,k)];else if(axis==1)value+=view.v[view.layout.v_index(brick,i,j+1,k)];else value+=view.w[view.layout.w_index(brick,i,j,k+1)];set_positive_cell_face(view,brick,axis,i,j,k,value);if(other_brick!=brick){int lower[3]={c[0],c[1],c[2]};lower[axis]=-1;set_positive_cell_face(view,other_brick,axis,lower[0],lower[1],lower[2],value);}}
+			const int bs=view.layout.brick_size,cells=bs*bs*bs,q=blockIdx.x*blockDim.x+threadIdx.x,total=view.brick_count*cells;if(q>=total)return;const int brick=q/cells,local=q%cells;if(view.flags[brick]&BRICK_COVERED)return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs),a=level_offset+q;if(!active[a])return;
+			for(int axis=0;axis<3;++axis){if((cut_face_mask[a]&(1u<<axis))||(compact_plus_mask[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=view.neighbors[brick*6+2*axis+1];if(other_brick<0||(view.flags[other_brick]&BRICK_COVERED))continue;c[axis]=0;}const int b=level_offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!active[b])continue;const Real reconstructed=Real(0.5)*(cell_component(x,y,z,a,axis)+cell_component(x,y,z,b,axis)),cell_pressure=Real(0.5)*(cell_component(pressure_x,pressure_y,pressure_z,a,axis)+cell_component(pressure_x,pressure_y,pressure_z,b,axis)),face_pressure=-pressure_scale*(pressure[b]-pressure[a])/h;const Real value=reconstructed+face_pressure-cell_pressure;set_positive_cell_face(view,brick,axis,i,j,k,value);if(other_brick!=brick){int lower[3]={c[0],c[1],c[2]};lower[axis]=-1;set_positive_cell_face(view,other_brick,axis,lower[0],lower[1],lower[2],value);}}
 		}
-		__global__ void increment_compact_cell_flux_kernel(const int* a,const int* b,
-			const std::int8_t* axis,const Real* upper_weight,const Real* x,const Real* y,
-			const Real* z,const Real* old_x,const Real* old_y,const Real* old_z,Real* velocity,
-			int count)
+		__global__ void reconstruct_compact_pressure_consistent_flux_kernel(const int* a,const int* b,
+			const std::int8_t* axis,const Real* area,const Real* conductance,
+			const Real* upper_weight,const Real* x,const Real* y,const Real* z,
+			const Real* pressure_x,const Real* pressure_y,const Real* pressure_z,
+			const Real* pressure,Real pressure_scale,Real* velocity,int count)
 		{
-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge];const Real weight=upper_weight[edge],lower=Real(1)-weight;velocity[edge]+=lower*(cell_component(x,y,z,a[edge],component)-cell_component(old_x,old_y,old_z,a[edge],component))+weight*(cell_component(x,y,z,b[edge],component)-cell_component(old_x,old_y,old_z,b[edge],component));
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count||!(area[edge]>Real(0)))return;const int component=axis[edge];const Real weight=upper_weight[edge],lower=Real(1)-weight,reconstructed=lower*cell_component(x,y,z,a[edge],component)+weight*cell_component(x,y,z,b[edge],component),cell_pressure=lower*cell_component(pressure_x,pressure_y,pressure_z,a[edge],component)+weight*cell_component(pressure_x,pressure_y,pressure_z,b[edge],component),face_pressure=-pressure_scale*(conductance[edge]/area[edge])*(pressure[b[edge]]-pressure[a[edge]]);velocity[edge]=reconstructed+face_pressure-cell_pressure;
 		}
 		__device__ void accumulate_axis_pressure_impulse(int a,int b,int axis,Real impulse,
 			Real* dx,Real* dy,Real* dz)
@@ -246,11 +249,12 @@ namespace paracfd::core
 		}
 		__global__ void projected_regular_cell_pressure_kernel(DeviceAmrFieldLevelView view,
 			Real h,int level_offset,const unsigned char* active,const unsigned char* cut_face_mask,
-			const Real* pressure,Real scale,bool outlet_xmax,Real* dx,Real* dy,Real* dz,
+			const unsigned char* compact_plus_mask,const Real* pressure,Real scale,bool outlet_xmax,
+			Real* dx,Real* dy,Real* dz,
 			Real* wx,Real* wy,Real* wz)
 		{
 			const int bs=view.layout.brick_size,cells=bs*bs*bs,q=blockIdx.x*blockDim.x+threadIdx.x,total=view.brick_count*cells;if(q>=total)return;const int brick=q/cells,local=q%cells;if(view.flags[brick]&BRICK_COVERED)return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs),a=level_offset+q;if(!active[a])return;const Real area=h*h;
-			for(int axis=0;axis<3;++axis){if(cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=view.neighbors[brick*6+2*axis+1];if(other_brick<0||(view.flags[other_brick]&BRICK_COVERED))continue;c[axis]=0;}const int b=level_offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!active[b])continue;const Real weighted=-scale*area*(pressure[b]-pressure[a])/h;accumulate_axis_face_correction(a,axis,weighted,area,dx,dy,dz,wx,wy,wz);accumulate_axis_face_correction(b,axis,weighted,area,dx,dy,dz,wx,wy,wz);}
+			for(int axis=0;axis<3;++axis){if((cut_face_mask[a]&(1u<<axis))||(compact_plus_mask[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=view.neighbors[brick*6+2*axis+1];if(other_brick<0||(view.flags[other_brick]&BRICK_COVERED))continue;c[axis]=0;}const int b=level_offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!active[b])continue;const Real weighted=-scale*area*(pressure[b]-pressure[a])/h;accumulate_axis_face_correction(a,axis,weighted,area,dx,dy,dz,wx,wy,wz);accumulate_axis_face_correction(b,axis,weighted,area,dx,dy,dz,wx,wy,wz);}
 			if(outlet_xmax&&i==bs-1&&(view.flags[brick]&BRICK_XMAX)){const Real weighted=scale*area*pressure[a]/(Real(0.5)*h);accumulate_axis_face_correction(a,0,weighted,area,dx,dy,dz,wx,wy,wz);}
 		}
 		__global__ void projected_compact_cell_pressure_kernel(const int* a,const int* b,
@@ -260,10 +264,10 @@ namespace paracfd::core
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count||!(area[edge]>Real(0)))return;const Real weighted=-scale*conductance[edge]*(pressure[b[edge]]-pressure[a[edge]]);accumulate_axis_face_correction(a[edge],axis[edge],weighted,area[edge],dx,dy,dz,wx,wy,wz);accumulate_axis_face_correction(b[edge],axis[edge],weighted,area[edge],dx,dy,dz,wx,wy,wz);
 		}
 		__global__ void apply_projected_cell_pressure_kernel(const unsigned char* active,
-			const Real* dx,const Real* dy,const Real* dz,const Real* wx,const Real* wy,
-			const Real* wz,Real* x,Real* y,Real* z,int count)
+			const Real* dx,const Real* dy,const Real* dz,Real* wx,Real* wy,
+			Real* wz,Real* x,Real* y,Real* z,int count)
 		{
-			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count&&active[q]){if(wx[q]>Real(0))x[q]+=dx[q]/wx[q];if(wy[q]>Real(0))y[q]+=dy[q]/wy[q];if(wz[q]>Real(0))z[q]+=dz[q]/wz[q];}
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count&&active[q]){Real cx=Real(0),cy=Real(0),cz=Real(0);if(wx[q]>Real(0))cx=dx[q]/wx[q];if(wy[q]>Real(0))cy=dy[q]/wy[q];if(wz[q]>Real(0))cz=dz[q]/wz[q];x[q]+=cx;y[q]+=cy;z[q]+=cz;wx[q]=cx;wy[q]=cy;wz[q]=cz;}
 		}
 		__global__ void smooth_wall_surface_cell_impulse_kernel(const int* dof,
 			const Real* normal,const Real* area,const Real* distance,const Real* x,const Real* y,
@@ -779,7 +783,72 @@ namespace paracfd::core
 		const CompositeAmrPressureSystem& system,const std::vector<double>& pressure,
 		double dt,double density,CompositeCellMomentumState& state)
 	{
-		if(!system.hierarchy||pressure.size()!=static_cast<std::size_t>(system.storage_size)||!(dt>0)||!(density>0)||state.x.size()!=pressure.size()||state.y.size()!=pressure.size()||state.z.size()!=pressure.size())throw std::invalid_argument("invalid projected composite pressure-gradient state");const int bs=system.brick_size,cells=bs*bs*bs;const double scale=dt/density;std::vector<double> dx(system.storage_size),dy(system.storage_size),dz(system.storage_size),wx(system.storage_size),wy(system.storage_size),wz(system.storage_size);auto add=[&](int dof,int axis,double correction,double area){std::vector<double>* delta=axis==0?&dx:(axis==1?&dy:&dz);std::vector<double>* weight=axis==0?&wx:(axis==1?&wy:&wz);(*delta)[dof]+=area*correction;(*weight)[dof]+=area;};for(int level_index=0;level_index<static_cast<int>(system.hierarchy->levels().size());++level_index){const AmrLevel& level=system.hierarchy->levels()[level_index];const double area=level.h*level.h;for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick){const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=system.level_offset[level_index]+brick*cells+i+bs*(j+bs*k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if(system.cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}const int b=system.level_offset[level_index]+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!system.active[b])continue;const double correction=-scale*(pressure[b]-pressure[a])/level.h;add(a,axis,correction,area);add(b,axis,correction,area);}if(system.pressure_outlet_xmax&&i==bs-1&&(record.flags&BRICK_XMAX))add(a,0,scale*pressure[a]/(0.5*level.h),area);}}}auto special=[&](const CoarseFinePressureConnection& connection){const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,b=connection.direction>0?connection.fine_dof:connection.coarse_dof;if(!system.active[a]||!system.active[b])return;const double correction=-scale*(pressure[b]-pressure[a])*pressure_gradient_factor(connection);add(a,connection.axis,correction,connection.open_area);add(b,connection.axis,correction,connection.open_area);};for(const auto& connection:system.coarse_fine)special(connection);for(const auto& connection:system.embedded)special(connection);for(int q=0;q<system.storage_size;++q)if(system.active[q]){if(wx[q]>0)state.x[q]=static_cast<Real>(static_cast<double>(state.x[q])+dx[q]/wx[q]);if(wy[q]>0)state.y[q]=static_cast<Real>(static_cast<double>(state.y[q])+dy[q]/wy[q]);if(wz[q]>0)state.z[q]=static_cast<Real>(static_cast<double>(state.z[q])+dz[q]/wz[q]);}
+		if(!system.hierarchy||pressure.size()!=static_cast<std::size_t>(system.storage_size)||
+			!(dt>0)||!(density>0)||state.x.size()!=pressure.size()||
+			state.y.size()!=pressure.size()||state.z.size()!=pressure.size())
+			throw std::invalid_argument("invalid projected composite pressure-gradient state");
+		const int bs=system.brick_size,cells=bs*bs*bs;const double scale=dt/density;
+		std::vector<double> dx(system.storage_size),dy(system.storage_size),dz(system.storage_size),
+			wx(system.storage_size),wy(system.storage_size),wz(system.storage_size);
+		const std::vector<CompositeEbMomentumRegularConnection> compact_regular=
+			build_composite_eb_momentum_regular_connections(system);
+		std::vector<unsigned char> compact_plus(system.storage_size,0);
+		for(const auto& connection:compact_regular)
+			compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);
+		auto add=[&](int dof,int axis,double correction,double area)
+		{
+			std::vector<double>* delta=axis==0?&dx:(axis==1?&dy:&dz);
+			std::vector<double>* weight=axis==0?&wx:(axis==1?&wy:&wz);
+			(*delta)[dof]+=area*correction;(*weight)[dof]+=area;
+		};
+		for(int level_index=0;level_index<static_cast<int>(system.hierarchy->levels().size());++level_index)
+		{
+			const AmrLevel& level=system.hierarchy->levels()[level_index];const double area=level.h*level.h;
+			for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick)
+			{
+				const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;
+				for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i)
+				{
+					const int a=system.level_offset[level_index]+brick*cells+i+bs*(j+bs*k);
+					if(!system.active[a])continue;
+					for(int axis=0;axis<3;++axis)
+					{
+						if((system.cut_face_mask[a]&(1u<<axis))||(compact_plus[a]&(1u<<axis)))continue;
+						int c[3]={i,j,k},other_brick=brick;++c[axis];
+						if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}
+						const int b=system.level_offset[level_index]+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);
+						if(!system.active[b])continue;const double correction=-scale*(pressure[b]-pressure[a])/level.h;
+						add(a,axis,correction,area);add(b,axis,correction,area);
+					}
+					if(system.pressure_outlet_xmax&&i==bs-1&&(record.flags&BRICK_XMAX))
+						add(a,0,scale*pressure[a]/(0.5*level.h),area);
+				}
+			}
+		}
+		for(const auto& connection:compact_regular)
+		{
+			const Vec3d displacement=system.centroid[connection.upper_dof]-system.centroid[connection.lower_dof];
+			const double correction=-scale*(pressure[connection.upper_dof]-pressure[connection.lower_dof])*
+				std::abs(displacement[connection.face.component])/length2(displacement);
+			add(connection.lower_dof,connection.face.component,correction,connection.open_area);
+			add(connection.upper_dof,connection.face.component,correction,connection.open_area);
+		}
+		auto special=[&](const CoarseFinePressureConnection& connection)
+		{
+			const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,
+				b=connection.direction>0?connection.fine_dof:connection.coarse_dof;
+			if(!system.active[a]||!system.active[b])return;
+			const double correction=-scale*(pressure[b]-pressure[a])*pressure_gradient_factor(connection);
+			add(a,connection.axis,correction,connection.open_area);add(b,connection.axis,correction,connection.open_area);
+		};
+		for(const auto& connection:system.coarse_fine)special(connection);
+		for(const auto& connection:system.embedded)special(connection);
+		for(int q=0;q<system.storage_size;++q)if(system.active[q])
+		{
+			if(wx[q]>0)state.x[q]=static_cast<Real>(static_cast<double>(state.x[q])+dx[q]/wx[q]);
+			if(wy[q]>0)state.y[q]=static_cast<Real>(static_cast<double>(state.y[q])+dy[q]/wy[q]);
+			if(wz[q]>0)state.z[q]=static_cast<Real>(static_cast<double>(state.z[q])+dz[q]/wz[q]);
+		}
 	}
 
 	void reconstruct_composite_cell_fluxes_cpu(const CompositeAmrPressureSystem& system,
@@ -834,7 +903,7 @@ namespace paracfd::core
 	void DeviceCompositeCellMomentumTransport::step(const Real* coarse_fine_velocity,
 		const Real* embedded_velocity,Real dt,bool external_aero,Real freestream_speed)
 	{
-		if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity)||!(dt>Real(0))||!(freestream_speed>=Real(0)))throw std::invalid_argument("invalid composite cell momentum timestep");const std::size_t state_bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);check(cudaMemcpy(baseline_x_,x_,state_bytes,cudaMemcpyDeviceToDevice),"capture composite cell momentum baseline x");check(cudaMemcpy(baseline_y_,y_,state_bytes,cudaMemcpyDeviceToDevice),"capture composite cell momentum baseline y");check(cudaMemcpy(baseline_z_,z_,state_bytes,cudaMemcpyDeviceToDevice),"capture composite cell momentum baseline z");check(cudaMemset(delta_x_,0,state_bytes),"clear composite cell momentum dx");check(cudaMemset(delta_y_,0,state_bytes),"clear composite cell momentum dy");check(cudaMemset(delta_z_,0,state_bytes),"clear composite cell momentum dz");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);transport_regular_cell_momentum_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_,dt,external_aero,freestream_speed,delta_x_,delta_y_,delta_z_);}if(regular_count_){regular_face_map_->gather(regular_velocity_);transport_compact_cell_momentum_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_area_,regular_velocity_,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,regular_count_);}if(coarse_fine_count_)transport_compact_cell_momentum_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_area_,coarse_fine_velocity,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,coarse_fine_count_);if(embedded_count_)transport_compact_cell_momentum_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_area_,embedded_velocity,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,embedded_count_);apply_cell_momentum_kernel<<<(storage_size_+255)/256,256>>>(active_,volume_,delta_x_,delta_y_,delta_z_,x_,y_,z_,storage_size_);check(cudaDeviceSynchronize(),"composite cell momentum transport");
+		if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity)||!(dt>Real(0))||!(freestream_speed>=Real(0)))throw std::invalid_argument("invalid composite cell momentum timestep");const std::size_t state_bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);check(cudaMemset(delta_x_,0,state_bytes),"clear composite cell momentum dx");check(cudaMemset(delta_y_,0,state_bytes),"clear composite cell momentum dy");check(cudaMemset(delta_z_,0,state_bytes),"clear composite cell momentum dz");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);transport_regular_cell_momentum_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_,dt,external_aero,freestream_speed,delta_x_,delta_y_,delta_z_);}if(regular_count_){regular_face_map_->gather(regular_velocity_);transport_compact_cell_momentum_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_area_,regular_velocity_,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,regular_count_);}if(coarse_fine_count_)transport_compact_cell_momentum_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_area_,coarse_fine_velocity,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,coarse_fine_count_);if(embedded_count_)transport_compact_cell_momentum_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_area_,embedded_velocity,x_,y_,z_,dt,delta_x_,delta_y_,delta_z_,embedded_count_);apply_cell_momentum_kernel<<<(storage_size_+255)/256,256>>>(active_,volume_,delta_x_,delta_y_,delta_z_,x_,y_,z_,storage_size_);check(cudaDeviceSynchronize(),"composite cell momentum transport");
 	}
 
 	void DeviceCompositeCellMomentumTransport::step(const Real* embedded_velocity,Real dt,
@@ -875,7 +944,7 @@ namespace paracfd::core
 	void DeviceCompositeCellMomentumTransport::apply_projected_pressure_gradient(const Real* pressure,
 		Real dt,Real density)
 	{
-		if(!pressure||!(dt>Real(0))||!(density>Real(0)))throw std::invalid_argument("invalid composite cell pressure gradient");const std::size_t state_bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);check(cudaMemset(delta_x_,0,state_bytes),"clear projected pressure dx");check(cudaMemset(delta_y_,0,state_bytes),"clear projected pressure dy");check(cudaMemset(delta_z_,0,state_bytes),"clear projected pressure dz");check(cudaMemset(baseline_x_,0,state_bytes),"clear projected pressure wx");check(cudaMemset(baseline_y_,0,state_bytes),"clear projected pressure wy");check(cudaMemset(baseline_z_,0,state_bytes),"clear projected pressure wz");const Real scale=dt/density;const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);projected_regular_cell_pressure_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,pressure,scale,system_->pressure_outlet_xmax,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_);}if(coarse_fine_count_)projected_compact_cell_pressure_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_area_,coarse_fine_conductance_,pressure,scale,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,coarse_fine_count_);if(embedded_count_)projected_compact_cell_pressure_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_area_,embedded_conductance_,pressure,scale,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,embedded_count_);apply_projected_cell_pressure_kernel<<<(storage_size_+255)/256,256>>>(active_,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,x_,y_,z_,storage_size_);check(cudaDeviceSynchronize(),"apply projected composite cell pressure gradient");
+		if(!pressure||!(dt>Real(0))||!(density>Real(0)))throw std::invalid_argument("invalid composite cell pressure gradient");pressure_scale_=dt/density;pressure_correction_ready_=true;const std::size_t state_bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);check(cudaMemset(delta_x_,0,state_bytes),"clear projected pressure dx");check(cudaMemset(delta_y_,0,state_bytes),"clear projected pressure dy");check(cudaMemset(delta_z_,0,state_bytes),"clear projected pressure dz");check(cudaMemset(baseline_x_,0,state_bytes),"clear projected pressure wx");check(cudaMemset(baseline_y_,0,state_bytes),"clear projected pressure wy");check(cudaMemset(baseline_z_,0,state_bytes),"clear projected pressure wz");const Real scale=pressure_scale_;const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);projected_regular_cell_pressure_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,pressure,scale,system_->pressure_outlet_xmax,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_);}if(regular_count_)projected_compact_cell_pressure_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_axis_,regular_area_,regular_conductance_,pressure,scale,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,regular_count_);if(coarse_fine_count_)projected_compact_cell_pressure_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_area_,coarse_fine_conductance_,pressure,scale,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,coarse_fine_count_);if(embedded_count_)projected_compact_cell_pressure_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_area_,embedded_conductance_,pressure,scale,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,embedded_count_);apply_projected_cell_pressure_kernel<<<(storage_size_+255)/256,256>>>(active_,delta_x_,delta_y_,delta_z_,baseline_x_,baseline_y_,baseline_z_,x_,y_,z_,storage_size_);check(cudaDeviceSynchronize(),"apply projected composite cell pressure gradient");
 	}
 
 	void DeviceCompositeCellMomentumTransport::reconstruct_fluxes(Real* coarse_fine_velocity,
@@ -884,10 +953,33 @@ namespace paracfd::core
 		if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))throw std::invalid_argument("invalid composite cell momentum flux reconstruction");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;reconstruct_regular_cell_flux_kernel<<<(count+255)/256,256>>>(view,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_);}if(regular_count_){reconstruct_compact_cell_flux_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_axis_,regular_upper_weight_,x_,y_,z_,regular_velocity_,regular_count_);regular_face_map_->scatter(regular_velocity_);}if(coarse_fine_count_)reconstruct_compact_cell_flux_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_upper_weight_,x_,y_,z_,coarse_fine_velocity,coarse_fine_count_);if(embedded_count_)reconstruct_compact_cell_flux_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_upper_weight_,x_,y_,z_,embedded_velocity,embedded_count_);check(cudaDeviceSynchronize(),"reconstruct composite cell momentum fluxes");
 	}
 
-	void DeviceCompositeCellMomentumTransport::reconstruct_flux_increments(
-		Real* coarse_fine_velocity,Real* embedded_velocity)
+	void DeviceCompositeCellMomentumTransport::reconstruct_pressure_consistent_fluxes(
+		const Real* pressure,Real* coarse_fine_velocity,Real* embedded_velocity)
 	{
-		if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))throw std::invalid_argument("invalid composite cell momentum flux-increment reconstruction");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;increment_regular_cell_flux_kernel<<<(count+255)/256,256>>>(view,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_);}if(regular_count_){regular_face_map_->gather(regular_velocity_);increment_compact_cell_flux_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_axis_,regular_upper_weight_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,regular_velocity_,regular_count_);regular_face_map_->scatter(regular_velocity_);}if(coarse_fine_count_)increment_compact_cell_flux_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_upper_weight_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,coarse_fine_velocity,coarse_fine_count_);if(embedded_count_)increment_compact_cell_flux_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_upper_weight_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,embedded_velocity,embedded_count_);check(cudaDeviceSynchronize(),"increment composite cell momentum fluxes");
+		if(!pressure||!pressure_correction_ready_||
+			(coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))
+			throw std::invalid_argument("invalid pressure-consistent composite flux reconstruction");
+		const int bs=system_->brick_size,cells=bs*bs*bs;
+		for(int level=0;level<fields_->level_count();++level)
+		{
+			const DeviceAmrFieldLevelView view=fields_->level_view(level);
+			const int count=view.brick_count*cells;
+			const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);
+			reconstruct_regular_pressure_consistent_flux_kernel<<<(count+255)/256,256>>>(
+				view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,
+				x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,pressure,pressure_scale_);
+		}
+		auto compact=[&](int count,const int* a,const int* b,const std::int8_t* axis,
+			const Real* area,const Real* conductance,const Real* weight,Real* velocity)
+		{
+			if(count)reconstruct_compact_pressure_consistent_flux_kernel<<<(count+255)/256,256>>>(
+				a,b,axis,area,conductance,weight,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,
+				pressure,pressure_scale_,velocity,count);
+		};
+		if(regular_count_){compact(regular_count_,regular_a_,regular_b_,regular_axis_,regular_area_,regular_conductance_,regular_upper_weight_,regular_velocity_);regular_face_map_->scatter(regular_velocity_);}
+		compact(coarse_fine_count_,coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_area_,coarse_fine_conductance_,coarse_fine_upper_weight_,coarse_fine_velocity);
+		compact(embedded_count_,embedded_a_,embedded_b_,embedded_axis_,embedded_area_,embedded_conductance_,embedded_upper_weight_,embedded_velocity);
+		check(cudaDeviceSynchronize(),"reconstruct pressure-consistent composite cell fluxes");
 	}
 
 	std::array<double,3> DeviceCompositeCellMomentumTransport::momentum()const
