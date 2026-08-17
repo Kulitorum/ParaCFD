@@ -160,7 +160,13 @@ namespace paracfd::core
 	{
 		if(dof_a<0||dof_b<0||dof_a==dof_b||dof_a>=system.storage_size||dof_b>=system.storage_size||
 			!system.active[dof_a]||!system.active[dof_b]||system.volume[dof_a]<=0||system.volume[dof_b]<=0)
-			throw std::invalid_argument("MAC carrier endpoints must be distinct active fluid control volumes");
+			throw std::invalid_argument("MAC carrier endpoints must be distinct active fluid control volumes: a="+
+				std::to_string(dof_a)+" b="+std::to_string(dof_b)+" storage="+
+				std::to_string(system.storage_size)+" active="+
+				std::to_string(dof_a>=0&&dof_a<system.storage_size?system.active[dof_a]:0)+"/"+
+				std::to_string(dof_b>=0&&dof_b<system.storage_size?system.active[dof_b]:0)+" volume="+
+				std::to_string(dof_a>=0&&dof_a<system.storage_size?system.volume[dof_a]:-1)+"/"+
+				std::to_string(dof_b>=0&&dof_b<system.storage_size?system.volume[dof_b]:-1));
 		return 0.5*(system.volume[dof_a]+system.volume[dof_b]);
 	}
 

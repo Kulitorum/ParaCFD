@@ -96,7 +96,7 @@ set(OCC_BIN_DIR "${OPENCASCADE_DIR}/win64/vc14/bin")
 # .lib import libs we link; being PRIVATE on a STATIC lib, CMake still propagates them
 # (as $<LINK_ONLY>) to paracfd-gui / the geometry test so their final link resolves.
 set(OCC_LINK_TOOLKITS
-	TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKXSBase TKDESTEP)
+	TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKPrim TKXSBase TKDESTEP)
 
 # Full transitive runtime DLL closure of the link set (computed via dumpbin /dependents:
 # TKDESTEP.dll pulls in TKDE/TKXCAF/TKLCAF/TKShHealing → TKV3d/TKService → freetype, etc.).
@@ -128,7 +128,9 @@ function(paracfd_deploy_occ_dlls target)
 		VERBATIM)
 endfunction()
 
-add_library(paracfd_geometry STATIC src/core/geometry/step_import.cpp)
+add_library(paracfd_geometry STATIC
+	src/core/geometry/step_import.cpp
+	src/core/geometry/naca_step.cpp)
 set_target_properties(paracfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(paracfd_geometry PUBLIC cxx_std_20)
 # OCC headers are PRIVATE — consumers include only the OCC-free step_import.h.
@@ -153,6 +155,13 @@ add_executable(paraglider_probe tools/paraglider_probe.cpp)
 target_link_libraries(paraglider_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(paraglider_probe)
 
+# Reproducible analytic CAD for aerodynamic validation, independent of imported
+# paraglider topology and normals. The output is a regular STEP file consumed by
+# exactly the same OpenCascade/EB pipeline as a wing from another application.
+add_executable(naca_step_generator tools/naca_step_generator.cpp)
+target_link_libraries(naca_step_generator PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(naca_step_generator)
+
 # Full imported-wing convergence/performance diagnostic. This is intentionally not a
 # CTest because realistic STEP preprocessing and multi-step GPU runs are comparatively slow.
 add_executable(paraglider_case_probe tools/paraglider_case_probe.cpp)
@@ -175,6 +184,12 @@ add_executable(paraglider_geometry_probe tools/paraglider_geometry_probe.cpp)
 target_link_libraries(paraglider_geometry_probe PRIVATE libparacfd)
 add_test(NAME paraglider_geometry COMMAND paraglider_geometry_probe)
 set_tests_properties(paraglider_geometry PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+# Imported analytic airfoil regression: the closed NACA extrusion must retain a
+# separate internal fluid pressure component with no dead pressure mappings.
+add_test(NAME naca_geometry COMMAND paraglider_probe --config configs/naca2412.json
+	--expect-gauges 1 --expect-no-inactive-mappings)
+set_tests_properties(naca_geometry PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 add_executable(paraglider_gpu_probe tools/paraglider_gpu_probe.cpp)
 target_link_libraries(paraglider_gpu_probe PRIVATE libparacfd)

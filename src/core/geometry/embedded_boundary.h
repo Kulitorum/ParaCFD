@@ -50,6 +50,7 @@ namespace paracfd::core
 		double plane_offset = 0.0; // dot(n,x)-offset
 		int sampled_voxel_offset = -1; // fallback topology, resolution^3 FragmentRefs
 		std::uint8_t sampled_resolution = 0;
+		std::uint32_t source_face_id = ~std::uint32_t{0}; // common CAD face for an analytic local sheet
 	};
 
 	struct FluidFragment
@@ -62,6 +63,13 @@ namespace paracfd::core
 		int pressure_dof = -1;
 		int connection_offset = 0, connection_count = 0;
 		bool pressure_static = false; // isolated sealed pocket: retained state, excluded from projection
+		int surface_side_offset = 0, surface_side_count = 0; // host preprocessing provenance
+	};
+
+	struct FragmentSurfaceSide
+	{
+		std::uint32_t source_face_id = 0;
+		std::uint8_t side_mask = 0; // bit 0: minus, bit 1: plus; both is valid around a sheet termination
 	};
 
 	struct FragmentConnection
@@ -110,8 +118,12 @@ namespace paracfd::core
 		// This handles fabric exactly coincident with a Cartesian face without inventing
 		// zero-volume fragments. Any remaining open pieces use explicit apertures.
 		std::vector<std::uint8_t> cut_face_mask;
+		// Host-preprocessing detail: bits identify aligned faces that are only partly
+		// covered, so their disconnected open regions are emitted as apertures.
+		std::vector<std::uint8_t> partial_cut_face_mask;
 		std::vector<int> irregular_cells;
 		std::vector<FluidFragment> fragments;
+		std::vector<FragmentSurfaceSide> fragment_surface_sides;
 		std::vector<FragmentConnection> connections; // only faces touching irregular topology
 		std::vector<FaceAperture> apertures;
 		std::vector<SurfacePatch> patches;

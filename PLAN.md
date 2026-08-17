@@ -8,6 +8,7 @@ This file records actual migration status, not a claim that unfinished architect
 - Retain source STEP face ID and optional UV data per tessellated triangle.
 - Build a static triangle BVH with AABB, segment, nearest-point, and distance queries.
 - Add paraglider configuration and external-aero data structures.
+- Generate arbitrary four-digit NACA validation wings through OpenCascade and feed them back through the normal STEP/EB path.
 - Retain only mathematically reusable FP64 MAC kernels as immutable CPU/GPU validation references.
 
 ## B. Uniform brick grid — implemented foundation

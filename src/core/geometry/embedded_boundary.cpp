@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -97,6 +98,35 @@ namespace paracfd::core
 		{
 			const auto& c=eb.cells[cell];if(c.state==EbCellState::regular)return {regular_fragment(cell)};std::vector<FragmentRef> r;for(int i=0;i<c.fragment_count;++i)r.push_back(irregular_fragment(c.first_fragment+i));return r;
 		}
+
+		FragmentRef fragment_containing_point(const EmbeddedBoundary& eb,int cell,Vec3d point)
+		{
+			if(cell<0||cell>=static_cast<int>(eb.cells.size()))return invalid_fragment;const EbCellTopology& topology=eb.cells[cell];
+			if(topology.state==EbCellState::regular)return regular_fragment(cell);if(topology.state!=EbCellState::split)return invalid_fragment;
+			if(topology.sampled_resolution&&topology.sampled_voxel_offset>=0)
+			{
+				const int r=topology.sampled_resolution;const auto coord=eb.grid.cell_coord(cell);const Aabb3d box=eb.grid.cell_box(coord[0],coord[1],coord[2]);int q[3];
+				for(int axis=0;axis<3;++axis)q[axis]=std::clamp(static_cast<int>(std::floor((point[axis]-box.lo[axis])/eb.grid.h*r)),0,r-1);
+				const int sample=topology.sampled_voxel_offset+(q[2]*r+q[1])*r+q[0];return sample>=0&&sample<static_cast<int>(eb.sampled_voxel_fragments.size())?eb.sampled_voxel_fragments[sample]:invalid_fragment;
+			}
+			return eb.fragment_for_side(cell,dot(topology.plane_normal,point)-topology.plane_offset>=0?1:-1);
+		}
+
+		std::uint8_t fragment_surface_side_mask(const EmbeddedBoundary& eb,FragmentRef ref,std::uint32_t source_face_id)
+		{
+			if(fragment_is_regular(ref)||ref==invalid_fragment)return 0;const FluidFragment& fragment=eb.fragments[irregular_fragment_index(ref)];
+			for(int q=0;q<fragment.surface_side_count;++q){const FragmentSurfaceSide& side=eb.fragment_surface_sides[fragment.surface_side_offset+q];if(side.source_face_id==source_face_id)return side.side_mask;}return 0;
+		}
+
+		bool fragments_are_side_compatible(const EmbeddedBoundary& eb,const TriangleBvh& bvh,Vec3d face_point,int cell_a,FragmentRef a,int cell_b,FragmentRef b)
+		{
+			if(fragment_is_regular(a)||fragment_is_regular(b)||a==invalid_fragment||b==invalid_fragment)return true;const EbCellTopology& ta=eb.cells[cell_a];const EbCellTopology& tb=eb.cells[cell_b];
+			if(!ta.sampled_resolution&&!tb.sampled_resolution&&ta.source_face_id!=~std::uint32_t{0}&&ta.source_face_id==tb.source_face_id){const int side_a=eb.fragments[irregular_fragment_index(a)].side,side_b=eb.fragments[irregular_fragment_index(b)].side;if(side_a*side_b*dot(ta.plane_normal,tb.plane_normal)<=0)return false;}
+			auto opposite_sampled_side=[&](const EbCellTopology& analytic,FragmentRef analytic_ref,FragmentRef sampled_ref){if(analytic.source_face_id==~std::uint32_t{0}||analytic.sampled_resolution)return false;const int side=eb.fragments[irregular_fragment_index(analytic_ref)].side;const std::uint8_t mask=fragment_surface_side_mask(eb,sampled_ref,analytic.source_face_id),expected=side>0?2:1;if(!mask)return false;if(mask!=3)return !(mask&expected);const NearestSurfacePoint nearest=bvh.nearest(face_point,eb.grid.h);if(!nearest.found||nearest.source_face_id!=analytic.source_face_id)return false;const std::uint8_t local_side=dot(face_point-nearest.point,nearest.geometric_normal)>=0?2:1;return local_side!=expected;};
+			if(!ta.sampled_resolution&&tb.sampled_resolution&&opposite_sampled_side(ta,a,b))return false;if(ta.sampled_resolution&&!tb.sampled_resolution&&opposite_sampled_side(tb,b,a))return false;
+			if(ta.sampled_resolution&&tb.sampled_resolution){const FluidFragment& fa=eb.fragments[irregular_fragment_index(a)];for(int sa=0;sa<fa.surface_side_count;++sa){const FragmentSurfaceSide& side_a=eb.fragment_surface_sides[fa.surface_side_offset+sa];const std::uint8_t side_b=fragment_surface_side_mask(eb,b,side_a.source_face_id);if(side_b&&!(side_a.side_mask&side_b))return false;}}
+			return true;
+		}
 	}
 
 	FragmentRef EmbeddedBoundary::fragment_for_side(int cell,int side)const
@@ -110,7 +140,7 @@ namespace paracfd::core
 	{
 		if(!(grid.h>0)||grid.nx<=0||grid.ny<=0||grid.nz<=0||!(opt.min_volume_fraction>0&&opt.min_volume_fraction<0.5)||!(opt.min_aperture_area_fraction>=0&&opt.min_aperture_area_fraction<0.5))
 			throw std::invalid_argument("invalid embedded-boundary grid or stabilization fraction");
-		EmbeddedBoundary eb;eb.grid=grid;eb.min_volume_fraction=opt.min_volume_fraction;eb.min_aperture_area_fraction=opt.min_aperture_area_fraction;eb.cells.resize(grid.cell_count());eb.cut_face_mask.assign(grid.cell_count(),0);const double cell_volume=grid.h*grid.h*grid.h;
+		EmbeddedBoundary eb;eb.grid=grid;eb.min_volume_fraction=opt.min_volume_fraction;eb.min_aperture_area_fraction=opt.min_aperture_area_fraction;eb.cells.resize(grid.cell_count());eb.cut_face_mask.assign(grid.cell_count(),0);eb.partial_cut_face_mask.assign(grid.cell_count(),0);const double cell_volume=grid.h*grid.h*grid.h;
 		for(int k=0;k<grid.nz;++k)for(int j=0;j<grid.ny;++j)for(int i=0;i<grid.nx;++i)
 		{
 			const int cell=grid.cell_index(i,j,k);const Aabb3d box=grid.cell_box(i,j,k);std::vector<std::uint32_t> ids=bvh.query_aabb(box);if(ids.empty())continue;
@@ -140,7 +170,9 @@ namespace paracfd::core
 				{
 					double best=std::numeric_limits<double>::infinity();FragmentRef result=invalid_fragment;for(int z=0;z<n;++z)for(int y=0;y<n;++y)for(int x=0;x<n;++x){Vec3d centre=micro_center(x,y,z);if(side*dot(centre-point,normal)<=1e-12)continue;double distance=length2(centre-point);if(distance<best){best=distance;result=eb.sampled_voxel_fragments[topology.sampled_voxel_offset+micro_index(x,y,z)];}}return result;
 				};
-				for(const ClippedTriangle& cp:clipped){const BvhTriangle& t=bvh.triangle(cp.id);SurfacePatch patch;patch.source_triangle_id=cp.id;patch.source_face_id=t.source_face_id;patch.area=cp.area;patch.centroid=cp.centroid;patch.normal=cp.normal;patch.plus_fragment=nearest_side_fragment(cp.centroid,cp.normal,1);patch.minus_fragment=nearest_side_fragment(cp.centroid,cp.normal,-1);if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment)eb.patches.push_back(patch);}
+				std::vector<std::map<std::uint32_t,std::uint8_t>> surface_side_masks(component.size());
+				for(const ClippedTriangle& cp:clipped){const BvhTriangle& t=bvh.triangle(cp.id);SurfacePatch patch;patch.source_triangle_id=cp.id;patch.source_face_id=t.source_face_id;patch.area=cp.area;patch.centroid=cp.centroid;patch.normal=cp.normal;patch.plus_fragment=nearest_side_fragment(cp.centroid,cp.normal,1);patch.minus_fragment=nearest_side_fragment(cp.centroid,cp.normal,-1);if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment){surface_side_masks[irregular_fragment_index(patch.plus_fragment)-topology.first_fragment][t.source_face_id]|=2;surface_side_masks[irregular_fragment_index(patch.minus_fragment)-topology.first_fragment][t.source_face_id]|=1;eb.patches.push_back(patch);}}
+				for(int c=0;c<static_cast<int>(component.size());++c){FluidFragment& fragment=eb.fragments[topology.first_fragment+c];fragment.surface_side_offset=static_cast<int>(eb.fragment_surface_sides.size());for(const auto& item:surface_side_masks[c])eb.fragment_surface_sides.push_back({item.first,item.second});fragment.surface_side_count=static_cast<int>(eb.fragment_surface_sides.size())-fragment.surface_side_offset;}
 				return true;
 			};
 			// Fit an unoriented local plane. Align each triangle normal to the first one
@@ -181,21 +213,9 @@ namespace paracfd::core
 					{
 						eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,"overlapping Cartesian-aligned fabric exceeds one face; refine before aperture construction"});continue;
 					}
-					if(covered<section_area*(1.0-opt.surface_coverage_tolerance))
-					{
-						// A terminating sheet can cover only part of an otherwise regular Cartesian
-						// face. Suppress its implicit full-face flux, then reconstruct each connected
-						// opening as a separate sampled aperture. This remains fluid on both sides;
-						// only exact BVH segment hits block a face tile.
-						const int n=opt.complex_subdivisions;
-						if(n<2){eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,"partially covered Cartesian face needs complex_subdivisions >= 2"});continue;}
-						const int tile_count=n*n;std::vector<int> parent(tile_count,-1);std::vector<Vec3d> centre(tile_count);const double tile_h=grid.h/n,tile_area=tile_h*tile_h;const int tangent0=(aligned_axis+1)%3,tangent1=(aligned_axis+2)%3;
-						auto root=[&](int q){while(parent[q]!=q){parent[q]=parent[parent[q]];q=parent[q];}return q;};auto join=[&](int a,int b){a=root(a);b=root(b);if(a!=b)parent[std::max(a,b)]=std::min(a,b);};
-						for(int v=0;v<n;++v)for(int u=0;u<n;++u){const int q=v*n+u;Vec3d c{};c[aligned_axis]=box.hi[aligned_axis];c[tangent0]=box.lo[tangent0]+(u+0.5)*tile_h;c[tangent1]=box.lo[tangent1]+(v+0.5)*tile_h;Vec3d a=c,b=c;a[aligned_axis]-=0.5*tile_h;b[aligned_axis]+=0.5*tile_h;if(!bvh.intersect_segment(a,b,1e-9,1.0-1e-9).hit){parent[q]=q;centre[q]=c;}}
-						for(int v=0;v<n;++v)for(int u=0;u<n;++u){const int q=v*n+u;if(parent[q]<0)continue;if(u+1<n&&parent[q+1]>=0)join(q,q+1);if(v+1<n&&parent[q+n]>=0)join(q,q+n);}
-						struct Opening{double area=0;Vec3d weighted_centroid{};};std::map<int,Opening> openings;for(int q=0;q<tile_count;++q)if(parent[q]>=0){Opening& opening=openings[root(q)];opening.area+=tile_area;opening.weighted_centroid=opening.weighted_centroid+centre[q]*tile_area;}
-						for(const auto& item:openings){const double area=item.second.area;const Vec3d centroid=item.second.weighted_centroid/area;const FragmentRef a=regular_fragment(cell),b=regular_fragment(neighbour);eb.apertures.push_back({cell,static_cast<std::int8_t>(aligned_axis),area,centroid,a,b});eb.connections.push_back({a,b,area,centroid,grid.h,static_cast<std::int8_t>(aligned_axis)});}
-					}
+					const bool partial=covered<section_area*(1.0-opt.surface_coverage_tolerance);
+					if(partial&&opt.complex_subdivisions<2){eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,"partially covered Cartesian face needs complex_subdivisions >= 2"});continue;}
+					if(partial)eb.partial_cut_face_mask[cell]|=static_cast<std::uint8_t>(1u<<aligned_axis);
 					for(const auto& cp:clipped)
 					{
 						const auto& t=bvh.triangle(cp.id);Vec3d n=cp.normal;auto [patch_area,patch_centroid]=polygon_measure(cp.polygon,n);
@@ -210,7 +230,7 @@ namespace paracfd::core
 				if(sampled_fallback())continue;
 				eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,"fabric coverage is not one complete local sheet (termination, overlap, or sub-cell opening); refine rather than merge opposite sides"});continue;
 			}
-			EbCellTopology& ct=eb.cells[cell];ct.state=EbCellState::split;ct.first_fragment=static_cast<int>(eb.fragments.size());ct.fragment_count=2;ct.plane_normal=repn;ct.plane_offset=repd;eb.irregular_cells.push_back(cell);
+			EbCellTopology& ct=eb.cells[cell];ct.state=EbCellState::split;ct.first_fragment=static_cast<int>(eb.fragments.size());ct.fragment_count=2;ct.plane_normal=repn;ct.plane_offset=repd;ct.source_face_id=bvh.triangle(clipped.front().id).source_face_id;for(const ClippedTriangle& cp:clipped)if(bvh.triangle(cp.id).source_face_id!=ct.source_face_id){ct.source_face_id=~std::uint32_t{0};break;}eb.irregular_cells.push_back(cell);
 			eb.fragments.push_back({cell,minus.volume,minus.centroid,-1,irregular_fragment(ct.first_fragment),grid.cell_count()+ct.first_fragment,0,0});
 			eb.fragments.push_back({cell,plus.volume,plus.centroid,1,irregular_fragment(ct.first_fragment+1),grid.cell_count()+ct.first_fragment+1,0,0});
 			for(const auto& cp:clipped)
@@ -220,6 +240,20 @@ namespace paracfd::core
 			}
 		}
 
+		// Cartesian-aligned patches are discovered while cells are classified in index
+		// order. A neighbouring cell can subsequently become split by another sheet at a
+		// seam (for example an airfoil skin meeting its spanwise end cap). Resolve those
+		// provisional regular references against the completed topology before merging.
+		for(SurfacePatch& patch:eb.patches)
+		{
+			auto repair=[&](FragmentRef& ref,Vec3d direction)
+			{
+				if(!fragment_is_regular(ref))return;const int target_cell=regular_fragment_cell(ref);if(target_cell<0||target_cell>=grid.cell_count()||eb.cells[target_cell].state!=EbCellState::split)return;
+				const FragmentRef repaired=fragment_containing_point(eb,target_cell,patch.centroid+direction*(1e-6*grid.h));if(repaired==invalid_fragment)throw std::runtime_error("aligned fabric patch could not be assigned to the completed cell topology");ref=repaired;
+			};
+			repair(patch.plus_fragment,patch.normal);repair(patch.minus_fragment,patch.normal*-1.0);
+		}
+
 		// Split only those Cartesian faces that touch an irregular cell. Pairwise half-space clipping
 		// produces separate apertures when a membrane divides a MAC face.
 		for(int k=0;k<grid.nz;++k)for(int j=0;j<grid.ny;++j)for(int i=0;i<grid.nx;++i)
@@ -227,11 +261,13 @@ namespace paracfd::core
 			const int ca=grid.cell_index(i,j,k);if(eb.cells[ca].state==EbCellState::unresolved)continue;
 			for(int axis=0;axis<3;++axis)
 			{
-				int ni=i+(axis==0),nj=j+(axis==1),nk=k+(axis==2);if(ni>=grid.nx||nj>=grid.ny||nk>=grid.nz)continue;int cb=grid.cell_index(ni,nj,nk);if(eb.cells[cb].state==EbCellState::unresolved)continue;if(eb.cells[ca].state==EbCellState::regular&&eb.cells[cb].state==EbCellState::regular)continue;
-				const int sampled_resolution=std::max<int>(eb.cells[ca].sampled_resolution,eb.cells[cb].sampled_resolution);
+				int ni=i+(axis==0),nj=j+(axis==1),nk=k+(axis==2);if(ni>=grid.nx||nj>=grid.ny||nk>=grid.nz)continue;int cb=grid.cell_index(ni,nj,nk);if(eb.cells[cb].state==EbCellState::unresolved)continue;const bool explicitly_cut=(eb.cut_face_mask[ca]&(1u<<axis))!=0;const bool partial_cut=(eb.partial_cut_face_mask[ca]&(1u<<axis))!=0;if(explicitly_cut&&!partial_cut)continue;if(eb.cells[ca].state==EbCellState::regular&&eb.cells[cb].state==EbCellState::regular&&!explicitly_cut)continue;
+				const int sampled_resolution=std::max({static_cast<int>(eb.cells[ca].sampled_resolution),static_cast<int>(eb.cells[cb].sampled_resolution),partial_cut?opt.complex_subdivisions:0});
 				if(sampled_resolution>0)
 				{
-					struct ApertureAccumulation{double area=0;Vec3d weighted_centroid{};};std::map<std::pair<FragmentRef,FragmentRef>,ApertureAccumulation> groups;const double tile_h=grid.h/sampled_resolution,tile_area=tile_h*tile_h;const Aabb3d cell_box=grid.cell_box(i,j,k);
+					struct ApertureAccumulation{FragmentRef a=invalid_fragment,b=invalid_fragment;double area=0;Vec3d weighted_centroid{};};const int tile_count=sampled_resolution*sampled_resolution;std::vector<int> tile_parent(tile_count,-1);std::vector<FragmentRef> tile_a(tile_count,invalid_fragment),tile_b(tile_count,invalid_fragment);std::vector<Vec3d> tile_centres(tile_count);const double tile_h=grid.h/sampled_resolution,tile_area=tile_h*tile_h;const Aabb3d cell_box=grid.cell_box(i,j,k);
+					auto tile_root=[&](int q){while(tile_parent[q]!=q){tile_parent[q]=tile_parent[tile_parent[q]];q=tile_parent[q];}return q;};
+					auto join_tiles=[&](int a,int b){a=tile_root(a);b=tile_root(b);if(a!=b)tile_parent[std::max(a,b)]=std::min(a,b);};
 					auto face_fragment=[&](int owner,bool upper,Vec3d point,int u,int v)->FragmentRef
 					{
 						const EbCellTopology& topology=eb.cells[owner];if(topology.state==EbCellState::regular)return regular_fragment(owner);if(topology.sampled_resolution)
@@ -242,17 +278,25 @@ namespace paracfd::core
 					};
 					for(int v=0;v<sampled_resolution;++v)for(int u=0;u<sampled_resolution;++u)
 					{
-						Vec3d centre{};centre[axis]=cell_box.hi[axis];const int tangent0=(axis+1)%3,tangent1=(axis+2)%3;centre[tangent0]=cell_box.lo[tangent0]+(u+0.5)*tile_h;centre[tangent1]=cell_box.lo[tangent1]+(v+0.5)*tile_h;Vec3d left=centre,right=centre;left[axis]-=0.5*tile_h;right[axis]+=0.5*tile_h;if(bvh.intersect_segment(left,right,1e-9,1.0-1e-9).hit)continue;const FragmentRef a=face_fragment(ca,true,centre,u,v),b=face_fragment(cb,false,centre,u,v);if(a==invalid_fragment||b==invalid_fragment)continue;auto& accumulation=groups[{a,b}];accumulation.area+=tile_area;accumulation.weighted_centroid=accumulation.weighted_centroid+centre*tile_area;
+						const int tile=v*sampled_resolution+u;Vec3d centre{};centre[axis]=cell_box.hi[axis];const int tangent0=(axis+1)%3,tangent1=(axis+2)%3;centre[tangent0]=cell_box.lo[tangent0]+(u+0.5)*tile_h;centre[tangent1]=cell_box.lo[tangent1]+(v+0.5)*tile_h;Vec3d left=centre,right=centre;left[axis]-=0.5*tile_h;right[axis]+=0.5*tile_h;if(bvh.intersect_segment(left,right,1e-9,1.0-1e-9).hit)continue;const FragmentRef a=face_fragment(ca,true,centre,u,v),b=face_fragment(cb,false,centre,u,v);if(a==invalid_fragment||b==invalid_fragment||!fragments_are_side_compatible(eb,bvh,centre,ca,a,cb,b))continue;tile_parent[tile]=tile;tile_a[tile]=a;tile_b[tile]=b;tile_centres[tile]=centre;
 					}
-					for(const auto& item:groups){const FragmentRef a=item.first.first,b=item.first.second;const double area=item.second.area;const Vec3d centroid=item.second.weighted_centroid/area;eb.apertures.push_back({ca,static_cast<std::int8_t>(axis),area,centroid,a,b});eb.connections.push_back({a,b,area,centroid,std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(a)-eb.fragment_centroid(b)))),static_cast<std::int8_t>(axis)});}
+					for(int v=0;v<sampled_resolution;++v)for(int u=0;u<sampled_resolution;++u){const int tile=v*sampled_resolution+u;if(tile_parent[tile]<0)continue;if(u>0){const int other=tile-1;if(tile_parent[other]>=0&&tile_a[other]==tile_a[tile]&&tile_b[other]==tile_b[tile])join_tiles(tile,other);}if(v>0){const int other=tile-sampled_resolution;if(tile_parent[other]>=0&&tile_a[other]==tile_a[tile]&&tile_b[other]==tile_b[tile])join_tiles(tile,other);}}
+					std::map<int,ApertureAccumulation> groups;for(int tile=0;tile<tile_count;++tile)if(tile_parent[tile]>=0){const int root=tile_root(tile);auto& accumulation=groups[root];accumulation.a=tile_a[tile];accumulation.b=tile_b[tile];accumulation.area+=tile_area;accumulation.weighted_centroid=accumulation.weighted_centroid+tile_centres[tile]*tile_area;}
+					for(const auto& item:groups){const FragmentRef a=item.second.a,b=item.second.b;const double area=item.second.area;const Vec3d centroid=item.second.weighted_centroid/area;eb.apertures.push_back({ca,static_cast<std::int8_t>(axis),area,centroid,a,b});eb.connections.push_back({a,b,area,centroid,std::max(1e-12,std::sqrt(length2(eb.fragment_centroid(a)-eb.fragment_centroid(b)))),static_cast<std::int8_t>(axis)});}
 					continue;
 				}
 				for(FragmentRef a:cell_fragments(eb,ca))for(FragmentRef b:cell_fragments(eb,cb))
 				{
+					// Two tangent planes fitted independently to the same curved CAD face can
+					// overlap in a narrow strip. Pairing every half-space combination would then
+					// create a spurious aperture from the minus side of the membrane to its plus
+					// side. CAD provenance gives an unambiguous local correspondence without any
+					// global inside/outside assumption: reversing the face winding reverses both
+					// its normal and side labels, leaving this test invariant.
 					Polygon poly=face_square(grid.cell_box(i,j,k),axis,true);
 					if(!fragment_is_regular(a)){const FluidFragment& f=eb.fragments[irregular_fragment_index(a)];const auto& c=eb.cells[ca];poly=clip_polygon_plane(poly,{c.plane_normal,c.plane_offset},f.side,1e-11*grid.h);}
 					if(!fragment_is_regular(b)){const FluidFragment& f=eb.fragments[irregular_fragment_index(b)];const auto& c=eb.cells[cb];poly=clip_polygon_plane(poly,{c.plane_normal,c.plane_offset},f.side,1e-11*grid.h);}
-					auto [area,cent]=planar_polygon_measure(poly,axis);if(area<=1e-14*grid.h*grid.h)continue;FaceAperture ap{ca,static_cast<std::int8_t>(axis),area,cent,a,b};eb.apertures.push_back(ap);eb.connections.push_back({a,b,area,cent,std::max(1e-12,length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))>0?std::sqrt(length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))):grid.h),static_cast<std::int8_t>(axis)});
+					auto [area,cent]=planar_polygon_measure(poly,axis);if(area<=1e-14*grid.h*grid.h||!fragments_are_side_compatible(eb,bvh,cent,ca,a,cb,b))continue;FaceAperture ap{ca,static_cast<std::int8_t>(axis),area,cent,a,b};eb.apertures.push_back(ap);eb.connections.push_back({a,b,area,cent,std::max(1e-12,length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))>0?std::sqrt(length2(eb.fragment_centroid(a)-eb.fragment_centroid(b))):grid.h),static_cast<std::int8_t>(axis)});
 				}
 			}
 		}
@@ -292,6 +336,46 @@ namespace paracfd::core
 			const FragmentRef target=external!=invalid_fragment?external:irregular_fragment(aggregate);for(int fragment:members)if(fragment!=aggregate||external!=invalid_fragment){eb.fragments[fragment].merge_target=target;eb.fragments[fragment].pressure_dof=fragment_is_regular(target)?regular_fragment_cell(target):eb.fragments[irregular_fragment_index(target)].pressure_dof;}
 			if(external==invalid_fragment)eb.fragments[aggregate].pressure_static=true;
 		}
+
+		// Recompute pressure-static status from the FINAL merged aperture graph. The
+		// group-local decision above cannot see a later group choosing it as a merge
+		// target; retaining that provisional flag can leave an inactive root connected
+		// by a real aperture to active fluid. Preserve a static designation only when the
+		// final component contains static seeds exclusively and reaches no ordinary cell.
+		// A resolved closed cavity contains ordinary-sized roots, so it remains active and
+		// receives the pressure gauge added by the composite solver.
+		std::vector<unsigned char> provisional_static(fragment_count,0);for(int fragment=0;fragment<fragment_count;++fragment){provisional_static[fragment]=eb.fragments[fragment].pressure_static?1:0;eb.fragments[fragment].pressure_static=false;}
+		std::vector<int> component_parent(fragment_count),component_rank(fragment_count,0);
+		std::iota(component_parent.begin(),component_parent.end(),0);
+		auto component_root=[&](int q){while(component_parent[q]!=q){component_parent[q]=component_parent[component_parent[q]];q=component_parent[q];}return q;};
+		auto component_join=[&](int a,int b){a=component_root(a);b=component_root(b);if(a==b)return;if(component_rank[a]<component_rank[b])std::swap(a,b);component_parent[b]=a;if(component_rank[a]==component_rank[b])++component_rank[a];};
+		std::vector<unsigned char> resolving_final(fragment_count,0);
+		std::function<FragmentRef(FragmentRef)> final_ref=[&](FragmentRef ref)->FragmentRef
+		{
+			if(fragment_is_regular(ref))return ref;const int fragment=irregular_fragment_index(ref);
+			if(fragment<0||fragment>=fragment_count)throw std::runtime_error("invalid final EB merge reference");
+			const FragmentRef target=eb.fragments[fragment].merge_target;if(target==ref)return ref;
+			if(resolving_final[fragment])throw std::runtime_error("cyclic final EB merge reference");
+			resolving_final[fragment]=1;const FragmentRef result=final_ref(target);resolving_final[fragment]=0;return result;
+		};
+		for(const FaceAperture& aperture:eb.apertures)
+		{
+			const FragmentRef a=final_ref(aperture.fragment_a),b=final_ref(aperture.fragment_b);
+			if(!fragment_is_regular(a)&&!fragment_is_regular(b))component_join(irregular_fragment_index(a),irregular_fragment_index(b));
+		}
+		std::vector<unsigned char> touches_regular(fragment_count,0),has_static_seed(fragment_count,0),has_active_root(fragment_count,0);
+		for(const FaceAperture& aperture:eb.apertures)
+		{
+			const FragmentRef a=final_ref(aperture.fragment_a),b=final_ref(aperture.fragment_b);
+			if(fragment_is_regular(a)&&!fragment_is_regular(b))touches_regular[component_root(irregular_fragment_index(b))]=1;
+			if(fragment_is_regular(b)&&!fragment_is_regular(a))touches_regular[component_root(irregular_fragment_index(a))]=1;
+		}
+		for(int fragment=0;fragment<fragment_count;++fragment)
+		{
+			const FragmentRef root=final_ref(irregular_fragment(fragment));
+			if(!fragment_is_regular(root)&&root==irregular_fragment(fragment)){const int component=component_root(fragment);if(provisional_static[fragment])has_static_seed[component]=1;else has_active_root[component]=1;}
+		}
+		for(int fragment=0;fragment<fragment_count;++fragment){const FragmentRef root=final_ref(irregular_fragment(fragment));if(!fragment_is_regular(root)&&root==irregular_fragment(fragment)){const int component=component_root(fragment);if(!touches_regular[component]&&has_static_seed[component]&&!has_active_root[component])eb.fragments[fragment].pressure_static=true;}}
 
 		// Compact per-fragment connection ranges, ordered by owning irregular endpoint. Connections
 		// remain unique face fluxes; the offsets are a work-list convenience, not duplicate physics.

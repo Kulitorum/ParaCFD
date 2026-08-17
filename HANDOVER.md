@@ -12,9 +12,14 @@ The new timestep is conservative control-volume advection -> same-side molecular
 
 The current 47,997-triangle PlanB fixture exposed the explicit wall update by alternating its leading-edge pressure field every few steps and eventually exciting the old full-wing collapse. Disabling wall shear removed the mode, while disabling LES did not. With implicit wall coupling, full-wing production runs remain bounded through 1,500 steps at both -6 and -3 degrees AoA. At -6 degrees the regular/compact maxima are `12.34/12.28 m/s`, delta-Cp range is `1.64`, max/RMS divergence is `1.47e-4 / 3.83e-6 s^-1`, and total/pressure/viscous `[Fx,Fz]` is `[104.61,-85.46] / [97.43,-85.72] / [7.18,0.26] N`. At -3 degrees the corresponding maxima are `12.16/12.24 m/s`, delta-Cp range `1.43`, and total vertical force `-56.61 N`. The normalized area-weighted frame-to-frame delta-Cp RMS decays to `0.0040` and `0.0021`. Wall matrices are pooled only for the roughly 23,000 unique wall-adjacent CVs, not all 4.48 million pressure slots, so persistent FP32 storage is 654.09 MiB in the -6-degree case. These forces are transient and grid-dependent, not validated aerodynamic results.
 
+### Analytic airfoil validation
+
+`naca_step_generator` now creates any valid four-digit NACA section as a finite-span OpenCascade STEP wing (`--naca`, `--chord`, `--span`, and `--points-per-side`). The checked-in NACA 2412 case has one metre chord and 2.03 metre span. It traverses the normal STEP importer and requires one disconnected interior pressure gauge with no inactive EB edge or patch-side mappings. At 0.03125 m finest spacing, short runs at `-2/0/+2` degrees produce `CL=-0.0030/0.1111/0.1810`; this is the expected positive lift slope and near -2-degree zero-lift angle for the cambered section. Treat it as a sign/topology/resolution gate, not a converged coefficient benchmark. The coarser 0.0625 m case resolves only about two cells through maximum thickness and is not adequate for an angle sweep.
+
 Implemented:
 
 - OpenCascade STEP tessellation in metres with triangle-to-face provenance and optional UVs;
+- deterministic OpenCascade four-digit NACA STEP generation and a checked-in NACA 2412 geometry/topology regression;
 - affine-safe placement, static double-precision triangle BVH, face-only bbox/domain sizing (STEP wires do not affect the domain), and a shared FP32-canonical zero-origin frame that gives GUI/probes identical clipping coordinates;
 - static balanced 2:1 brick AMR, pooled FP32 SoA fields, same-level halos, hash lookup, restriction/prolongation, and conservative four-tile coarse/fine interfaces;
 - a sparse cross-brick EB atlas, so brick boundaries are not walls and covered coarse cells are excluded by finest-owner selection;

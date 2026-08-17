@@ -27,6 +27,8 @@ Missing triangles are openings. There is no separate interior-air material: ram-
 
 The OpenCascade linear deflection is exposed in the paraglider configuration. The current default is 2 mm, which is still substantially finer than the initial 62.5 mm CFD surface cells and avoids unnecessary million-triangle previews. It should eventually be derived from finest CFD spacing.
 
+`naca_step_generator` creates deterministic finite-span, closed four-digit NACA validation wings through OpenCascade. It accepts the profile code, chord, span, and section sampling on the command line and writes an ordinary millimetre-based STEP file that returns through the same importer, placement, tessellation, BVH, AMR, and EB path as external CAD. This is a separate analytical test-geometry source; ParaCFD never extrudes an imported paraglider surface or substitutes this geometry for the supplied canopy.
+
 ## Grid and fields
 
 The new grid path is static block-structured Cartesian AMR with refinement ratio 2:1. A brick has uniform cells and compact metadata: level, integer coordinate, origin, spacing, six same-level neighbours, parent, children, and boundary/embedded-boundary flags. Per-level integer-coordinate hash tables locate bricks without tree traversal or binary searches.
@@ -87,6 +89,7 @@ Important probes are:
 - `paraglider_flow_probe`: dynamic normal/parallel/inclined plates, projection divergence, opened-cavity connectivity, and AMR-versus-uniform force comparison;
 - `paraglider_probe`: STEP/config preprocessing diagnostics;
 - `paraglider_case_probe`: imported-wing multi-step force, CFL, conservation, and performance history (manual long-running diagnostic);
+- `naca_step_generator`: OpenCascade STEP generator for any valid four-digit NACA code, with configurable chord/span/section sampling;
 - `parity_probe`: CPU/GPU parity and immutable snapshots for the reusable FP64 uniform-MAC reference kernels.
 
 `paraglider_case_probe --physical-time T --max-levels N` runs an imported wing to a common physical time instead of comparing arbitrary step counts. If `--steps` is also given it is a hard safety limit and failure to reach `T` returns nonzero. A final `[paraglider-case-summary]` line is stable key/value output for convergence scripts; velocity maxima on that line are explicitly labelled pre-step because they are the values used to choose the final CFL timestep.
@@ -95,6 +98,7 @@ Important probes are:
 
 `configs/paraglider.json` is the new configuration reference.
 `configs/planb_parakite.json` is the checked-in PlanB acceptance case; its -90-degree Z placement maps the confirmed leading-edge direction (-Y) to ParaCFD upstream (-X), against the +X freestream velocity.
+`configs/naca2412.json` and `Test-Data/NACA2412_C1_S2p03.step` are the reproducible cambered-airfoil validation case. Regenerate a profile with, for example, `naca_step_generator --naca 4415 --chord 0.8 --span 1.37 --points-per-side 65 --output NACA4415.step`.
 
 ## Solver path status
 
@@ -103,6 +107,8 @@ The GUI and default `ExternalAeroCore` execution use the GPU-resident conservati
 The pressure feedback is not a runaway guard or velocity cap. Each persistent cell component receives the aperture-area-weighted mean of the exact face-normal pressure correction applied by the composite projection, including compact regular/fragment perimeter connections as well as EB and coarse/fine apertures. A generic least-squares gradient and a direct raw pressure-traction update were rejected on the imported wing because highly non-orthogonal merged-fragment geometry made those cell updates incompatible with the projected face fluxes. The direct traction operator remains a manufactured force/reaction reference. Conservative CFL now uses the exact maximum control-volume donor rate, `sum(outward volumetric flux) / volume`, over regular faces, EB apertures, coarse/fine tiles, and physical X boundaries.
 
 On the current 47,997-triangle PlanB fixture, the pressure-compatible conservative path completed 1,000 FP32 steps to 1.940304 s without the former collapse or compact-aperture growth: regular/compact maxima settled at 12.241/13.579 m/s, max/RMS divergence was `1.94e-4 / 3.94e-6 s^-1`, net flux was `-1.52e-4 m^3/s`, and the last measured uncontended step took 15.49 ms including 12.85 ms projection. Persistent storage was 651.34 MiB. Total/pressure/viscous force was `[104.288,-5.355,-57.971] / [96.473,-5.359,-57.996] / [7.816,0.004,0.025]` N. At the 200-step, 0.332894 s checkpoint, FP32 and FP64 total streamwise force differ by about 0.6 ppm (111.078862 versus 111.078795 N); FP64 uses 1224.78 MiB. The exact reconstruction-preservation test is `3.73e-8` FP32 and `6.94e-17` FP64. The first evolved pressure load is reduced from the previous incompatible reconstruction's roughly 10.2 kN to 1.39 kN, but the initial uniform-flow projection still creates a large short-lived physical/numerical impulse. Coupled startup plus grid/domain/force convergence remain mandatory before promotion.
+
+The checked-in NACA 2412 validation wing is a one-metre-chord, 2.03-metre-span OpenCascade extrusion with four source CAD faces and one disconnected internal pressure component. Its geometry regression requires exactly one pressure gauge and zero inactive aperture/patch mappings. At `h=0.03125 m`, short 10 m/s runs give `CL=-0.0030, 0.1111, 0.1810` at `-2, 0, +2` degrees respectively: the cambered section has a near `-2 degree` zero-lift angle and a positive finite-wing lift slope. These 100--150-step samples validate sign, orientation, and pressure-side topology only; they are not converged reference coefficients. At `h=0.0625 m` the profile has only about two cells through its maximum thickness and its angle response is visibly grid-dependent.
 
 ## Current limitations
 
