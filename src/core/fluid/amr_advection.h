@@ -11,6 +11,7 @@
 namespace paracfd::core
 {
 	struct CompositeAmrPressureSystem;
+	struct CompositeAmrFluxes;
 	class DeviceAmrMacFaceMap;
 
 	struct AmrMacFaceAddress
@@ -196,14 +197,19 @@ namespace paracfd::core
 	// owns staggered regular-face and compact aperture mass fluxes; those fluxes
 	// transport this vector state between the actual fluid control volumes. This
 	// avoids inventing a staggered dual-volume mortar at the regular/fragment edge.
-	// The first implementation is deliberately one uniform AMR level: ordinary
-	// connections remain an implicit brick kernel and only EB aperture/perimeter
-	// connections are materialized.
+	// Ordinary same-level connections remain implicit brick kernels. Only static
+	// 2:1 interface tiles and EB aperture/perimeter connections are materialized.
 	struct CompositeCellMomentumState
 	{
 		std::vector<Real> x, y, z;
 	};
 
+	void conservative_composite_cell_momentum_cpu(
+		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
+		const CompositeAmrFluxes& fluxes, double dt,
+		CompositeCellMomentumState& state, bool external_aero = false,
+		double freestream_speed = 0.0);
+	// One-level convenience used by uniform-grid manufactured fixtures.
 	void conservative_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
 		const std::vector<double>& embedded_velocity, double dt,
@@ -221,11 +227,15 @@ namespace paracfd::core
 
 		void upload_state(const CompositeCellMomentumState& state);
 		void download_state(CompositeCellMomentumState& state) const;
+		void step(const Real* coarse_fine_velocity, const Real* embedded_velocity,
+			Real dt, bool external_aero = false, Real freestream_speed = Real(0));
+		// Convenience for a hierarchy with no coarse/fine connections.
 		void step(const Real* embedded_velocity, Real dt, bool external_aero = false,
 			Real freestream_speed = Real(0));
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
+		int coarse_fine_connection_count() const { return coarse_fine_count_; }
 		std::size_t bytes() const;
 
 	private:
@@ -239,12 +249,14 @@ namespace paracfd::core
 			*compact_plus_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
 		Real* embedded_area_ = nullptr;
+		int *coarse_fine_a_ = nullptr, *coarse_fine_b_ = nullptr;
+		Real* coarse_fine_area_ = nullptr;
 		int *regular_a_ = nullptr, *regular_b_ = nullptr;
 		Real* regular_area_ = nullptr;
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
-		int storage_size_ = 0, base_cell_count_ = 0, level_offset_ = 0;
-		int embedded_count_ = 0, regular_count_ = 0;
+		int storage_size_ = 0;
+		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 
