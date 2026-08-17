@@ -444,7 +444,10 @@ namespace paracfd::gui
 		{
 			paracfd::core::ExternalAeroStepStats stats = core_->initialize();
 			publishFlowField();
-			publish(stats, true);
+			// The zero-time projection creates a divergence-free, impermeable initial
+			// velocity. Its pressure is the impulse required to create that state from
+			// uniform flow, not an evolved aerodynamic pressure field.
+			publish(stats, false);
 			if (!stats.pressure.converged)
 			{
 				char message[192];
@@ -473,7 +476,7 @@ namespace paracfd::gui
 				++steps_;
 				// Surface loads require a deliberately throttled pressure download; scalar
 				// solver telemetry remains available after every GPU step.
-				const bool publish_fields = (steps_ % 10) == 0 || !stats.pressure.converged;
+				const bool publish_fields = steps_ == 1 || (steps_ % 10) == 0 || !stats.pressure.converged;
 				if (publish_fields) publishFlowField();
 				if (!stats.pressure.converged) playing_.store(false);
 				publish(stats, publish_fields);
