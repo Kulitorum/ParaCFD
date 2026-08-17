@@ -253,10 +253,19 @@ namespace paracfd::gui
 		out.cp_min = snapshot_.cp_min;
 		out.cp_max = snapshot_.cp_max;
 		out.pressure_force = snapshot_.pressure_force;
+		out.viscous_force = snapshot_.viscous_force;
+		out.total_force = snapshot_.total_force;
+		out.viscous_loads_valid = snapshot_.viscous_loads_valid;
 		out.coefficients_valid = snapshot_.coefficients_valid;
 		out.cd_pressure = snapshot_.cd_pressure;
 		out.cs_pressure = snapshot_.cs_pressure;
 		out.cl_pressure = snapshot_.cl_pressure;
+		out.cd_viscous = snapshot_.cd_viscous;
+		out.cs_viscous = snapshot_.cs_viscous;
+		out.cl_viscous = snapshot_.cl_viscous;
+		out.cd = snapshot_.cd;
+		out.cs = snapshot_.cs;
+		out.cl = snapshot_.cl;
 		if (snapshot_.surface_generation != surface_generation)
 		{
 			out.cp_plus = snapshot_.cp_plus;
@@ -279,7 +288,7 @@ namespace paracfd::gui
 		const bool have_surface = include_surface && stats.pressure.converged;
 		if (have_surface)
 		{
-			loads = core_->pressure_loads();
+			loads = core_->aerodynamic_loads();
 			conservation = core_->conservation_stats();
 			const float missing=std::numeric_limits<float>::quiet_NaN();
 			cp_plus.assign(loads.triangles.size(),missing);
@@ -300,7 +309,7 @@ namespace paracfd::gui
 			side_cp_min=-side_maximum;
 			side_cp_max=side_maximum;
 		}
-		if(have_surface)updateSettling(stats.physical_time,loads.pressure_force,conservation);
+		if(have_surface)updateSettling(stats.physical_time,loads.viscous_loads_valid?loads.total_force:loads.pressure_force,conservation);
 
 		std::lock_guard lock(snapshot_mutex_);
 		snapshot_.steps = steps_;
@@ -330,10 +339,19 @@ namespace paracfd::gui
 			snapshot_.side_cp_min=side_cp_min;
 			snapshot_.side_cp_max=side_cp_max;
 			snapshot_.pressure_force = loads.pressure_force;
+			snapshot_.viscous_force = loads.viscous_force;
+			snapshot_.total_force = loads.total_force;
+			snapshot_.viscous_loads_valid = loads.viscous_loads_valid;
 			snapshot_.coefficients_valid = loads.force_coefficients_valid;
 			snapshot_.cd_pressure = loads.cd_pressure;
 			snapshot_.cs_pressure = loads.cs_pressure;
 			snapshot_.cl_pressure = loads.cl_pressure;
+			snapshot_.cd_viscous = loads.cd_viscous;
+			snapshot_.cs_viscous = loads.cs_viscous;
+			snapshot_.cl_viscous = loads.cl_viscous;
+			snapshot_.cd = loads.cd;
+			snapshot_.cs = loads.cs;
+			snapshot_.cl = loads.cl;
 			snapshot_.conservation_valid = true;
 			snapshot_.max_abs_divergence = conservation.max_abs_divergence;
 			snapshot_.volume_weighted_rms_divergence = conservation.volume_weighted_rms_divergence;

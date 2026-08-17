@@ -30,6 +30,7 @@ namespace paracfd::core
 		bool side_safe_fabric_transport = true;
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
+		bool smooth_fabric_wall_applied = false;
 	};
 	struct ExternalAeroConservationStats
 	{
@@ -55,6 +56,7 @@ namespace paracfd::core
 		ExternalAeroStepStats initialize();
 		ExternalAeroStepStats step();
 		AerodynamicLoads pressure_loads(double pressure_reference = 0.0) const;
+		AerodynamicLoads aerodynamic_loads(double pressure_reference = 0.0) const;
 		void download_fields(AmrHostFields& host) const;
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		void download_pressure(std::vector<double>& host) const; // throttled validation/debug download
@@ -87,5 +89,6 @@ namespace paracfd::core
 		std::unique_ptr<DeviceCompositeAmrProjection> projection_;
 		double physical_time_ = 0.0;
 		bool initialized_ = false;
+		bool smooth_fabric_wall_applied_ = false;
 	};
 }

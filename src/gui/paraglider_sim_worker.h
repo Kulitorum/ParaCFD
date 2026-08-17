@@ -40,8 +40,12 @@ namespace paracfd::gui
 		float cp_min = -1,cp_max = 1;
 		float side_cp_min = -1,side_cp_max = 1;
 		paracfd::core::Vec3d pressure_force{};
+		paracfd::core::Vec3d viscous_force{},total_force{};
+		bool viscous_loads_valid = false;
 		bool coefficients_valid = false;
 		double cd_pressure = 0,cs_pressure = 0,cl_pressure = 0;
+		double cd_viscous = 0,cs_viscous = 0,cl_viscous = 0;
+		double cd = 0,cs = 0,cl = 0;
 	};
 
 	class ParagliderSimWorker final : public QObject

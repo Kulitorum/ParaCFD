@@ -42,4 +42,13 @@ namespace paracfd::core
 		for(std::size_t i=0;i<ntri;++i)if(area_sum[i]>0){auto& tr=out.triangles[i];tr.p_plus=plus_sum[i]/area_sum[i];tr.p_minus=minus_sum[i]/area_sum[i];tr.delta_p=tr.p_minus-tr.p_plus;if(q>0){tr.cp_plus=(tr.p_plus-pref)/q;tr.cp_minus=(tr.p_minus-pref)/q;tr.delta_cp=tr.delta_p/q;}}
 		out.pressure_drag=out.pressure_force.x;out.pressure_side=out.pressure_force.y;out.pressure_lift=out.pressure_force.z;if(q>0&&ref.area>0){out.force_coefficients_valid=true;out.cd_pressure=out.pressure_drag/(q*ref.area);out.cs_pressure=out.pressure_side/(q*ref.area);out.cl_pressure=out.pressure_lift/(q*ref.area);}return out;
 	}
+
+	void accumulate_viscous_loads(AerodynamicLoads& out,const std::vector<SmoothFabricWallPatchLoad>& patches,const FreestreamConfig& fs,const AeroReferenceConfig& ref)
+	{
+		for(const auto& patch:patches)
+		{
+			if(patch.source_triangle_id>=out.triangles.size())continue;out.viscous_force=out.viscous_force+patch.force;out.viscous_moment=out.viscous_moment+cross(patch.centroid-ref.moment_origin,patch.force);out.triangles[patch.source_triangle_id].viscous_force=out.triangles[patch.source_triangle_id].viscous_force+patch.force;
+		}
+		out.viscous_drag=out.viscous_force.x;out.viscous_side=out.viscous_force.y;out.viscous_lift=out.viscous_force.z;out.total_force=out.pressure_force+out.viscous_force;out.total_moment=out.pressure_moment+out.viscous_moment;out.drag=out.total_force.x;out.side=out.total_force.y;out.lift=out.total_force.z;out.viscous_loads_valid=true;const double q=0.5*fs.rho*fs.speed*fs.speed;if(q>0&&ref.area>0){out.cd_viscous=out.viscous_drag/(q*ref.area);out.cs_viscous=out.viscous_side/(q*ref.area);out.cl_viscous=out.viscous_lift/(q*ref.area);out.cd=out.drag/(q*ref.area);out.cs=out.side/(q*ref.area);out.cl=out.lift/(q*ref.area);}
+	}
 }

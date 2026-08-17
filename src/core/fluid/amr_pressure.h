@@ -124,6 +124,13 @@ namespace paracfd::core
 		int plus_dof = -1;
 		int minus_dof = -1;
 	};
+	struct SmoothFabricWallPatchLoad
+	{
+		std::uint32_t source_triangle_id = 0;
+		std::uint32_t source_face_id = 0;
+		Vec3d centroid{};
+		Vec3d force{}; // force exerted by the fluid on this fabric patch [N]
+	};
 	// Host-only lookup retained for diagnostics and slice rendering. The timestep never
 	// traverses these vectors: regular CUDA kernels and compact EB work lists remain
 	// unchanged. Entries align with AmrEmbeddedBoundaryAtlas::levels.
@@ -267,11 +274,16 @@ namespace paracfd::core
 		// full-domain CSR. A component-collocated multidimensional least-squares graph
 		// reconstruction supplies all nine irregular-region velocity gradients. The
 		// combined update obeys local same-side stencil bounds.
-		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
-		// Staged arbitrary-orientation smooth-wall model. It uses Spalding's law
-		// at the actual patch-to-fragment distance and is kept separate from the
-		// production molecular wall flux until viscous traction is accumulated.
+		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs,
+			bool apply_molecular_fabric_wall = true);
+		// Production arbitrary-orientation smooth-wall model. It uses Spalding's law
+		// at the actual patch-to-fragment distance and retains the opposite patch load.
 		void apply_smooth_fabric_wall_model(Real dt, Real molecular_nu);
+		// Throttled results/diagnostics for the wall path. Patch loads are the
+		// equal-and-opposite reaction of the modelled fluid shear; momentum excludes rho.
+		void download_smooth_fabric_wall_loads(Real rho,
+			std::vector<SmoothFabricWallPatchLoad>& host) const;
+		std::array<double, 3> fabric_wall_physical_momentum() const;
 		// Validation path for the internal conservative compact momentum contract. It gathers
 		// fragment-centred vector momentum from actual aperture/carrier dual masses,
 		// applies one equal-and-opposite first-order donor transfer per EB aperture,
@@ -355,10 +367,18 @@ namespace paracfd::core
 		int *wall_carrier_node_ = nullptr, *wall_carrier_level_ = nullptr;
 		std::uint64_t* wall_carrier_index_ = nullptr;
 		std::int8_t* wall_carrier_axis_ = nullptr;
+		int* wall_unique_carrier_level_ = nullptr;
+		std::uint64_t* wall_unique_carrier_index_ = nullptr;
+		std::int8_t* wall_unique_carrier_axis_ = nullptr;
 		Real *wall_carrier_mass_ = nullptr, *wall_node_rate_ = nullptr,
 			*wall_node_axis_sum_ = nullptr, *wall_node_axis_weight_ = nullptr,
 			*wall_node_velocity_delta_ = nullptr, *wall_patch_normal_ = nullptr,
-			*wall_patch_area_over_volume_ = nullptr, *wall_patch_distance_ = nullptr;
+			*wall_patch_area_ = nullptr,
+			*wall_patch_distance_ = nullptr, *wall_patch_force_per_density_ = nullptr,
+			*wall_unique_carrier_mass_ = nullptr;
+		double* wall_momentum_scratch_ = nullptr;
+		std::vector<std::uint32_t> wall_patch_source_triangle_id_, wall_patch_source_face_id_;
+		std::vector<Vec3d> wall_patch_centroid_;
 		std::vector<int> brick_counts_;
 		std::vector<std::uint8_t> embedded_gradient_rank_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
@@ -368,7 +388,7 @@ namespace paracfd::core
 		int embedded_high_order_stencil_count_ = 0;
 		int embedded_least_squares_full_rank_count_ = 0;
 		int fabric_wall_node_count_ = 0, fabric_wall_carrier_count_ = 0,
-			fabric_wall_patch_count_ = 0;
+			fabric_wall_patch_count_ = 0, fabric_wall_unique_carrier_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
