@@ -279,6 +279,13 @@ namespace paracfd::core
 		for(std::size_t node=0;node<n;++node){velocity_x[node]+=dx[node]/dual_volume[node];velocity_y[node]+=dy[node]/dual_volume[node];velocity_z[node]+=dz[node]/dual_volume[node];}
 	}
 
+	double regular_mac_dual_volume(const AmrHierarchy& hierarchy,const AmrMacFaceAddress& address)
+	{
+		if(address.level<0||address.level>=static_cast<int>(hierarchy.levels().size())||address.component<0||address.component>2)throw std::invalid_argument("regular MAC dual-volume address outside hierarchy");const AmrLevel& level=hierarchy.levels()[address.level];if(address.brick<0||address.brick>=static_cast<int>(level.bricks.size())||!level.bricks[address.brick].active())throw std::invalid_argument("regular MAC dual volume requires an active brick");const int bs=hierarchy.brick_size(),coordinate[3]={address.i,address.j,address.k},extent[3]={address.component==0?bs+1:bs,address.component==1?bs+1:bs,address.component==2?bs+1:bs};for(int axis=0;axis<3;++axis)if(coordinate[axis]<0||coordinate[axis]>=extent[axis])throw std::invalid_argument("regular MAC dual-volume local face index outside brick");const double half_volume=0.5*level.h*level.h*level.h;double volume=0;
+		for(int side=-1;side<=1;side+=2){int cell[3]={address.i,address.j,address.k};cell[address.component]+=side<0?-1:0;int brick=address.brick;if(cell[address.component]<0||cell[address.component]>=bs){const int face=2*address.component+(side>0),neighbour=level.bricks[brick].same_level_neighbor[face];if(neighbour<0||!level.bricks[neighbour].active())continue;if(cell[address.component]<0)cell[address.component]+=bs;else cell[address.component]-=bs;brick=neighbour;}if(cell[0]>=0&&cell[1]>=0&&cell[2]>=0&&cell[0]<bs&&cell[1]<bs&&cell[2]<bs&&level.bricks[brick].active())volume+=half_volume;}
+		return volume;
+	}
+
 	void conservative_pairwise_scalar_cpu(const std::vector<double>& dual_volume,
 		const std::vector<PairwiseMomentumConnection>& connections,double dt,
 		std::vector<double>& velocity)

@@ -17,6 +17,12 @@ namespace paracfd::core
 		int component = -1;
 		int i = -1, j = -1, k = -1;
 	};
+	// Volume owned by the regular portion of a staggered face control volume: one
+	// half of each active same-level pressure cell adjacent along the component axis.
+	// A normal 2:1 interface tile adds/replaces the missing covered-side contribution
+	// separately; physical-boundary faces intentionally own one half cell.
+	double regular_mac_dual_volume(const AmrHierarchy& hierarchy,
+		const AmrMacFaceAddress& address);
 
 	// One normal-velocity tile at a 2:1 interface. The fine interface face owns the
 	// transported state; the coincident coarse face is an area-mean alias. Transport
