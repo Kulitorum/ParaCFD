@@ -11,6 +11,7 @@
 namespace paracfd::core
 {
 	struct CompositeAmrPressureSystem;
+	class DeviceAmrMacFaceMap;
 
 	struct AmrMacFaceAddress
 	{
@@ -190,6 +191,62 @@ namespace paracfd::core
 	};
 	std::vector<CompositeEbMomentumRegularConnection>
 		build_composite_eb_momentum_regular_connections(const CompositeAmrPressureSystem& system);
+
+	// Cell/fragment-centred conservative momentum state. Pressure projection still
+	// owns staggered regular-face and compact aperture mass fluxes; those fluxes
+	// transport this vector state between the actual fluid control volumes. This
+	// avoids inventing a staggered dual-volume mortar at the regular/fragment edge.
+	// The first implementation is deliberately one uniform AMR level: ordinary
+	// connections remain an implicit brick kernel and only EB aperture/perimeter
+	// connections are materialized.
+	struct CompositeCellMomentumState
+	{
+		std::vector<Real> x, y, z;
+	};
+
+	void conservative_composite_cell_momentum_cpu(
+		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
+		const std::vector<double>& embedded_velocity, double dt,
+		CompositeCellMomentumState& state, bool external_aero = false,
+		double freestream_speed = 0.0);
+
+	class DeviceCompositeCellMomentumTransport
+	{
+	public:
+		DeviceCompositeCellMomentumTransport(const CompositeAmrPressureSystem& system,
+			DeviceAmrFields& fields);
+		~DeviceCompositeCellMomentumTransport();
+		DeviceCompositeCellMomentumTransport(const DeviceCompositeCellMomentumTransport&) = delete;
+		DeviceCompositeCellMomentumTransport& operator=(const DeviceCompositeCellMomentumTransport&) = delete;
+
+		void upload_state(const CompositeCellMomentumState& state);
+		void download_state(CompositeCellMomentumState& state) const;
+		void step(const Real* embedded_velocity, Real dt, bool external_aero = false,
+			Real freestream_speed = Real(0));
+		std::array<double, 3> momentum() const;
+		int regular_compact_connection_count() const { return regular_count_; }
+		int embedded_connection_count() const { return embedded_count_; }
+		std::size_t bytes() const;
+
+	private:
+		const CompositeAmrPressureSystem* system_ = nullptr;
+		DeviceAmrFields* fields_ = nullptr;
+		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
+		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr;
+		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
+		Real *volume_ = nullptr, *regular_velocity_ = nullptr;
+		unsigned char *active_ = nullptr, *cut_face_mask_ = nullptr,
+			*compact_plus_mask_ = nullptr;
+		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
+		Real* embedded_area_ = nullptr;
+		int *regular_a_ = nullptr, *regular_b_ = nullptr;
+		Real* regular_area_ = nullptr;
+		std::vector<double> volume_host_;
+		std::vector<unsigned char> active_host_;
+		int storage_size_ = 0, base_cell_count_ = 0, level_offset_ = 0;
+		int embedded_count_ = 0, regular_count_ = 0;
+		std::size_t bytes_ = 0;
+	};
 
 	// GPU twin of conservative_pairwise_momentum_cpu. Static volumes and topology are
 	// uploaded once; only the per-step signed connection velocities are supplied by the
