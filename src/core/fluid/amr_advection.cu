@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace paracfd::core
 {
@@ -323,6 +324,25 @@ namespace paracfd::core
 	{
 		if(!(dt>0))throw std::invalid_argument("pairwise scalar timestep must be positive");const std::size_t n=dual_volume.size();if(velocity.size()!=n)throw std::invalid_argument("pairwise scalar state size mismatch");for(double volume:dual_volume)if(!(volume>0)||!std::isfinite(volume))throw std::invalid_argument("pairwise scalar dual volume must be finite and positive");std::vector<double> delta(n,0);
 		for(const PairwiseMomentumConnection& edge:connections){if(edge.a<0||edge.b<0||edge.a==edge.b||edge.a>=static_cast<int>(n)||edge.b>=static_cast<int>(n)||!(edge.open_area>=0)||!std::isfinite(edge.open_area)||!std::isfinite(edge.normal_velocity))throw std::invalid_argument("invalid pairwise scalar connection");const double transport=dt*edge.open_area*edge.normal_velocity,momentum=transport*velocity[transport>=0?edge.a:edge.b];delta[edge.a]-=momentum;delta[edge.b]+=momentum;}for(std::size_t node=0;node<n;++node)velocity[node]+=delta[node]/dual_volume[node];
+	}
+
+	std::vector<CompositeEbMomentumRegularConnection>
+		build_composite_eb_momentum_regular_connections(const CompositeAmrPressureSystem& system)
+	{
+		if(!system.hierarchy||system.brick_size<=0)throw std::invalid_argument("EB momentum perimeter requires a composite hierarchy");const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;
+		std::unordered_set<int> embedded_nodes;for(const CoarseFinePressureConnection& connection:system.embedded){if(connection.coarse_dof>=0)embedded_nodes.insert(connection.coarse_dof);if(connection.fine_dof>=0)embedded_nodes.insert(connection.fine_dof);}
+		struct CellAddress{int level=-1,brick=-1,i=-1,j=-1,k=-1;};auto cell_address=[&](int dof){CellAddress out;for(int level=0;level<static_cast<int>(hierarchy.levels().size());++level){const int begin=system.level_offset[level],count=static_cast<int>(hierarchy.levels()[level].bricks.size())*cells;if(dof<begin||dof>=begin+count)continue;const int work=dof-begin,local=work%cells;out.level=level;out.brick=work/cells;out.i=local%bs;out.j=(local/bs)%bs;out.k=local/(bs*bs);break;}return out;};
+		struct EdgeKey{int lower,upper,axis;bool operator==(const EdgeKey& other)const{return lower==other.lower&&upper==other.upper&&axis==other.axis;}};struct EdgeHash{std::size_t operator()(const EdgeKey& key)const{return (static_cast<std::size_t>(key.lower)*1315423911u^static_cast<std::size_t>(key.upper))*31u+static_cast<unsigned>(key.axis);}};std::unordered_set<EdgeKey,EdgeHash> emitted;std::vector<CompositeEbMomentumRegularConnection> output;
+		for(int dof:embedded_nodes)
+		{
+			const CellAddress cell=cell_address(dof);if(cell.level<0||!system.active[dof])continue;const AmrLevel& level=hierarchy.levels()[cell.level];const BrickMetadata& metadata=level.bricks[cell.brick];if(!metadata.active())continue;
+			for(int axis=0;axis<3;++axis)for(int sign=-1;sign<=1;sign+=2)
+			{
+				int coordinate[3]={cell.i,cell.j,cell.k},other_brick=cell.brick;coordinate[axis]+=sign;if(coordinate[axis]<0||coordinate[axis]>=bs){other_brick=metadata.same_level_neighbor[2*axis+(sign>0)];if(other_brick<0||!level.bricks[other_brick].active())continue;coordinate[axis]=sign>0?0:bs-1;}const int other=system.dof(cell.level,other_brick,coordinate[0],coordinate[1],coordinate[2]);if(other<0||other>=system.storage_size||!system.active[other])continue;const int lower=sign>0?dof:other,upper=sign>0?other:dof;if(system.cut_face_mask[lower]&(1u<<axis))continue;const EdgeKey key{lower,upper,axis};if(!emitted.insert(key).second)continue;
+				AmrMacFaceAddress face{cell.level,cell.brick,axis,cell.i,cell.j,cell.k};if(axis==0)face.i+=sign>0;else if(axis==1)face.j+=sign>0;else face.k+=sign>0;face=canonical_amr_mac_face_address(hierarchy,face);const double area=level.h*level.h,volume=composite_mac_carrier_volume(system,lower,upper);if(!(area>0&&volume>0))throw std::runtime_error("EB momentum regular connection has non-positive geometry");output.push_back({lower,upper,face,area,volume,embedded_nodes.count(lower)!=0,embedded_nodes.count(upper)!=0});
+			}
+		}
+		return output;
 	}
 
 	std::vector<NormalMomentumInterfaceTile> build_normal_momentum_interface_tiles(

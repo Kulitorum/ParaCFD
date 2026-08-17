@@ -174,6 +174,22 @@ namespace paracfd::core
 		const std::vector<PairwiseMomentumConnection>& connections, double dt,
 		std::vector<double>& velocity);
 
+	// Ordinary same-level pressure-face connection incident to at least one fluid DOF
+	// that also participates in the compact EB aperture graph. These records define the
+	// missing regular/compact perimeter ownership without introducing a full-domain graph.
+	struct CompositeEbMomentumRegularConnection
+	{
+		int lower_dof = -1;
+		int upper_dof = -1;
+		AmrMacFaceAddress face;
+		double open_area = 0.0;
+		double carrier_volume = 0.0;
+		bool lower_embedded_node = false;
+		bool upper_embedded_node = false;
+	};
+	std::vector<CompositeEbMomentumRegularConnection>
+		build_composite_eb_momentum_regular_connections(const CompositeAmrPressureSystem& system);
+
 	// GPU twin of conservative_pairwise_momentum_cpu. Static volumes and topology are
 	// uploaded once; only the per-step signed connection velocities are supplied by the
 	// caller. Integrated momentum increments are accumulated pairwise in persistent SoA
