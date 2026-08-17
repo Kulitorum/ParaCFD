@@ -220,6 +220,10 @@ namespace paracfd::core
 	void diffuse_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, double kinematic_viscosity,
 		double dt, CompositeCellMomentumState& state);
+	void reconstruct_composite_cell_fluxes_cpu(
+		const CompositeAmrPressureSystem& system,
+		const CompositeCellMomentumState& state, AmrHostFields& fields,
+		CompositeAmrFluxes& fluxes);
 
 	class DeviceCompositeCellMomentumTransport
 	{
@@ -238,6 +242,9 @@ namespace paracfd::core
 		void step(const Real* embedded_velocity, Real dt, bool external_aero = false,
 			Real freestream_speed = Real(0));
 		void diffuse(Real kinematic_viscosity, Real dt);
+		// Reconstruct normal mass-flux velocities on every open connection. Physical
+		// domain boundary values remain the caller's external-BC responsibility.
+		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
@@ -255,10 +262,16 @@ namespace paracfd::core
 			*compact_plus_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
 		Real *embedded_area_ = nullptr, *embedded_conductance_ = nullptr;
+		std::int8_t* embedded_axis_ = nullptr;
+		Real* embedded_upper_weight_ = nullptr;
 		int *coarse_fine_a_ = nullptr, *coarse_fine_b_ = nullptr;
 		Real *coarse_fine_area_ = nullptr, *coarse_fine_conductance_ = nullptr;
+		std::int8_t* coarse_fine_axis_ = nullptr;
+		Real* coarse_fine_upper_weight_ = nullptr;
 		int *regular_a_ = nullptr, *regular_b_ = nullptr;
 		Real *regular_area_ = nullptr, *regular_conductance_ = nullptr;
+		std::int8_t* regular_axis_ = nullptr;
+		Real* regular_upper_weight_ = nullptr;
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
 		int storage_size_ = 0;

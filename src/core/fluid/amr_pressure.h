@@ -323,6 +323,7 @@ namespace paracfd::core
 		// First segment of the compact special-flux array: one +axis velocity for
 		// every fine-owned 2:1 pressure aperture. Exposed read-only so conservative
 		// momentum transport can use exactly the projected mass flux on the GPU.
+		Real* coarse_fine_velocity_device() { return special_velocity_; }
 		const Real* coarse_fine_velocity_device() const { return special_velocity_; }
 		int coarse_fine_velocity_count() const { return coarse_fine_count_; }
 		Real* embedded_velocity_device() { return special_velocity_ + coarse_fine_count_; }
