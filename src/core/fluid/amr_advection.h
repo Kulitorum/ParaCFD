@@ -3,6 +3,7 @@
 #include "core/fluid/amr_fields.h"
 #include "core/geometry/triangle_bvh.h"
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -215,6 +216,54 @@ namespace paracfd::core
 		Real *volume_ = nullptr, *area_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
 		int node_count_ = 0, connection_count_ = 0;
+		std::size_t bytes_ = 0;
+	};
+
+	// Staged GPU finite-volume update for the compact EB graph plus its exact
+	// ordinary-face perimeter. Fragment-centred vectors are reconstructed from
+	// unique physical MAC carriers and embedded aperture dual masses. Every
+	// aperture/perimeter transfer is applied with equal and opposite endpoint
+	// momentum increments, then scattered back to the shared staggered states.
+	// The surrounding structured fluxes are not part of this class yet, so it is
+	// a validation/coupling layer rather than the production advection driver.
+	class DeviceCompositeEbMomentumTransport
+	{
+	public:
+		DeviceCompositeEbMomentumTransport(const CompositeAmrPressureSystem& system,
+			DeviceAmrFields& fields);
+		~DeviceCompositeEbMomentumTransport();
+		DeviceCompositeEbMomentumTransport(const DeviceCompositeEbMomentumTransport&) = delete;
+		DeviceCompositeEbMomentumTransport& operator=(const DeviceCompositeEbMomentumTransport&) = delete;
+
+		void step(Real* embedded_velocity, Real dt);
+		// Validation-only D2H total over each unique physical MAC carrier and EB aperture.
+		std::array<double, 3> momentum(const Real* embedded_velocity) const;
+		int node_count() const { return node_count_; }
+		int embedded_connection_count() const { return embedded_count_; }
+		int regular_connection_count() const { return regular_count_; }
+		int carrier_count() const { return carrier_count_; }
+		int same_level_alias_count() const { return alias_count_; }
+		std::size_t bytes() const;
+
+	private:
+		std::unique_ptr<DeviceAmrMacFaceMap> carrier_map_;
+		std::unique_ptr<DeviceAmrMacFaceMap> alias_map_;
+		Real *carrier_state_ = nullptr, *carrier_delta_ = nullptr;
+		int* alias_source_ = nullptr;
+		Real* alias_value_ = nullptr;
+		int *incidence_node_ = nullptr, *incidence_carrier_ = nullptr;
+		std::int8_t* incidence_component_ = nullptr;
+		Real* incidence_half_mass_ = nullptr;
+		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
+		std::int8_t* embedded_axis_ = nullptr;
+		Real *embedded_area_ = nullptr, *embedded_mass_ = nullptr;
+		int *regular_a_ = nullptr, *regular_b_ = nullptr, *regular_carrier_ = nullptr;
+		Real* regular_area_ = nullptr;
+		Real *node_sum_ = nullptr, *node_weight_ = nullptr, *node_delta_ = nullptr;
+		std::vector<double> carrier_mass_host_, embedded_mass_host_;
+		std::vector<std::int8_t> carrier_component_host_, embedded_axis_host_;
+		int node_count_ = 0, incidence_count_ = 0, carrier_count_ = 0, alias_count_ = 0;
+		int embedded_count_ = 0, regular_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 

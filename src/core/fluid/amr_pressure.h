@@ -297,6 +297,8 @@ namespace paracfd::core
 		// momentum transport can use exactly the projected mass flux on the GPU.
 		const Real* coarse_fine_velocity_device() const { return special_velocity_; }
 		int coarse_fine_velocity_count() const { return coarse_fine_count_; }
+		Real* embedded_velocity_device() { return special_velocity_ + coarse_fine_count_; }
+		const Real* embedded_velocity_device() const { return special_velocity_ + coarse_fine_count_; }
 		std::size_t bytes() const { return bytes_; }
 
 	private:

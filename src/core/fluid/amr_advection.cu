@@ -87,6 +87,53 @@ namespace paracfd::core
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count&&component[edge]!=axis[edge])velocity[edge]/=area[edge];
 		}
+		__global__ void accumulate_eb_momentum_carrier_state_kernel(const int* node,const int* carrier,
+			const std::int8_t* component,const Real* half_mass,const Real* carrier_state,
+			Real* sum,Real* weight,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const int slot=node[q]*3+component[q],source=carrier[q];const Real mass=half_mass[q];atomicAdd(sum+slot,mass*carrier_state[source]);atomicAdd(weight+slot,mass);
+		}
+		__global__ void accumulate_eb_momentum_aperture_state_kernel(const int* a,const int* b,
+			const std::int8_t* axis,const Real* mass,const Real* velocity,Real* sum,Real* weight,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge],sa=a[edge]*3+component,sb=b[edge]*3+component;const Real half=Real(0.5)*mass[edge],momentum=half*velocity[edge];atomicAdd(sum+sa,momentum);atomicAdd(sum+sb,momentum);atomicAdd(weight+sa,half);atomicAdd(weight+sb,half);
+		}
+		__device__ void accumulate_eb_momentum_transfer(int a,int b,Real swept,const Real* sum,
+			const Real* weight,Real* delta)
+		{
+			const int donor=swept>=Real(0)?a:b;for(int component=0;component<3;++component){const int source=donor*3+component,sa=a*3+component,sb=b*3+component;if(!(weight[source]>Real(0)&&weight[sa]>Real(0)&&weight[sb]>Real(0)))continue;const Real transfer=swept*sum[source]/weight[source];atomicAdd(delta+sa,-transfer);atomicAdd(delta+sb,transfer);}
+		}
+		__global__ void transport_eb_momentum_aperture_kernel(const int* a,const int* b,
+			const Real* area,const Real* normal_velocity,const Real* sum,const Real* weight,
+			Real dt,Real* delta,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count)accumulate_eb_momentum_transfer(a[edge],b[edge],dt*area[edge]*normal_velocity[edge],sum,weight,delta);
+		}
+		__global__ void transport_eb_momentum_regular_kernel(const int* a,const int* b,
+			const int* normal_carrier,const Real* area,const Real* carrier_state,const Real* sum,
+			const Real* weight,Real dt,Real* delta,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count)accumulate_eb_momentum_transfer(a[edge],b[edge],dt*area[edge]*carrier_state[normal_carrier[edge]],sum,weight,delta);
+		}
+		__global__ void scatter_eb_momentum_carrier_delta_kernel(const int* node,const int* carrier,
+			const std::int8_t* component,const Real* weight,const Real* node_delta,
+			Real* carrier_delta,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const int slot=node[q]*3+component[q];if(weight[slot]>Real(0))atomicAdd(carrier_delta+carrier[q],Real(0.5)*node_delta[slot]/weight[slot]);
+		}
+		__global__ void apply_eb_momentum_carrier_delta_kernel(Real* state,const Real* delta,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)state[q]+=delta[q];
+		}
+		__global__ void gather_eb_momentum_alias_kernel(const int* source,const Real* state,Real* alias,int count)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)alias[q]=state[source[q]];
+		}
+		__global__ void apply_eb_momentum_aperture_delta_kernel(const int* a,const int* b,
+			const std::int8_t* axis,const Real* weight,const Real* node_delta,Real* velocity,int count)
+		{
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge],sa=a[edge]*3+component,sb=b[edge]*3+component;const Real da=weight[sa]>Real(0)?node_delta[sa]/weight[sa]:Real(0),db=weight[sb]>Real(0)?node_delta[sb]/weight[sb]:Real(0);velocity[edge]+=Real(0.5)*(da+db);
+		}
 
 		__host__ __device__ std::uint64_t coordinate_hash(int x,int y,int z)
 		{
@@ -467,6 +514,38 @@ namespace paracfd::core
 	{
 		if(!velocity||(!connection_normal_velocity&&connection_count_))throw std::invalid_argument("pairwise GPU scalar transport has null state");if(!(dt>Real(0)))throw std::invalid_argument("pairwise GPU scalar transport timestep must be positive");check(cudaMemset(delta_x_,0,node_count_*sizeof(Real)),"clear pairwise scalar scratch");if(connection_count_)accumulate_pairwise_scalar_kernel<<<(connection_count_+255)/256,256>>>(a_,b_,area_,connection_normal_velocity,velocity,dt,delta_x_,connection_count_);apply_pairwise_scalar_kernel<<<(node_count_+255)/256,256>>>(volume_,delta_x_,velocity,node_count_);check(cudaDeviceSynchronize(),"pairwise conservative scalar transport");
 	}
+
+	DeviceCompositeEbMomentumTransport::DeviceCompositeEbMomentumTransport(
+		const CompositeAmrPressureSystem& system,DeviceAmrFields& fields)
+	{
+		if(!system.hierarchy||system.brick_size<=0)throw std::invalid_argument("compact/perimeter momentum transport requires a composite hierarchy");const AmrHierarchy& hierarchy=*system.hierarchy;if(fields.level_count()!=static_cast<int>(hierarchy.levels().size()))throw std::invalid_argument("compact/perimeter momentum field hierarchy mismatch");embedded_count_=static_cast<int>(system.embedded.size());if(!embedded_count_)throw std::invalid_argument("compact/perimeter momentum transport requires embedded apertures");
+		std::unordered_map<int,int> node_index;std::vector<int> node_dof;auto add_node=[&](int dof){if(dof<0||dof>=system.storage_size||!system.active[dof])throw std::invalid_argument("compact/perimeter momentum node is inactive");const auto found=node_index.find(dof);if(found!=node_index.end())return found->second;const int id=static_cast<int>(node_dof.size());node_index.emplace(dof,id);node_dof.push_back(dof);return id;};
+		std::vector<int> embedded_a(embedded_count_),embedded_b(embedded_count_);std::vector<std::int8_t> embedded_axis(embedded_count_);std::vector<Real> embedded_area(embedded_count_),embedded_mass(embedded_count_);embedded_mass_host_.resize(embedded_count_);embedded_axis_host_.resize(embedded_count_);for(int edge=0;edge<embedded_count_;++edge){const CoarseFinePressureConnection& connection=system.embedded[edge];const int first=add_node(connection.coarse_dof),second=add_node(connection.fine_dof);embedded_a[edge]=connection.direction>0?first:second;embedded_b[edge]=connection.direction>0?second:first;embedded_axis[edge]=connection.axis;embedded_area[edge]=static_cast<Real>(connection.open_area);const double mass=connection.open_area/pressure_gradient_factor(connection);if(!(mass>0)||!std::isfinite(mass))throw std::runtime_error("compact aperture momentum mass is invalid");embedded_mass[edge]=static_cast<Real>(mass);embedded_mass_host_[edge]=mass;embedded_axis_host_[edge]=connection.axis;}
+		const std::vector<CompositeEbMomentumRegularConnection> regular=build_composite_eb_momentum_regular_connections(system);regular_count_=static_cast<int>(regular.size());std::vector<int> regular_a(regular_count_),regular_b(regular_count_);std::vector<Real> regular_area(regular_count_);for(int edge=0;edge<regular_count_;++edge){regular_a[edge]=add_node(regular[edge].lower_dof);regular_b[edge]=add_node(regular[edge].upper_dof);regular_area[edge]=static_cast<Real>(regular[edge].open_area);}node_count_=static_cast<int>(node_dof.size());
+		struct CellAddress{int level=-1,brick=-1,i=-1,j=-1,k=-1;};const int bs=system.brick_size,cells=bs*bs*bs;auto cell_address=[&](int dof){CellAddress out;for(int level=0;level<static_cast<int>(hierarchy.levels().size());++level){const int begin=system.level_offset[level],count=static_cast<int>(hierarchy.levels()[level].bricks.size())*cells;if(dof<begin||dof>=begin+count)continue;const int work=dof-begin,local=work%cells;out.level=level;out.brick=work/cells;out.i=local%bs;out.j=(local/bs)%bs;out.k=local/(bs*bs);break;}return out;};
+		struct FaceKey{int level,brick,component,i,j,k;bool operator==(const FaceKey& other)const{return level==other.level&&brick==other.brick&&component==other.component&&i==other.i&&j==other.j&&k==other.k;}};struct FaceHash{std::size_t operator()(const FaceKey& key)const{std::size_t h=0;for(int value:{key.level,key.brick,key.component,key.i,key.j,key.k})h=(h*1315423911u)^static_cast<std::uint32_t>(value);return h;}};std::unordered_map<FaceKey,int,FaceHash> carrier_index;std::vector<AmrMacFaceAddress> carrier_address;std::vector<int> incidence_node,incidence_carrier;std::vector<std::int8_t> incidence_component;std::vector<Real> incidence_half_mass;auto add_carrier=[&](AmrMacFaceAddress face,double mass){face=canonical_amr_mac_face_address(hierarchy,face);const FaceKey key{face.level,face.brick,face.component,face.i,face.j,face.k};const auto found=carrier_index.find(key);if(found!=carrier_index.end()){const int id=found->second;if(std::abs(carrier_mass_host_[id]-mass)>1e-10*std::max(carrier_mass_host_[id],mass))throw std::runtime_error("compact/perimeter carrier has inconsistent physical mass");return id;}const int id=static_cast<int>(carrier_address.size());carrier_index.emplace(key,id);carrier_address.push_back(face);carrier_mass_host_.push_back(mass);carrier_component_host_.push_back(static_cast<std::int8_t>(face.component));return id;};
+		for(int node=0;node<node_count_;++node){const int dof=node_dof[node];const CellAddress cell=cell_address(dof);if(cell.level<0)continue;const AmrLevel& level=hierarchy.levels()[cell.level];const BrickMetadata& metadata=level.bricks[cell.brick];if(!metadata.active())continue;for(int axis=0;axis<3;++axis)for(int sign=-1;sign<=1;sign+=2){int coordinate[3]={cell.i,cell.j,cell.k},other_brick=cell.brick;coordinate[axis]+=sign;if(coordinate[axis]<0||coordinate[axis]>=bs){other_brick=metadata.same_level_neighbor[2*axis+(sign>0)];if(other_brick<0||!level.bricks[other_brick].active())continue;coordinate[axis]=sign>0?0:bs-1;}const int other=system.dof(cell.level,other_brick,coordinate[0],coordinate[1],coordinate[2]);if(other<0||other>=system.storage_size||!system.active[other])continue;const int lower=sign>0?dof:other;if(system.cut_face_mask[lower]&(1u<<axis))continue;AmrMacFaceAddress face{cell.level,cell.brick,axis,cell.i,cell.j,cell.k};if(axis==0)face.i+=sign>0;else if(axis==1)face.j+=sign>0;else face.k+=sign>0;const double mass=composite_mac_carrier_volume(system,dof,other);if(!(mass>0)||!std::isfinite(mass))throw std::runtime_error("compact/perimeter regular carrier mass is invalid");const int carrier=add_carrier(face,mass);incidence_node.push_back(node);incidence_carrier.push_back(carrier);incidence_component.push_back(static_cast<std::int8_t>(axis));incidence_half_mass.push_back(static_cast<Real>(0.5*mass));}}
+		carrier_count_=static_cast<int>(carrier_address.size());incidence_count_=static_cast<int>(incidence_node.size());std::vector<int> regular_carrier(regular_count_);for(int edge=0;edge<regular_count_;++edge){const AmrMacFaceAddress face=canonical_amr_mac_face_address(hierarchy,regular[edge].face);const FaceKey key{face.level,face.brick,face.component,face.i,face.j,face.k};const auto found=carrier_index.find(key);if(found==carrier_index.end())throw std::runtime_error("compact/perimeter normal carrier is absent from node incidence");regular_carrier[edge]=found->second;}
+		carrier_map_=std::make_unique<DeviceAmrMacFaceMap>(fields,carrier_address);std::vector<AmrMacFaceAddress> alias_address;std::vector<int> alias_source;for(int carrier=0;carrier<carrier_count_;++carrier){const AmrMacFaceAddress& face=carrier_address[carrier];const int normal_coordinate=face.component==0?face.i:(face.component==1?face.j:face.k);if(normal_coordinate!=bs)continue;const AmrLevel& level=hierarchy.levels()[face.level];const int neighbour=level.bricks[face.brick].same_level_neighbor[2*face.component+1];if(neighbour<0||!level.bricks[neighbour].active())continue;AmrMacFaceAddress alias=face;alias.brick=neighbour;if(alias.component==0)alias.i=0;else if(alias.component==1)alias.j=0;else alias.k=0;alias_address.push_back(alias);alias_source.push_back(carrier);}alias_count_=static_cast<int>(alias_address.size());if(alias_count_){alias_map_=std::make_unique<DeviceAmrMacFaceMap>(fields,alias_address);alias_source_=upload(alias_source,"upload compact/perimeter same-level alias sources");alias_value_=allocate<Real>(alias_count_,"allocate compact/perimeter same-level alias values");}
+		carrier_state_=allocate<Real>(carrier_count_,"allocate compact/perimeter carrier state");carrier_delta_=allocate<Real>(carrier_count_,"allocate compact/perimeter carrier delta");incidence_node_=upload(incidence_node,"upload compact/perimeter incidence nodes");incidence_carrier_=upload(incidence_carrier,"upload compact/perimeter incidence carriers");incidence_component_=upload(incidence_component,"upload compact/perimeter incidence components");incidence_half_mass_=upload(incidence_half_mass,"upload compact/perimeter incidence masses");embedded_a_=upload(embedded_a,"upload compact momentum lower aperture nodes");embedded_b_=upload(embedded_b,"upload compact momentum upper aperture nodes");embedded_axis_=upload(embedded_axis,"upload compact momentum aperture axes");embedded_area_=upload(embedded_area,"upload compact momentum aperture areas");embedded_mass_=upload(embedded_mass,"upload compact momentum aperture masses");regular_a_=upload(regular_a,"upload compact momentum lower perimeter nodes");regular_b_=upload(regular_b,"upload compact momentum upper perimeter nodes");regular_carrier_=upload(regular_carrier,"upload compact momentum perimeter carriers");regular_area_=upload(regular_area,"upload compact momentum perimeter areas");node_sum_=allocate<Real>(static_cast<std::size_t>(node_count_)*3,"allocate compact/perimeter node momentum");node_weight_=allocate<Real>(static_cast<std::size_t>(node_count_)*3,"allocate compact/perimeter node mass");node_delta_=allocate<Real>(static_cast<std::size_t>(node_count_)*3,"allocate compact/perimeter node increments");bytes_=static_cast<std::size_t>(2*carrier_count_+9*node_count_+alias_count_)*sizeof(Real)+static_cast<std::size_t>(alias_count_)*sizeof(int)+static_cast<std::size_t>(incidence_count_)*(2*sizeof(int)+sizeof(std::int8_t)+sizeof(Real))+static_cast<std::size_t>(embedded_count_)*(2*sizeof(int)+sizeof(std::int8_t)+2*sizeof(Real))+static_cast<std::size_t>(regular_count_)*(3*sizeof(int)+sizeof(Real));
+	}
+
+	DeviceCompositeEbMomentumTransport::~DeviceCompositeEbMomentumTransport()
+	{
+		for(void* pointer:{(void*)carrier_state_,(void*)carrier_delta_,(void*)alias_source_,(void*)alias_value_,(void*)incidence_node_,(void*)incidence_carrier_,(void*)incidence_component_,(void*)incidence_half_mass_,(void*)embedded_a_,(void*)embedded_b_,(void*)embedded_axis_,(void*)embedded_area_,(void*)embedded_mass_,(void*)regular_a_,(void*)regular_b_,(void*)regular_carrier_,(void*)regular_area_,(void*)node_sum_,(void*)node_weight_,(void*)node_delta_})if(pointer)cudaFree(pointer);
+	}
+
+	void DeviceCompositeEbMomentumTransport::step(Real* embedded_velocity,Real dt)
+	{
+		if(!embedded_velocity)throw std::invalid_argument("compact/perimeter embedded velocity is null");if(!(dt>Real(0)))throw std::invalid_argument("compact/perimeter momentum timestep must be positive");carrier_map_->gather(carrier_state_);const std::size_t components=static_cast<std::size_t>(node_count_)*3;check(cudaMemset(node_sum_,0,components*sizeof(Real)),"clear compact/perimeter node momentum");check(cudaMemset(node_weight_,0,components*sizeof(Real)),"clear compact/perimeter node mass");check(cudaMemset(node_delta_,0,components*sizeof(Real)),"clear compact/perimeter node increments");check(cudaMemset(carrier_delta_,0,static_cast<std::size_t>(carrier_count_)*sizeof(Real)),"clear compact/perimeter carrier increments");if(incidence_count_)accumulate_eb_momentum_carrier_state_kernel<<<(incidence_count_+255)/256,256>>>(incidence_node_,incidence_carrier_,incidence_component_,incidence_half_mass_,carrier_state_,node_sum_,node_weight_,incidence_count_);accumulate_eb_momentum_aperture_state_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_mass_,embedded_velocity,node_sum_,node_weight_,embedded_count_);transport_eb_momentum_aperture_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_area_,embedded_velocity,node_sum_,node_weight_,dt,node_delta_,embedded_count_);if(regular_count_)transport_eb_momentum_regular_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_carrier_,regular_area_,carrier_state_,node_sum_,node_weight_,dt,node_delta_,regular_count_);if(incidence_count_)scatter_eb_momentum_carrier_delta_kernel<<<(incidence_count_+255)/256,256>>>(incidence_node_,incidence_carrier_,incidence_component_,node_weight_,node_delta_,carrier_delta_,incidence_count_);if(carrier_count_)apply_eb_momentum_carrier_delta_kernel<<<(carrier_count_+255)/256,256>>>(carrier_state_,carrier_delta_,carrier_count_);apply_eb_momentum_aperture_delta_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,node_weight_,node_delta_,embedded_velocity,embedded_count_);carrier_map_->scatter(carrier_state_);if(alias_count_){gather_eb_momentum_alias_kernel<<<(alias_count_+255)/256,256>>>(alias_source_,carrier_state_,alias_value_,alias_count_);alias_map_->scatter(alias_value_);}
+	}
+
+	std::array<double,3> DeviceCompositeEbMomentumTransport::momentum(const Real* embedded_velocity)const
+	{
+		if(!embedded_velocity)throw std::invalid_argument("compact/perimeter momentum diagnostic velocity is null");carrier_map_->gather(carrier_state_);std::vector<Real> carriers(carrier_count_),apertures(embedded_count_);if(carrier_count_)check(cudaMemcpy(carriers.data(),carrier_state_,static_cast<std::size_t>(carrier_count_)*sizeof(Real),cudaMemcpyDeviceToHost),"download compact/perimeter carriers");if(embedded_count_)check(cudaMemcpy(apertures.data(),embedded_velocity,static_cast<std::size_t>(embedded_count_)*sizeof(Real),cudaMemcpyDeviceToHost),"download compact/perimeter apertures");std::array<double,3> result{};for(int q=0;q<carrier_count_;++q)result[carrier_component_host_[q]]+=carrier_mass_host_[q]*static_cast<double>(carriers[q]);for(int q=0;q<embedded_count_;++q)result[embedded_axis_host_[q]]+=embedded_mass_host_[q]*static_cast<double>(apertures[q]);return result;
+	}
+
+	std::size_t DeviceCompositeEbMomentumTransport::bytes()const{return bytes_+(carrier_map_?carrier_map_->bytes():0)+(alias_map_?alias_map_->bytes():0);}
 
 	DeviceCompositeAmrMomentumInterfaceTransport::DeviceCompositeAmrMomentumInterfaceTransport(
 		const CompositeAmrPressureSystem& system,DeviceAmrFields& fields)
