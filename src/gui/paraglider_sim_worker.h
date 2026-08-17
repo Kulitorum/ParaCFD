@@ -17,6 +17,10 @@
 
 namespace paracfd::gui
 {
+	// Auto-pause is permitted only after the wake has travelled this fraction of
+	// the streamwise domain. The score is computed earlier for live diagnostics.
+	inline constexpr double kAutoPauseMinimumFlowThroughs = 0.5;
+
 	struct ParagliderDisplaySnapshot
 	{
 		std::uint64_t generation = 0;

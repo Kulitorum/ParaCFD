@@ -42,6 +42,10 @@ Implemented:
 - a selectable cropped-Y collapse diagnostic that clips open fabric at a span station and requested physical width, snaps upward to whole finest cells, runs the real uniform solver, switches the viewer to a Y-normal 2-D presentation, and overlays the cell/timestep count. EB atlas halos are clamped at physical boundaries so stabilization cannot merge into a phantom halo cell.
 - persistent Qt recent-file state: the File menu retains ten valid STEP/config paths, ordinary startup restores the most recent wing/config placement without building CFD, and missing paths are pruned.
 
+GUI auto-pause computes its force/field settle score as soon as ten sampled fields support two comparison halves, but cannot pause until 0.5 streamwise-domain flow-through and 90% of the rolling observation window have elapsed. It then requires three consecutive scores below one plus acceptable RMS divergence. The overlay shows the score during warm-up. This is deliberately based on physical convective time rather than a resolution-dependent CFD step count.
+
+The intended future structural integration is loose quasi-steady coupling, not live moving-boundary FSI: XPBD settles geometry -> ParaCFD converges a static CFD state -> per-triangle two-sided pressures/tractions return to XPBD -> repeat. Avoiding repeated STEP serialization, warm-starting fields on nearby geometries, and safely reusing far-field AMR bricks are future performance milestones; EB topology intersected by moved fabric must still be rebuilt rather than reused speculatively.
+
 Reusable FP64 uniform-MAC kernels remain only as CPU/GPU validation references. They are not a second application or result path.
 
 ## Current acceptance geometry

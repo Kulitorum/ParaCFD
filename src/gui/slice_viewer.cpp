@@ -1561,7 +1561,7 @@ void main()
 			const QRect state_cue(std::max(18,(width()-270)/2),16,270,50);p.fillRect(state_cue,QColor(18,20,24,220));p.setPen(state_colour);p.drawRect(state_cue.adjusted(0,0,-1,-1));p.setBrush(state_colour);p.setPen(Qt::NoPen);p.drawEllipse(QRect(state_cue.x()+10,state_cue.y()+10,12,12));p.setBrush(Qt::NoBrush);p.setPen(state_colour);
 			const QString state_text=simulation_running_?"RUNNING":(simulation_auto_paused_?"PAUSED — SETTLED":"PAUSED");p.drawText(state_cue.adjusted(30,2,-6,-24),Qt::AlignLeft|Qt::AlignVCenter,state_text);
 			QFont state_detail=f;state_detail.setBold(false);state_detail.setPointSizeF(8.5);p.setFont(state_detail);p.setPen(QColor(225,228,234));QString detail;
-			if(!simulation_auto_pause_enabled_)detail="auto-pause disabled";else if(simulation_settling_ready_)detail=QString("settle score %1  (pause below 1)").arg(simulation_settling_score_,0,'f',2);else detail=QString("observing %1 / 1.5 flow-throughs").arg(simulation_flow_throughs_,0,'f',2);
+			if(!simulation_auto_pause_enabled_)detail="auto-pause disabled";else if(simulation_settling_ready_&&simulation_flow_throughs_<kAutoPauseMinimumFlowThroughs)detail=QString("score %1 · warm-up %2 / %3").arg(simulation_settling_score_,0,'f',2).arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);else if(simulation_settling_ready_)detail=QString("settle score %1  (pause below 1)").arg(simulation_settling_score_,0,'f',2);else detail=QString("observing %1 / %2 flow-throughs").arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);
 			p.drawText(state_cue.adjusted(10,24,-6,-2),Qt::AlignLeft|Qt::AlignVCenter,detail);p.setFont(f);
 			const QRect cue(18, 16, 210, 28);
 			p.fillRect(cue, QColor(18, 20, 24, 190));

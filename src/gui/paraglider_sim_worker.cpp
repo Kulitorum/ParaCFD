@@ -204,8 +204,11 @@ namespace paracfd::gui
 		flow_throughs_=std::max(0.0,physical_time-settling_epoch_time_)/flow_time;settling_history_.push_back({physical_time,force,latest_flow_change_});
 		const double window=std::max(0.25,0.5*flow_time),oldest=physical_time-window;
 		while(!settling_history_.empty()&&settling_history_.front().time<oldest)settling_history_.pop_front();
-		if(flow_throughs_<1.5||settling_history_.size()<10||settling_history_.front().time>oldest+0.1*window)return;
-		const double split=physical_time-0.5*window;paracfd::core::Vec3d old_mean{},new_mean{};int old_count=0,new_count=0;
+		if(settling_history_.size()<10)return;
+		const double history_span=physical_time-settling_history_.front().time;
+		if(!(history_span>0.1*window))return;
+		const double analysis_window=std::min(window,history_span);
+		const double split=physical_time-0.5*analysis_window;paracfd::core::Vec3d old_mean{},new_mean{};int old_count=0,new_count=0;
 		for(const SettlingSample& sample:settling_history_){paracfd::core::Vec3d& mean=sample.time<split?old_mean:new_mean;mean.x+=sample.force.x;mean.y+=sample.force.y;mean.z+=sample.force.z;if(sample.time<split)++old_count;else ++new_count;}
 		if(old_count<4||new_count<4)return;old_mean.x/=old_count;old_mean.y/=old_count;old_mean.z/=old_count;new_mean.x/=new_count;new_mean.y/=new_count;new_mean.z/=new_count;
 		auto magnitude=[](const paracfd::core::Vec3d& value){return std::sqrt(value.x*value.x+value.y*value.y+value.z*value.z);};
@@ -216,8 +219,9 @@ namespace paracfd::gui
 		const double drift_tolerance=0.001*range,noise_tolerance=0.003*range,flow_tolerance=0.0005*range;
 		settling_score_=std::max({settling_force_drift_/drift_tolerance,settling_force_rms_/noise_tolerance,flow_change/flow_tolerance});settling_ready_=true;
 		const bool conservative=conservation.volume_weighted_rms_divergence<1e-3;
-		if(settling_score_<1.0&&conservative)++settling_consecutive_;else settling_consecutive_=0;
-		if(settling_consecutive_>=3){playing_.store(false);auto_paused_.store(true);}
+		const bool observation_complete=flow_throughs_>=kAutoPauseMinimumFlowThroughs&&history_span>=0.9*window;
+		if(observation_complete&&settling_score_<1.0&&conservative)++settling_consecutive_;else settling_consecutive_=0;
+		if(settling_consecutive_>=3){playing_.store(false);auto_paused_.store(true);std::fprintf(stderr,"[paraglider] auto-pause: t=%.6g s, flow-throughs=%.3f, settle-score=%.4g\n",physical_time,flow_throughs_,settling_score_);}
 	}
 
 	bool ParagliderSimWorker::latestSnapshot(std::uint64_t& generation,
