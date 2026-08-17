@@ -156,6 +156,14 @@ namespace paracfd::core
 
 	CompositeAmrFluxes make_zero_composite_fluxes(const CompositeAmrPressureSystem& system){CompositeAmrFluxes flux;flux.coarse_fine_velocity.assign(system.coarse_fine.size(),0);flux.embedded_velocity.assign(system.embedded.size(),0);return flux;}
 
+	double composite_mac_carrier_volume(const CompositeAmrPressureSystem& system, int dof_a, int dof_b)
+	{
+		if(dof_a<0||dof_b<0||dof_a==dof_b||dof_a>=system.storage_size||dof_b>=system.storage_size||
+			!system.active[dof_a]||!system.active[dof_b]||system.volume[dof_a]<=0||system.volume[dof_b]<=0)
+			throw std::invalid_argument("MAC carrier endpoints must be distinct active fluid control volumes");
+		return 0.5*(system.volume[dof_a]+system.volume[dof_b]);
+	}
+
 	namespace
 	{
 		double regular_face_value(const AmrHostLevelFields& level,int brick,int axis,int i,int j,int k)

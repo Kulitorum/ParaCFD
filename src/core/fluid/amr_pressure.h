@@ -166,6 +166,7 @@ namespace paracfd::core
 	};
 
 	CompositeAmrFluxes make_zero_composite_fluxes(const CompositeAmrPressureSystem& system);
+	double composite_mac_carrier_volume(const CompositeAmrPressureSystem& system, int dof_a, int dof_b);
 	void composite_amr_divergence_cpu(const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
 		const CompositeAmrFluxes& special_flux, std::vector<double>& divergence);
 	void composite_amr_projection_rhs_cpu(const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
