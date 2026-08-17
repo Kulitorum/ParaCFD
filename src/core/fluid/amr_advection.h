@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -12,6 +13,7 @@ namespace paracfd::core
 {
 	struct CompositeAmrPressureSystem;
 	struct CompositeAmrFluxes;
+	struct SmoothFabricWallPatchLoad;
 	class DeviceAmrMacFaceMap;
 
 	struct AmrMacFaceAddress
@@ -227,6 +229,12 @@ namespace paracfd::core
 	void diffuse_composite_cell_momentum_smagorinsky_cpu(
 		const CompositeAmrPressureSystem& system, double molecular_viscosity,
 		double smagorinsky_cs, double dt, CompositeCellMomentumState& state);
+	// Arbitrary-orientation Spalding smooth-wall impulse applied directly to each
+	// same-side fluid control volume. The returned patch forces are the opposite
+	// reaction on the CAD fabric and include both sides independently.
+	std::vector<SmoothFabricWallPatchLoad> apply_composite_cell_smooth_fabric_wall_cpu(
+		const CompositeAmrPressureSystem& system, double molecular_viscosity,
+		double dt, double density, CompositeCellMomentumState& state);
 	// Apply the finite-volume pressure impulse directly to the persistent control-volume
 	// momentum. Internal open faces are equal-and-opposite; zero-thickness fabric adds
 	// the reaction opposite to its reported pressure load. Physical-domain pressure
@@ -258,6 +266,9 @@ namespace paracfd::core
 			Real freestream_speed = Real(0));
 		void diffuse(Real kinematic_viscosity, Real dt);
 		void diffuse_smagorinsky(Real molecular_viscosity, Real smagorinsky_cs, Real dt);
+		void apply_smooth_fabric_wall_model(Real dt, Real molecular_viscosity);
+		void download_smooth_fabric_wall_loads(Real density,
+			std::vector<SmoothFabricWallPatchLoad>& host) const;
 		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
 			bool include_physical_boundaries = true);
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
@@ -294,6 +305,10 @@ namespace paracfd::core
 		Real* regular_upper_weight_ = nullptr;
 		int* surface_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
+		Real *surface_normal_ = nullptr, *surface_area_ = nullptr,
+			*surface_distance_ = nullptr, *surface_wall_force_per_density_ = nullptr;
+		std::vector<std::uint32_t> surface_source_triangle_id_, surface_source_face_id_;
+		std::vector<Vec3d> surface_centroid_;
 		int *gradient_special_dof_ = nullptr, *gradient_incidence_special_ = nullptr,
 			*gradient_incidence_neighbor_ = nullptr;
 		Real *gradient_incidence_weighted_displacement_ = nullptr,
