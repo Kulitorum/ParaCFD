@@ -211,6 +211,9 @@ namespace paracfd::core
 		const CompositeAmrFluxes& fluxes, double dt,
 		CompositeCellMomentumState& state, bool external_aero = false,
 		double freestream_speed = 0.0);
+	double composite_cell_max_outflow_rate_cpu(
+		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
+		const CompositeAmrFluxes& fluxes, bool external_aero = false);
 	// One-level convenience used by uniform-grid manufactured fixtures.
 	void conservative_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, const AmrHostFields& fields,
@@ -243,6 +246,14 @@ namespace paracfd::core
 		const CompositeAmrPressureSystem& system, const std::vector<double>& pressure,
 		double dt, double density, CompositeCellMomentumState& state,
 		bool include_physical_boundaries = true);
+	void apply_composite_cell_projected_pressure_gradient_cpu(
+		const CompositeAmrPressureSystem& system, const std::vector<double>& pressure,
+		double dt, double density, CompositeCellMomentumState& state);
+	// Oriented area-vector imbalance of the raw finite-volume pressure traction.
+	// Exact control volumes are zero. Sampled/merged EB volumes use this to enforce
+	// the discrete geometric conservation law without changing the outlet reference.
+	std::vector<Vec3d> composite_cell_pressure_closure_cpu(
+		const CompositeAmrPressureSystem& system);
 	void reconstruct_composite_cell_fluxes_cpu(
 		const CompositeAmrPressureSystem& system,
 		const CompositeCellMomentumState& state, AmrHostFields& fields,
@@ -257,8 +268,14 @@ namespace paracfd::core
 		DeviceCompositeCellMomentumTransport(const DeviceCompositeCellMomentumTransport&) = delete;
 		DeviceCompositeCellMomentumTransport& operator=(const DeviceCompositeCellMomentumTransport&) = delete;
 
+		void initialize_freestream(Real speed);
 		void upload_state(const CompositeCellMomentumState& state);
 		void download_state(CompositeCellMomentumState& state) const;
+		double max_abs_velocity() const; // one scalar D2H reduction for the global CFL step
+		// Exact donor-cell stability rate: maximum over control volumes of the
+		// sum of outward volumetric fluxes divided by fluid volume [1/s].
+		double max_outflow_rate(const Real* coarse_fine_velocity,
+			const Real* embedded_velocity, bool external_aero = false);
 		void step(const Real* coarse_fine_velocity, const Real* embedded_velocity,
 			Real dt, bool external_aero = false, Real freestream_speed = Real(0));
 		// Convenience for a hierarchy with no coarse/fine connections.
@@ -271,24 +288,35 @@ namespace paracfd::core
 			std::vector<SmoothFabricWallPatchLoad>& host) const;
 		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
 			bool include_physical_boundaries = true);
+		void apply_projected_pressure_gradient(const Real* pressure, Real dt, Real density);
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
 		// domain boundary values remain the caller's external-BC responsibility.
 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
+		// Increment the already projected face fluxes only by the explicit change in
+		// cell momentum since step() began. This is the pressure-increment form used
+		// by the collocated production path; it does not re-interpolate the previous
+		// pressure impulse onto faces and therefore avoids pressure/velocity feedback.
+		void reconstruct_flux_increments(Real* coarse_fine_velocity, Real* embedded_velocity);
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
 		int coarse_fine_connection_count() const { return coarse_fine_count_; }
 		int gradient_special_node_count() const { return gradient_special_count_; }
 		int gradient_incidence_count() const { return gradient_incidence_count_; }
+		int clamped_flux_interpolation_count() const { return clamped_flux_interpolation_count_; }
+		int pressure_closure_correction_count() const { return pressure_closure_count_; }
+		double max_pressure_closure_acceleration() const { return max_pressure_closure_acceleration_; }
 		std::size_t bytes() const;
 
 	private:
 		const CompositeAmrPressureSystem* system_ = nullptr;
 		DeviceAmrFields* fields_ = nullptr;
 		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
-		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr;
+		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr, *baseline_x_ = nullptr,
+			*baseline_y_ = nullptr, *baseline_z_ = nullptr, *max_abs_scratch_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
-		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr;
+		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr,
+			*outflow_scratch_ = nullptr;
 		unsigned char *active_ = nullptr, *cut_face_mask_ = nullptr,
 			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
@@ -305,6 +333,8 @@ namespace paracfd::core
 		Real* regular_upper_weight_ = nullptr;
 		int* surface_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
+		int* pressure_closure_dof_ = nullptr;
+		Real* pressure_closure_coefficient_ = nullptr;
 		Real *surface_normal_ = nullptr, *surface_area_ = nullptr,
 			*surface_distance_ = nullptr, *surface_wall_force_per_density_ = nullptr;
 		std::vector<std::uint32_t> surface_source_triangle_id_, surface_source_face_id_;
@@ -318,7 +348,9 @@ namespace paracfd::core
 		int storage_size_ = 0;
 		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
 			surface_count_ = 0, gradient_special_count_ = 0,
-			gradient_incidence_count_ = 0;
+			gradient_incidence_count_ = 0, clamped_flux_interpolation_count_ = 0,
+			pressure_closure_count_ = 0;
+		double max_pressure_closure_acceleration_ = 0.0;
 		std::size_t bytes_ = 0;
 	};
 

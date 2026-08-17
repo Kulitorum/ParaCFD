@@ -4,6 +4,14 @@
 
 ParaCFD is a purpose-built static-geometry paraglider solver. The former building/channel product path has been removed. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.
 
+### Latest conservative imported-wing milestone
+
+`ExternalAeroCore` now has an explicit validation-only `conservative_cell_momentum` execution option. It connects the complete control-volume state to real imported-wing topology and external boundaries; the GUI/default path remains the stable staggered bounded-MacCormack solver until this replacement clears its remaining compact-aperture and convergence gates. Older implementation-history bullets below describe how this path was assembled and may call individual stages “not wired”; this paragraph is the authoritative current status.
+
+The new timestep is conservative control-volume advection -> same-side molecular/Smagorinsky diffusion -> two-sided Spalding wall shear -> increment-only flux reconstruction -> external BC -> composite projection -> projection-consistent pressure feedback. The final feedback uses the exact normal pressure correction already applied to every incident structured/EB/coarse-fine face, aperture-area averaged per cell component. This replaced the geometrically inconsistent direct raw-traction/least-squares update that destabilized persistent cell momentum on skewed merged fragments. The direct traction operator remains only as a manufactured fluid/fabric reaction reference. CFL uses the exact maximum `sum(outward volumetric flux)/volume` over every active control volume. No absolute speed cap, runaway guard, or timestep band-aid is used.
+
+The current 47,997-triangle PlanB fixture completed 1,000 conservative FP32 steps to 0.437177 s: regular/compact maxima 10.631/259.380 m/s, max/RMS divergence `3.75e-4 / 3.85e-6 s^-1`, net flux `5.27e-6 m^3/s`, 26.28 ms last step including 23.40 ms projection, and 651.34 MiB persistent GPU storage. Total/pressure/viscous force was `[53.964,-3.182,-5.047] / [31.053,-3.209,-4.884] / [22.910,0.027,-0.162]` N. At 0.101029 s, FP32 and FP64 total streamwise force differed by about 2.7 ppm; FP64 used 1224.78 MiB and 51.05 ms/step. Both precisions now use the same geometry condition cutoff (`1e4`), because retaining precision-dependent unsupported seam modes made the FP64 LES solve physically different. The slowly rising compact maximum is localized to a tiny trailing-edge/seam aperture; it is not a global runaway, but it still blocks making this path the GUI default. These forces are transient and grid-dependent, not validated aerodynamic results.
+
 Implemented:
 
 - OpenCascade STEP tessellation in metres with triangle-to-face provenance and optional UVs;
@@ -63,8 +71,8 @@ Use `paraglider_case_probe --physical-time T --max-levels N` for new comparisons
 
 ## Next engineering work
 
-1. Add a long imported-wing conservative-state gate with the real external boundaries, then switch `ExternalAeroCore` only if projection, force, and bounded-state diagnostics remain clean.
-2. Rerun equal-time PlanB grid/domain/force convergence on the conservative state and compare it against the current stable semi-Lagrangian production baseline.
+1. Trace and regularize the tiny trailing-edge/seam aperture whose local velocity rises slowly in the otherwise stable conservative imported-wing run; prove bounded long-time local and integrated flux without a cap.
+2. Rerun equal-time PlanB grid/domain/force convergence on the conservative state, then expose it in the GUI for visual comparison before retiring the staggered semi-Lagrangian default.
 3. Extend the two-level Galerkin preconditioner into a recursive V-cycle, tighten local conservation gates, and add aperture-aware EB reconstruction when fabric reaches a 2:1 interface.
 4. Extend the opened-cavity flux test to internal pressure equilibration and resolved inlet/crossport cases.
 5. Replace the finest-brick-aware but throttled host slice snapshot with direct CUDA/OpenGL field sampling and add pressure-force vectors.

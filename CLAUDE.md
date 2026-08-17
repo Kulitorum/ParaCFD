@@ -94,6 +94,14 @@ Important probes are:
 `configs/paraglider.json` is the new configuration reference.
 `configs/planb_parakite.json` is the checked-in PlanB acceptance case; its -90-degree Z placement maps the confirmed leading-edge direction (-Y) to ParaCFD upstream (-X), against the +X freestream velocity.
 
+## Solver path status
+
+The GUI and default `ExternalAeroCore` execution still use the stable staggered bounded-MacCormack path. An explicit `ExternalAeroExecutionOptions::conservative_cell_momentum` validation path now runs the complete GPU-resident control-volume sequence on imported geometry: conservative regular/fragment momentum transport, same-side molecular/Smagorinsky diffusion, two-sided Spalding wall shear, increment-only cell-to-face reconstruction, external boundary conditions, composite projection, and projection-consistent pressure feedback to persistent cell momentum. This supersedes historical notes below that say the composite path is not connected to `ExternalAeroCore`; it is connected but intentionally not yet the GUI default.
+
+The pressure feedback is not a runaway guard or velocity cap. Each persistent cell component receives the aperture-area-weighted mean of the exact face-normal pressure correction applied by the composite projection. A generic least-squares gradient and a direct raw pressure-traction update were rejected on the imported wing because highly non-orthogonal merged-fragment geometry made those cell updates incompatible with the projected face fluxes. The direct traction operator remains a manufactured force/reaction reference. Conservative CFL now uses the exact maximum control-volume donor rate, `sum(outward volumetric flux) / volume`, over regular faces, EB apertures, coarse/fine tiles, and physical X boundaries.
+
+On the current 47,997-triangle PlanB fixture, the explicit conservative path completed 1,000 FP32 steps to 0.437177 s without the former collapse: regular/compact-aperture maxima were 10.631/259.380 m/s, max/RMS divergence `3.75e-4 / 3.85e-6 s^-1`, net flux `5.27e-6 m^3/s`, and the last step took 26.28 ms including 23.40 ms projection. Persistent storage was 651.34 MiB. At 0.101029 s, FP32 and FP64 total streamwise force differed by about 2.7 ppm; FP64 used 1224.78 MiB and about 51.05 ms/step. The large compact maximum is confined to a tiny trailing-edge/seam aperture and rises slowly, so bounded long-time compact flux remains a promotion blocker even though regular flow and integrated conservation stay stable. The geometry rank cutoff is a common condition-number limit of `1e4` in both precisions; using arithmetic-dependent rank changed the physical stencil between FP32 and FP64 and was invalid.
+
 ## Current limitations
 
 ParaCFD is now a paraglider-only application, but it must not yet be described as producing trustworthy end-to-end paraglider aerodynamic results:

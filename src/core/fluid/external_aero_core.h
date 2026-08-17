@@ -31,6 +31,7 @@ namespace paracfd::core
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
 		bool smooth_fabric_wall_applied = false;
+		bool conservative_cell_momentum = false;
 	};
 	struct ExternalAeroConservationStats
 	{
@@ -41,6 +42,12 @@ namespace paracfd::core
 		double absolute_integrated_flux_error = 0.0; // sum |divergence * volume|, m^3/s
 		double net_integrated_flux_error = 0.0;     // sum divergence * volume, m^3/s
 	};
+	struct ExternalAeroExecutionOptions
+	{
+		bool conservative_cell_momentum = false;
+		bool smooth_fabric_wall = true;
+		bool pressure_impulse = true;
+	};
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
 	// the constructor. initialize() and step() retain all fields and pressure topology on
 	// the device; only scalar PCG reductions return to the host during a timestep.
@@ -48,7 +55,7 @@ namespace paracfd::core
 	{
 	public:
 		ExternalAeroCore(const TriMesh& placed_wing, const TriangleBvh& bvh,
-			const ParagliderConfig& config);
+			const ParagliderConfig& config, ExternalAeroExecutionOptions options = {});
 		~ExternalAeroCore();
 		ExternalAeroCore(const ExternalAeroCore&) = delete;
 		ExternalAeroCore& operator=(const ExternalAeroCore&) = delete;
@@ -75,9 +82,13 @@ namespace paracfd::core
 		int embedded_high_order_stencil_count() const;
 		int embedded_least_squares_full_rank_count() const;
 		int fabric_wall_node_count() const;
+		int clamped_cell_flux_interpolation_count() const;
+		int pressure_closure_correction_count() const;
+		double max_pressure_closure_acceleration() const;
+		bool uses_conservative_cell_momentum() const { return use_conservative_cell_momentum_; }
 
 	private:
-		ExternalAeroStepStats project(bool warm_start, double dt);
+		ExternalAeroStepStats project(bool warm_start, double dt, bool sync_coarse_fine = true);
 
 		ParagliderConfig config_;
 		std::size_t source_triangle_count_ = 0;
@@ -87,8 +98,12 @@ namespace paracfd::core
 		std::unique_ptr<DeviceAmrFields> fields_;
 		std::unique_ptr<DeviceAmrAdvection> advection_;
 		std::unique_ptr<DeviceCompositeAmrProjection> projection_;
+		std::unique_ptr<DeviceCompositeCellMomentumTransport> cell_momentum_;
 		double physical_time_ = 0.0;
 		bool initialized_ = false;
 		bool smooth_fabric_wall_applied_ = false;
+		bool use_conservative_cell_momentum_ = false;
+		bool enable_smooth_fabric_wall_ = true;
+		bool enable_pressure_impulse_ = true;
 	};
 }
