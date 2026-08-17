@@ -50,6 +50,11 @@ namespace paracfd::core
 
 	struct TangentialMomentumInterfaceConnection
 	{
+		struct FluxSource
+		{
+			int coarse_fine_connection = -1;
+			double overlap_area = 0.0;
+		};
 		AmrMacFaceAddress coarse;
 		AmrMacFaceAddress fine;
 		double open_area = 0.0;
@@ -57,6 +62,7 @@ namespace paracfd::core
 		std::int8_t interface_axis = 0;
 		std::int8_t component = 0;
 		std::int8_t direction = 1;
+		std::vector<FluxSource> flux_sources;
 	};
 
 	// Intersect the staggered component-dual rectangles on both sides of every 2:1
@@ -91,6 +97,13 @@ namespace paracfd::core
 		double area = 0.0;
 	};
 
+	struct CompositeAmrMomentumMassFluxSource
+	{
+		int momentum_connection = -1;
+		int coarse_fine_connection = -1;
+		double overlap_area = 0.0;
+	};
+
 	// One compact ownership graph for every 2:1 momentum interface. Normal fine
 	// tiles and tangential coarse/fine states share the same canonical node table,
 	// including faces at intersections of two or three refinement boundaries.
@@ -102,11 +115,16 @@ namespace paracfd::core
 		std::vector<double> dual_volume;
 		std::vector<std::uint8_t> interface_axis_mask;
 		std::vector<CompositeAmrMomentumInterfaceConnection> connections;
+		std::vector<CompositeAmrMomentumMassFluxSource> mass_flux_sources;
 		std::vector<CompositeAmrMomentumCoarseAlias> coarse_aliases;
 	};
 
 	CompositeAmrMomentumInterfaceTopology build_composite_amr_momentum_interface_topology(
 		const CompositeAmrPressureSystem& system);
+	std::vector<double> composite_amr_momentum_connection_velocities_cpu(
+		const CompositeAmrMomentumInterfaceTopology& topology,
+		const std::vector<double>& node_velocity,
+		const std::vector<double>& coarse_fine_velocity);
 
 	// Persistent GPU indirection only for compact interface/EB work. Ordinary regular
 	// cells remain on structured brick kernels. Addresses must be canonical and unique,
@@ -200,20 +218,31 @@ namespace paracfd::core
 		DeviceCompositeAmrMomentumInterfaceTransport& operator=(const DeviceCompositeAmrMomentumInterfaceTransport&) = delete;
 
 		void step(const Real* connection_normal_velocity, Real dt);
+		// Derive normal-component advectors from the endpoint MAC states and
+		// tangential advectors from the conservative coarse/fine pressure flux tiles.
+		void step_from_composite_flux(const Real* coarse_fine_velocity, Real dt);
 		int node_count() const { return node_count_; }
 		int connection_count() const { return connection_count_; }
 		int coarse_alias_group_count() const { return alias_group_count_; }
+		int mass_flux_source_count() const { return mass_flux_source_count_; }
 		std::size_t bytes() const;
 
 	private:
 		std::unique_ptr<DeviceAmrMacFaceMap> node_map_;
 		std::unique_ptr<DeviceAmrMacFaceMap> alias_map_;
 		std::unique_ptr<DevicePairwiseMomentumTransport> transport_;
-		Real *node_state_ = nullptr, *alias_sum_ = nullptr, *alias_value_ = nullptr;
+		Real *node_state_ = nullptr, *connection_normal_velocity_ = nullptr;
+		Real *alias_sum_ = nullptr, *alias_value_ = nullptr;
 		int *alias_node_ = nullptr, *alias_group_ = nullptr;
 		Real *alias_area_ = nullptr, *alias_group_area_ = nullptr;
+		int *connection_lower_ = nullptr, *connection_upper_ = nullptr;
+		std::int8_t *connection_axis_ = nullptr, *connection_component_ = nullptr;
+		Real* connection_area_ = nullptr;
+		int *mass_flux_connection_ = nullptr, *mass_flux_source_ = nullptr;
+		Real* mass_flux_area_ = nullptr;
 		int node_count_ = 0, connection_count_ = 0;
 		int alias_count_ = 0, alias_group_count_ = 0;
+		int mass_flux_source_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 

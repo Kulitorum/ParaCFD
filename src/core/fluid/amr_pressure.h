@@ -277,6 +277,11 @@ namespace paracfd::core
 		Real* pressure() { return pressure_; }
 		const Real* pressure() const { return pressure_; }
 		const Real* rhs() const { return rhs_; }
+		// First segment of the compact special-flux array: one +axis velocity for
+		// every fine-owned 2:1 pressure aperture. Exposed read-only so conservative
+		// momentum transport can use exactly the projected mass flux on the GPU.
+		const Real* coarse_fine_velocity_device() const { return special_velocity_; }
+		int coarse_fine_velocity_count() const { return coarse_fine_count_; }
 		std::size_t bytes() const { return bytes_; }
 
 	private:
