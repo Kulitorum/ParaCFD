@@ -220,6 +220,13 @@ namespace paracfd::core
 	void diffuse_composite_cell_momentum_cpu(
 		const CompositeAmrPressureSystem& system, double kinematic_viscosity,
 		double dt, CompositeCellMomentumState& state);
+	std::vector<double> composite_cell_smagorinsky_viscosity_cpu(
+		const CompositeAmrPressureSystem& system,
+		const CompositeCellMomentumState& state, double molecular_viscosity,
+		double smagorinsky_cs);
+	void diffuse_composite_cell_momentum_smagorinsky_cpu(
+		const CompositeAmrPressureSystem& system, double molecular_viscosity,
+		double smagorinsky_cs, double dt, CompositeCellMomentumState& state);
 	// Apply the finite-volume pressure impulse directly to the persistent control-volume
 	// momentum. Internal open faces are equal-and-opposite; zero-thickness fabric adds
 	// the reaction opposite to its reported pressure load. Physical-domain pressure
@@ -250,6 +257,7 @@ namespace paracfd::core
 		void step(const Real* embedded_velocity, Real dt, bool external_aero = false,
 			Real freestream_speed = Real(0));
 		void diffuse(Real kinematic_viscosity, Real dt);
+		void diffuse_smagorinsky(Real molecular_viscosity, Real smagorinsky_cs, Real dt);
 		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
 			bool include_physical_boundaries = true);
 		// Reconstruct normal mass-flux velocities on every open connection. Physical
@@ -259,6 +267,8 @@ namespace paracfd::core
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
 		int coarse_fine_connection_count() const { return coarse_fine_count_; }
+		int gradient_special_node_count() const { return gradient_special_count_; }
+		int gradient_incidence_count() const { return gradient_incidence_count_; }
 		std::size_t bytes() const;
 
 	private:
@@ -267,9 +277,9 @@ namespace paracfd::core
 		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
 		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
-		Real *volume_ = nullptr, *regular_velocity_ = nullptr;
+		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr;
 		unsigned char *active_ = nullptr, *cut_face_mask_ = nullptr,
-			*compact_plus_mask_ = nullptr;
+			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
 		Real *embedded_area_ = nullptr, *embedded_conductance_ = nullptr;
 		std::int8_t* embedded_axis_ = nullptr;
@@ -284,11 +294,16 @@ namespace paracfd::core
 		Real* regular_upper_weight_ = nullptr;
 		int* surface_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
+		int *gradient_special_dof_ = nullptr, *gradient_incidence_special_ = nullptr,
+			*gradient_incidence_neighbor_ = nullptr;
+		Real *gradient_incidence_weighted_displacement_ = nullptr,
+			*gradient_inverse_ = nullptr, *gradient_rhs_ = nullptr;
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
 		int storage_size_ = 0;
 		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
-			surface_count_ = 0;
+			surface_count_ = 0, gradient_special_count_ = 0,
+			gradient_incidence_count_ = 0;
 		std::size_t bytes_ = 0;
 	};
 
