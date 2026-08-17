@@ -277,6 +277,12 @@ namespace paracfd::core
 		// compact EB aperture coupling and 2:1 flux registers are not yet included. It
 		// remains separate from production advect() until both pieces are complete.
 		void advect_conservative_uniform(DeviceAmrFields& fields, Real dt);
+		// One-level validation path with the production external-aero momentum BC:
+		// prescribed +X inflow donor state, convective X-max outflow, and zero normal
+		// mass flux at the Y/Z free-slip boundaries. Boundary MAC dual volumes and
+		// edge/corner face areas use their exact half-width geometry.
+		void advect_conservative_uniform_external(DeviceAmrFields& fields, Real dt,
+			Real freestream_speed);
 		void diffuse_smagorinsky(DeviceAmrFields& fields, Real molecular_nu, Real cs, Real dt);
 		std::size_t protected_face_count() const { return protected_faces_; }
 		std::size_t active_face_count() const { return active_faces_; }
