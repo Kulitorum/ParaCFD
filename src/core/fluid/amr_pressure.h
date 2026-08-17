@@ -8,6 +8,7 @@
 #include "core/fluid/real.h"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -35,6 +36,17 @@ namespace paracfd::core
 			const Real syz = Real(0.5) * (gradient[5] + gradient[7]);
 			return Real(2) * (sxx*sxx + syy*syy + szz*szz
 				+ Real(2) * (sxy*sxy + sxz*sxz + syz*syz));
+		}
+		// Smooth-wall Spalding law expressed as friction velocity. Solving
+		// Re_y = u+ y+(u+) gives the viscous limit continuously and avoids an
+		// arbitrary laminar/log-layer switch. Geometry supplies actual wall distance.
+		PARACFD_AMR_HD inline Real smooth_wall_friction_velocity(Real tangential_speed,
+			Real wall_distance, Real molecular_nu)
+		{
+			if(!(tangential_speed>Real(0))||!(wall_distance>Real(0))||!(molecular_nu>Real(0)))return Real(0);
+			const Real reynolds=tangential_speed*wall_distance/molecular_nu,kappa=Real(0.41),coefficient=Real(0.1185998568);Real lower=Real(0),upper=Real(80);
+			for(int iteration=0;iteration<36;++iteration){const Real uplus=Real(0.5)*(lower+upper),x=kappa*uplus,x2=x*x,x3=x2*x;const Real remainder=x<Real(0.5)?x2*x2*(Real(1.0/24.0)+x*Real(1.0/120.0)+x2*Real(1.0/720.0)):exp(x)-Real(1)-x-Real(0.5)*x2-x3*Real(1.0/6.0);const Real yplus=uplus+coefficient*remainder;if(uplus*yplus<reynolds)lower=uplus;else upper=uplus;}
+			return tangential_speed/compact_max(Real(0.5)*(lower+upper),Real(1e-12));
 		}
 		// One compact-aperture transport update. `upstream*` and `downstream` are ordered
 		// along the sign of `current`; complete_chain selects MUSCL or the endpoint fallback.
@@ -256,6 +268,10 @@ namespace paracfd::core
 		// reconstruction supplies all nine irregular-region velocity gradients. The
 		// combined update obeys local same-side stencil bounds.
 		void transport_embedded_apertures(Real dt, Real molecular_nu, Real smagorinsky_cs);
+		// Staged arbitrary-orientation smooth-wall model. It uses Spalding's law
+		// at the actual patch-to-fragment distance and is kept separate from the
+		// production molecular wall flux until viscous traction is accumulated.
+		void apply_smooth_fabric_wall_model(Real dt, Real molecular_nu);
 		// Validation path for the internal conservative compact momentum contract. It gathers
 		// fragment-centred vector momentum from actual aperture/carrier dual masses,
 		// applies one equal-and-opposite first-order donor transfer per EB aperture,
@@ -335,12 +351,14 @@ namespace paracfd::core
 			*eb_diffusion_scratch_ = nullptr, *eb_regular_area_ = nullptr,
 			*eb_node_flux_balance_ = nullptr;
 		int *wall_edge_node_a_ = nullptr, *wall_edge_node_b_ = nullptr;
+		int* wall_patch_node_ = nullptr;
 		int *wall_carrier_node_ = nullptr, *wall_carrier_level_ = nullptr;
 		std::uint64_t* wall_carrier_index_ = nullptr;
 		std::int8_t* wall_carrier_axis_ = nullptr;
 		Real *wall_carrier_mass_ = nullptr, *wall_node_rate_ = nullptr,
 			*wall_node_axis_sum_ = nullptr, *wall_node_axis_weight_ = nullptr,
-			*wall_node_velocity_delta_ = nullptr;
+			*wall_node_velocity_delta_ = nullptr, *wall_patch_normal_ = nullptr,
+			*wall_patch_area_over_volume_ = nullptr, *wall_patch_distance_ = nullptr;
 		std::vector<int> brick_counts_;
 		std::vector<std::uint8_t> embedded_gradient_rank_;
 		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
@@ -349,7 +367,8 @@ namespace paracfd::core
 			embedded_regular_connection_count_ = 0;
 		int embedded_high_order_stencil_count_ = 0;
 		int embedded_least_squares_full_rank_count_ = 0;
-		int fabric_wall_node_count_ = 0, fabric_wall_carrier_count_ = 0;
+		int fabric_wall_node_count_ = 0, fabric_wall_carrier_count_ = 0,
+			fabric_wall_patch_count_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
