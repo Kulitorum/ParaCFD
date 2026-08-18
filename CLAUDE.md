@@ -151,6 +151,11 @@ ParaCFD is now a paraglider-only application, but it must not yet be described a
   versus free edges.
 
 - EB that reaches a 2:1 interface is currently rejected instead of receiving aperture-aware cross-level fragment reconstruction. The tested PlanB hierarchy keeps its EB atlas away from these interfaces.
+- The manufactured half-wing pressure-force parity gate is still red: the reconstructed
+  force differs from the full symmetric run by 0.82% after 16 steps versus the 0.5%
+  acceptance limit. Initialization agrees to `7.7e-8` relative, and a 2,048-DOF CPU
+  operator/manufactured-RHS comparison is bitwise equal, narrowing the defect to the
+  evolved GPU projection/state path rather than clipping or load doubling.
 - Optional topology-only surface levels resolve sharp cusps without changing the ordinary flow-collar resolution, but the current two-level pressure preconditioner makes their transient cost excessive (the NACA4112 h/512 topology fixture is about 3.54 million pressure states and 1.39 s per projected step). They are presently a preprocessing/topology escape hatch, not a practical production-resolution control.
 - The composite solver has a two-level additive geometric/Galerkin preconditioner, not yet a complete recursive multigrid hierarchy. The checked-in PlanB initial projection converges at the configured global residual tolerance, but local maximum divergence remains sensitive to the very small irregular control volumes and needs a stricter local/conservation acceptance criterion.
 - The production external-aero timestep is globally conservative over its explicit regular, EB, coarse/fine, and physical-boundary flux ownership. Its structured and compact MUSCL reconstructions are bounded and second-order on complete smooth stencils, but reduce locally at extrema, junctions, boundaries, and incomplete EB stencils. Airfoil results therefore still require a documented grid-convergence study; 128 cells/chord is not generally sufficient for a highly cambered leading edge.
