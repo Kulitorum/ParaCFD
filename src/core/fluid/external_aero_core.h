@@ -24,8 +24,10 @@ namespace paracfd::core
 		double max_abs_regular_velocity = 0.0;
 		double max_abs_special_velocity = 0.0;
 		double max_embedded_cfl_rate = 0.0; // 1/s, compact EB graph transport
+		double max_diffusion_rate = 0.0; // 1/s, explicit finite-volume graph spectral bound
 		double cfl_velocity = 0.0;
 		double effective_cfl = 0.0;
+		int diffusion_substeps = 1;
 		AmrGpuSolveResult pressure;
 		bool side_safe_fabric_transport = true;
 		bool les_applied = false;
@@ -44,11 +46,21 @@ namespace paracfd::core
 	};
 	struct ExternalAeroExecutionOptions
 	{
-		// The conservative control-volume solver is the production default. The
-		// staggered path remains available only as an explicit validation reference.
-		bool conservative_cell_momentum = true;
+		// The face-centred MAC solver is the validated production path. The
+		// collocated control-volume transport remains an explicit experiment.
+		bool conservative_cell_momentum = false;
 		bool smooth_fabric_wall = true;
 		bool pressure_impulse = true;
+		// Test harness only: reproduce pressure behavior on the historical sampled
+		// topology. Any front end enabling this must label the result qualitative.
+		bool allow_unsafe_same_fragment_patches = false;
+		// Keep the conservative two-point A/d pressure flux when the legacy preview
+		// topology cannot support its deferred non-orthogonal WLS correction. Strict
+		// CAD-certified runs leave this false and reject the topology instead.
+		bool use_qualitative_first_order_orthogonal_pressure = false;
+		// Static geometry callback supplied by front ends that link
+		// paracfd_geometry. The solver library itself remains OpenCascade-free.
+		ExactCellDecomposer exact_cell_decomposer = nullptr;
 	};
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
 	// the constructor. initialize() and step() retain all fields and pressure topology on
@@ -69,6 +81,7 @@ namespace paracfd::core
 		void download_fields(AmrHostFields& host) const;
 		void download_special_fluxes(CompositeAmrFluxes& host) const;
 		void download_pressure(std::vector<double>& host) const; // throttled validation/debug download
+		bool download_cell_momentum_state(CompositeCellMomentumState& host) const; // diagnostic only
 		ExternalAeroConservationStats conservation_stats() const; // throttled validation/statistics download
 		double max_abs_divergence() const; // throttled validation/statistics download
 

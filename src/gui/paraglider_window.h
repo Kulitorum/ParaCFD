@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/geometry/geometry_quality.h"
 #include "core/geometry/tri_mesh.h"
 #include "core/paraglider_config.h"
 
@@ -47,7 +48,14 @@ namespace paracfd::gui
 		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		void setConservativeMomentum(bool enabled);
 		void setHalfWingSimulation(bool enabled);
+		void setAoaSweepControls(double mean_tolerance_percent,double maximum_flow_throughs,
+			double reference_area=0);
 		bool startAoaSweep(double minimum_degrees,double maximum_degrees,double step_degrees);
+		bool aoaSweepActive()const{return aoa_sweep_active_;}
+		bool simulationRunning()const{return simulation_running_;}
+		bool simulationAutoPaused()const{return simulation_auto_paused_;}
+		bool setVisualizationPreset(const QString& name);
+
 		SliceViewer* viewer() const{return viewer_;}
 		long long steps()const{return last_steps_;}
 		double physicalTime()const{return last_time_;}
@@ -72,6 +80,10 @@ namespace paracfd::gui
 		void updateSnapshot();
 		void applySurfaceColour();
 		void updateDebugBoxes();
+		void applyGeometrySelection(bool invalidate_solver);
+		void updateGeometryIssueDisplay();
+		void updateWingLabel();
+		void resetSimulationAfterGeometryChange();
 		void restoreFullWingDisplay();
 		void spawnWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core);
 		void shutdownWorker();
@@ -83,14 +95,18 @@ namespace paracfd::gui
 		QMenu* recent_files_menu_=nullptr;
 
 		paracfd::core::ParagliderConfig config_;
+		paracfd::core::TriMesh imported_mesh_;
 		paracfd::core::TriMesh source_mesh_;
-		QString step_path_,config_path_;
+		paracfd::core::GeometryQualityReport geometry_quality_;
+		std::vector<std::uint32_t> source_triangle_to_imported_;
+		QString step_path_,config_path_,orientation_note_;
 		std::uint64_t snapshot_generation_=0,surface_generation_=0;
 		long long last_steps_=0;
 		double last_time_=0;
 		QElapsedTimer build_wall_timer_;
 		qint64 paused_wall_ms_=-1;
 		bool build_wall_timer_active_=false,build_seen_running_=false;
+		bool simulation_running_=false,simulation_auto_paused_=false;
 		paracfd::core::ModelPlacement aoa_sweep_baseline_;
 		std::vector<double> aoa_sweep_angles_;
 		std::size_t aoa_sweep_index_=0;
@@ -108,15 +124,18 @@ namespace paracfd::gui
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
 		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
-			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*clip_slice_=nullptr,*thin_y_debug_=nullptr,*auto_pause_=nullptr,
-			*conservative_momentum_=nullptr,*half_wing_=nullptr;
+			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*show_iso_=nullptr,*show_volume_=nullptr,
+			*show_pressure_forces_=nullptr,*clip_slice_=nullptr,*thin_y_debug_=nullptr,*auto_pause_=nullptr,
+			*conservative_momentum_=nullptr,*strict_exact_eb_=nullptr,*half_wing_=nullptr,*exclude_disconnected_=nullptr,
+			*show_geometry_issues_=nullptr;
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
-		QLabel *wing_label_=nullptr,*grid_readout_=nullptr,*solver_readout_=nullptr,*load_readout_=nullptr;
+		QLabel *wing_label_=nullptr,*geometry_quality_readout_=nullptr,*grid_readout_=nullptr,
+			*solver_readout_=nullptr,*load_readout_=nullptr;
 		QPushButton* aoa_sweep_button_=nullptr;
 		QPlainTextEdit* aoa_sweep_results_=nullptr;
 
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
-		std::vector<float> cp_plus_,cp_minus_,delta_cp_;
+		std::vector<float> cp_plus_,cp_minus_,delta_cp_,triangle_pressure_force_xyz_;
 		float delta_cp_range_=1,side_cp_range_=1;
 		bool thin_debug_display_=false;
 		bool half_wing_display_=false;

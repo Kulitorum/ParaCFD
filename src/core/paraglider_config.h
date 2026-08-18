@@ -27,6 +27,7 @@ namespace paracfd::core
 	{
 		double base_cell_size = 0.25; // m
 		int max_levels = 3;           // ratio exactly 2 between adjacent levels
+		int topology_refinement_levels = 0; // extra surface levels with a one-parent-brick EB halo
 		int brick_size = 32;          // interior cells per axis
 		int ghost_cells = 1;
 		double wing_refinement_distance = 1.0;    // m
@@ -35,7 +36,9 @@ namespace paracfd::core
 		double wake_radius = 2.0;                 // m around wing bbox y/z centre
 		int complex_subdivisions = 4;             // finest-cell N^3 fluid-connectivity fallback
 		double min_volume_fraction = 0.25;         // conservative same-side merge threshold
-		double min_aperture_area_fraction = 1e-4; // discard/report numerical face slivers below this h^2 fraction
+		// Reporting threshold only: positive-area apertures below this h^2 fraction are
+		// counted in diagnostics but remain in the conservative pressure/flux graph.
+		double min_aperture_area_fraction = 1e-4;
 	};
 
 	struct ExternalSolverConfig
@@ -43,7 +46,7 @@ namespace paracfd::core
 		double cfl = 0.7;
 		double smagorinsky_cs = 0.10;
 		double projection_tolerance = 1e-5;
-		int projection_max_iterations = 300;
+		int projection_max_iterations = 600;
 	};
 
 	struct AeroReferenceConfig

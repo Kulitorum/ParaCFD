@@ -23,9 +23,11 @@
 #include <QVector3D>
 #include <QVector4D>
 
+#include <algorithm>
 #include <cstdint>
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QPainter;
@@ -33,6 +35,30 @@ class QPainter;
 namespace paracfd::gui
 {
 	class ParagliderSimWorker;
+	struct ScalarVolume;
+
+	// The CAD/geometry pipeline classifies these records; the viewer only renders the supplied
+	// classification. Points are in the loaded STEP mesh's local metre coordinates, so diagnostics
+	// follow the same placement/rotation as the surface. measured_gap_m is absent for a topological
+	// finding that has no meaningful separation distance.
+	enum class GeometryIssueKind : std::uint8_t
+	{
+		UnexpectedGap = 0,
+		RepairedSeam,
+		UnsharedSeam,
+		IsolatedFabricComponent,
+		UnsupportedNamedSurface,
+		IntentionalOpening,
+		UnclassifiedOpening,
+		Count
+	};
+
+	struct GeometryIssuePolyline
+	{
+		GeometryIssueKind kind = GeometryIssueKind::UnexpectedGap;
+		std::vector<std::array<float, 3>> points;
+		std::optional<double> measured_gap_m;
+	};
 
 	class SliceViewer : public QOpenGLWidget, protected QOpenGLFunctions_4_3_Core
 	{
@@ -58,7 +84,10 @@ namespace paracfd::gui
 		void setSimulationCaseLabel(const QString& label){simulation_case_label_=label;update();}
 		void setSimulationState(bool running,bool auto_paused,bool auto_pause_enabled,
 			bool settling_ready,double settling_score,double flow_throughs,
-			const QString& automatic_pause_label=QString{});
+			const QString& automatic_pause_label=QString{},
+			const QString& error_label=QString{},bool mean_force_ready=false,
+			double mean_force_drift=0.0,double mean_force_tolerance=0.02,
+			double maximum_flow_throughs=2.5);
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
@@ -66,9 +95,10 @@ namespace paracfd::gui
 		void setReferenceU(double U);
 
 		// Live view controls (main thread).
-		void setField(Field f) { field_ = f; updateRange(); range_valid_ = false; update(); }
-		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); if(clip_follows_slice_){clip_mode_=(int)axis_;clip_frac_=plane_frac_;} updateSliceResolution(); geometry_dirty_ = true; grid_dirty_ = true; arrows_.reset(); tracers_.reset(); update(); }
+		void setField(Field f) { field_ = f; updateRange(); range_valid_ = false; slice_sample_dirty_=true; iso_surface_dirty_=true; update(); }
+		void setAxis(Axis a) { axis_ = a; setDefaultPlane(); if(clip_follows_slice_){clip_mode_=(int)axis_;clip_frac_=plane_frac_;} updateSliceResolution(); geometry_dirty_ = true; grid_dirty_ = true; slice_sample_dirty_=true; arrows_.reset(); tracers_.reset(); update(); }
 		void setPlaneFraction(float frac); // 0..1 along the current axis
+		float planeFraction() const { return plane_frac_; }
 
 		// Auto colour-range: when ON (default) the slice colormap, legend and arrow speed scale follow
 		// a live GPU min/max reduction of the displayed field; when OFF, the fixed per-field range
@@ -90,9 +120,9 @@ namespace paracfd::gui
 		bool showAxes() const { return show_axes_; }
 
 		// --- Clip plane (inspect internal canopy structure) -----------------------
-		// A movable plane hides the STEP surface on the camera side. The flow
-		// slice and the arrows are NEVER clipped, so the flow field inside the revealed cavity stays on
-		// screen. Modes: axis-aligned X/Y/Z (the position slider shifts it along that axis, auto-oriented
+		// A movable plane hides the STEP surface and 3-D scalar representations on the camera side. The
+		// flow slice and arrows are never clipped, so the section itself stays visible on screen.
+		// Modes: axis-aligned X/Y/Z (the position slider shifts it along that axis, auto-oriented
 		// to hide the camera side) or "Face camera" (normal = view direction; the slider pushes it into
 		// the scene along the line of sight). Flip swaps the hidden half. Implemented with gl_ClipDistance.
 		void setClipEnabled(bool on) { clip_enabled_ = on; update(); }
@@ -146,6 +176,26 @@ namespace paracfd::gui
 		float tracerWidth() const { return tracer_width_; }
 		float tracerBoring() const { return tracer_boring_; }
 
+		// --- Scientific scalar representations -----------------------------------
+		void setShowIsoSurface(bool on) { show_iso_surface_=on; iso_surface_dirty_=true; update(); }
+		void setIsoLevel(float fraction) { iso_level_fraction_=std::clamp(fraction,0.0f,1.0f); iso_surface_dirty_=true; update(); }
+		bool showIsoSurface() const { return show_iso_surface_; }
+		void setShowVolume(bool on) { show_volume_=on; update(); }
+		void setVolumeThreshold(float fraction) { volume_threshold_=std::clamp(fraction,0.0f,1.0f); update(); }
+		void setVolumeOpacity(float opacity) { volume_opacity_=std::clamp(opacity,0.01f,2.0f); update(); }
+		void setVolumeDetail(float detail) { volume_detail_=std::clamp(detail,0.0f,1.0f); update(); }
+		bool showVolume() const { return show_volume_; }
+
+		// Per-triangle aerodynamic inspection data. Forces are world-space integrated pressure
+		// forces; Cp arrays retain both physical sides independently of the current surface colour mode.
+		void setTriangleSurfaceProbeData(const std::vector<float>& plus_cp,
+			const std::vector<float>& minus_cp,const std::vector<float>& delta_cp);
+		void setTrianglePressureForces(const std::vector<float>& xyz);
+		void clearTrianglePressureForces();
+		void setShowPressureForces(bool on) { show_pressure_forces_=on; pressure_force_dirty_=true; update(); }
+		void setPressureForceDensity(int density) { pressure_force_density_=std::clamp(density,50,5000); pressure_force_dirty_=true; update(); }
+		void setPressureForceSize(float size) { pressure_force_size_=std::clamp(size,0.1f,3.0f); update(); }
+
 		// --- Legend metadata (feature 3 queries by the overlay) ------------------
 		Field field() const { return field_; }
 		float fieldMin() const { return vmin_; }
@@ -169,6 +219,19 @@ namespace paracfd::gui
 		void setParagliderDebugBoxes(const std::vector<std::array<float, 6>>& amr_bricks,
 			const std::vector<std::array<float, 6>>& eb_cells);
 		void clearParagliderDebugBoxes();
+		// Thick, depth-tested CAD diagnostic curves. Unlike AMR/EB boxes these are model-local and
+		// remain attached to the STEP surface while its placement is edited. Intentional openings are
+		// accepted diagnostics rather than errors; their classification is supplied by preprocessing.
+		void setGeometryIssuePolylines(std::vector<GeometryIssuePolyline> polylines);
+		void clearGeometryIssuePolylines();
+		void setGeometryQualityStatus(const QString& status, bool warning=true)
+		{
+			geometry_quality_status_=status;geometry_quality_warning_=warning;update();
+		}
+		void setShowGeometryIssues(bool on) { show_geometry_issues_ = on; update(); }
+		bool showGeometryIssues() const { return show_geometry_issues_; }
+		std::size_t geometryIssueCount(GeometryIssueKind kind) const;
+		std::optional<double> geometryIssueMaximumGap(GeometryIssueKind kind) const;
 
 		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement.
 		void setMeshTranslate(double tx, double ty, double tz);
@@ -203,6 +266,7 @@ namespace paracfd::gui
 
 	signals:
 		void fpsUpdated(double fps);
+		void planeFractionChanged(float fraction);
 		// Emitted when the gizmo finishes editing the model placement (drag release / reset), so the
 		// host can invalidate and rebuild the static AMR/EB hierarchy.
 		void modelPlacementChanged();
@@ -223,6 +287,10 @@ namespace paracfd::gui
 		void uploadMesh();        // push pending_mesh_ into GL buffers (main thread)
 		void uploadTriangleSurfaceColours();
 		void uploadParagliderDebugBoxes();
+		void buildGeometryIssueBuffers();
+		void uploadGeometryIssuePolylines();
+		void drawGeometryIssuePolylines(const QMatrix4x4& mvp, const QVector4D& clip_plane);
+		void drawGeometryIssueLegend(QPainter& painter);
 		void ensureFabricBvh();     // rebuild placed zero-thickness collision geometry lazily
 		void updateRange();
 		void applyAutoRange(const FieldRange& fr); // EMA-fold a live reduction into [vmin_,vmax_]+speed scale
@@ -236,6 +304,18 @@ namespace paracfd::gui
 		void updateTracers();      // advect the streaklines + upload line geometry (main thread)
 		void drawTracers(const QMatrix4x4& mvp); // glMultiDrawArrays line-strip draw of the streaklines
 		void drawLegendWith(QPainter& p); // QPainter colorbar overlay (feature 3)
+		void updateScalarRepresentations();
+		void buildIsoSurface(const ScalarVolume& volume);
+		void uploadIsoSurface();
+		void drawIsoSurface(const QMatrix4x4& mvp,const QVector4D& clip_plane);
+		void uploadVolumeTexture(const ScalarVolume& volume);
+		void drawVolume(const QMatrix4x4& mvp,const QVector4D& clip_plane);
+		void buildPressureForceInstances();
+		void drawPressureForces(const QMatrix4x4& mvp);
+		void updateProbeAt(const QPointF& screen);
+		void drawProbe(QPainter& painter);
+		void beginSliceDrag(const QPointF& screen);
+		void dragSlice(const QPointF& screen);
 
 		// Clip plane: world-space plane (n.x, n.y, n.z, d); the KEPT half-space is dot(pos,n)+d >= 0, so
 		// solids on the camera side are cut. Returns an all-keep plane when disabled / no domain yet.
@@ -268,7 +348,11 @@ namespace paracfd::gui
 
 		Camera camera_;
 		QPoint last_mouse_;
+		QPoint press_mouse_;
 		Qt::MouseButton drag_btn_ = Qt::NoButton;
+		bool slice_dragging_ = false;
+		QPointF slice_drag_start_;
+		float slice_drag_start_fraction_ = 0.5f;
 
 		// Slice view state. Default Z-normal = the x-y plane (best view of the cylinder
 		// wake); matches the axis combo's default selection in MainWindow.
@@ -287,6 +371,8 @@ namespace paracfd::gui
 		int range_ctr_ = 0;             // paint counter → reduce every kRangeEvery frames (~12 Hz)
 		std::vector<float> host_slice_values_;   // finest-active AMR plane values before colour mapping
 		std::vector<float4> host_slice_colours_; // display-only AMR snapshot -> GL upload
+		bool slice_sample_dirty_=true;
+		std::uint64_t slice_sample_generation_=0;
 		int range_log_ctr_ = 0;         // throttles the [vmin,vmax] diagnostic line
 		static constexpr int kRangeEvery = 5;
 
@@ -301,9 +387,12 @@ namespace paracfd::gui
 		int thin_debug_layers_ = 0;
 		long long simulation_step_ = 0;
 		double simulation_physical_time_=0,simulation_wall_time_=0;
-		QString simulation_case_label_,simulation_pause_label_;
+		QString simulation_case_label_,simulation_pause_label_,simulation_error_label_;
 		bool simulation_running_=false,simulation_auto_paused_=false,simulation_auto_pause_enabled_=false,simulation_settling_ready_=false;
 		double simulation_settling_score_=0,simulation_flow_throughs_=0;
+		double simulation_mean_force_drift_=0,simulation_mean_force_tolerance_=0.02;
+		double simulation_maximum_flow_throughs_=2.5;
+		bool simulation_mean_force_ready_=false;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;
@@ -323,6 +412,7 @@ namespace paracfd::gui
 		bool mesh_triangle_colour_upload_pending_ = false;
 		bool has_mesh_triangle_colours_ = false;
 		std::vector<float> mesh_triangle_colours_; // plus RGBA, minus RGBA per source triangle
+		std::vector<float> surface_cp_plus_,surface_cp_minus_,surface_delta_cp_;
 		paracfd::core::TriMesh pending_mesh_;
 		paracfd::core::TriMesh fabric_mesh_; // retained CPU source for tracer segment collision
 		std::unique_ptr<paracfd::core::TriangleBvh> fabric_bvh_;
@@ -331,6 +421,51 @@ namespace paracfd::gui
 		int amr_debug_vertex_count_ = 0, eb_debug_vertex_count_ = 0;
 		bool paraglider_debug_upload_pending_ = false;
 		std::vector<float> pending_amr_debug_lines_, pending_eb_debug_lines_;
+
+		// CAD diagnostics use the same screen-space ribbon representation as flow tracers, but their
+		// vertices are model-local and static. Separate per-kind draw lists allow warning classes to
+		// have distinct pixel widths without one draw call per polyline.
+		static constexpr std::size_t kGeometryIssueKindCount =
+			static_cast<std::size_t>(GeometryIssueKind::Count);
+		QOpenGLShaderProgram geometry_issue_prog_;
+		unsigned int geometry_issue_vao_ = 0, geometry_issue_vbo_ = 0;
+		std::vector<float> geometry_issue_vertices_;
+		std::array<std::vector<int>, kGeometryIssueKindCount> geometry_issue_firsts_;
+		std::array<std::vector<int>, kGeometryIssueKindCount> geometry_issue_counts_;
+		std::array<std::size_t, kGeometryIssueKindCount> geometry_issue_polyline_counts_{};
+		std::array<std::optional<double>, kGeometryIssueKindCount> geometry_issue_max_gap_m_{};
+		bool geometry_issue_upload_pending_ = false;
+		bool show_geometry_issues_ = true;
+		QString geometry_quality_status_;
+		bool geometry_quality_warning_ = false;
+
+		// Cached coarse-volume representations. Iso-surfaces use marching tetrahedra on the active
+		// field; the focused ray caster always uses Cp and makes the free stream transparent.
+		std::unique_ptr<ScalarVolume> iso_volume_,cp_volume_;
+		bool show_iso_surface_=false,iso_surface_dirty_=true,iso_upload_pending_=false;
+		float iso_level_fraction_=0.45f,iso_threshold_value_=0.0f;
+		QElapsedTimer iso_update_clock_;
+		std::vector<float> iso_vertices_; // interleaved position.xyz + normal.xyz
+		int iso_negative_vertices_=0,iso_positive_vertices_=0;
+		QOpenGLShaderProgram volume_prog_;
+		unsigned int iso_vao_=0,iso_vbo_=0,volume_vao_=0,volume_texture_=0;
+		bool show_volume_=false,volume_texture_ready_=false;
+		std::uint64_t volume_texture_generation_=0;
+		float volume_threshold_=0.55f,volume_opacity_=0.50f,volume_detail_=0.55f;
+
+		// Pressure-force glyph layer reuses the flow-arrow shader with an independent instance stream.
+		std::vector<float> triangle_pressure_forces_,pressure_force_instances_;
+		bool show_pressure_forces_=false,pressure_force_dirty_=true;
+		int pressure_force_density_=300,pressure_force_draw_count_=0;
+		float pressure_force_size_=0.45f;
+		unsigned int pressure_force_vao_=0,pressure_force_inst_vbo_=0;
+
+		// Click probe overlay. A surface hit reports the two-sided triangle Cp in addition to the
+		// finest-active flow sample; otherwise the active slice is probed.
+		bool probe_valid_=false;
+		QVector3D probe_world_;
+		QString probe_text_;
+		int probe_triangle_=-1;
 
 		// Model transform. The model matrix comes from the gizmo TRS (gz_* below); an optional explicit
 		// override matrix can seat the model directly instead.
@@ -359,8 +494,8 @@ namespace paracfd::gui
 		bool show_slice_ = true;
 		bool show_model_ = true;
 
-		// Clip plane cuts the STEP surface only; the
-		// flow slice + arrows stay visible. clip_mode_: 0=X 1=Y 2=Z 3=Camera-facing; clip_frac_ ∈ [0,1]
+		// Clip plane cuts the STEP surface, volume, and iso-surface; the flow slice + arrows stay
+		// visible. clip_mode_: 0=X 1=Y 2=Z 3=Camera-facing; clip_frac_ ∈ [0,1]
 		// sweeps the plane (axis position, or view-depth about the camera target); clip_flip_ swaps the
 		// hidden side. clip_vao_/vbo_ hold the translucent plane-visualisation quad (4 corners, per-paint).
 		bool clip_enabled_ = false;

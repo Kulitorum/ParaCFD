@@ -24,6 +24,7 @@
   "amr": {
     "base_cell_size": 0.25,
     "max_levels": 3,
+    "topology_refinement_levels": 0,
     "brick_size": 32,
     "ghost_cells": 1,
     "wing_refinement_distance": 1.0,
@@ -38,7 +39,7 @@
     "cfl": 0.7,
     "smagorinsky_cs": 0.10,
     "projection_tolerance": 1e-5,
-    "projection_max_iterations": 300
+    "projection_max_iterations": 600
   },
   "reference": {
     "area": 0.0,

@@ -38,7 +38,7 @@
     "cfl": 0.7,
     "smagorinsky_cs": 0.10,
     "projection_tolerance": 1e-5,
-    "projection_max_iterations": 300
+    "projection_max_iterations": 600
   },
   "reference": {
     "area": 0.0,

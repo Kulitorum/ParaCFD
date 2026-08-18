@@ -11,7 +11,9 @@
 
 #include "core/geometry/tri_mesh.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace paracfd::core
 {
@@ -36,6 +38,41 @@ namespace paracfd::core
 		double linear_det() const
 		{
 			return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+		}
+
+		// Largest singular value of M. A source-space distance tolerance multiplied by
+		// this value conservatively encloses its image under rotation, scale, or shear.
+		// The closed-form symmetric 3x3 eigensolve keeps an exact rigid rotation at 1,
+		// unlike a Frobenius-norm bound (which would spuriously enlarge it by sqrt(3)).
+		double maximum_linear_scale() const
+		{
+			double a[3][3]{}; // M^T M
+			for (int row = 0; row < 3; ++row)
+				for (int col = 0; col < 3; ++col)
+					for (int k = 0; k < 3; ++k)
+						a[row][col] += m[3 * k + row] * m[3 * k + col];
+			const double off2 = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+			double largest = std::max({ a[0][0], a[1][1], a[2][2], 0.0 });
+			if (off2 > 0.0)
+			{
+				const double q = (a[0][0] + a[1][1] + a[2][2]) / 3.0;
+				const double d0 = a[0][0] - q, d1 = a[1][1] - q, d2 = a[2][2] - q;
+				const double p = std::sqrt((d0 * d0 + d1 * d1 + d2 * d2 + 2.0 * off2) / 6.0);
+				if (p > 0.0)
+				{
+					const double b00 = d0 / p, b01 = a[0][1] / p, b02 = a[0][2] / p;
+					const double b11 = d1 / p, b12 = a[1][2] / p, b22 = d2 / p;
+					const double determinant = b00 * (b11 * b22 - b12 * b12)
+						- b01 * (b01 * b22 - b12 * b02)
+						+ b02 * (b01 * b12 - b11 * b02);
+					const double r = std::clamp(0.5 * determinant, -1.0, 1.0);
+					const double phi = std::acos(r) / 3.0;
+					largest = q + 2.0 * p * std::cos(phi);
+				}
+			}
+			const double singular = std::sqrt(std::max(0.0, largest));
+			return singular == 0.0 ? 0.0
+				: singular * (1.0 + 32.0 * std::numeric_limits<double>::epsilon());
 		}
 	};
 
@@ -76,11 +113,28 @@ namespace paracfd::core
 	{
 		TriMesh out = mesh;
 		const std::size_t nv = mesh.vertex_count();
+		const bool have_fp64 = mesh.has_fp64_positions();
+		if (!have_fp64) out.positions_fp64.clear();
+		if (out.has_cad_edge_provenance())
+		{
+			const double tolerance_scale = p.maximum_linear_scale();
+			for (std::size_t half_edge = 0; half_edge < out.triangle_cad_edge_tolerances.size(); ++half_edge)
+				out.triangle_cad_edge_tolerances[half_edge] =
+					out.triangle_cad_edge_ids[half_edge] == TriMesh::kNoCadEdgeId ? 0.0
+					: std::max(0.0, out.triangle_cad_edge_tolerances[half_edge]) * tolerance_scale;
+		}
 		double bmin[3] = { 1e300, 1e300, 1e300 }, bmax[3] = { -1e300, -1e300, -1e300 };
 		for (std::size_t i = 0; i < nv; ++i)
 		{
 			double ox, oy, oz;
-			p.apply((double)mesh.positions[3 * i], (double)mesh.positions[3 * i + 1], (double)mesh.positions[3 * i + 2], ox, oy, oz);
+			const std::array<double, 3> source = mesh.vertex_position_double(i);
+			p.apply(source[0], source[1], source[2], ox, oy, oz);
+			if (have_fp64)
+			{
+				out.positions_fp64[3 * i] = ox;
+				out.positions_fp64[3 * i + 1] = oy;
+				out.positions_fp64[3 * i + 2] = oz;
+			}
 			out.positions[3 * i] = (float)ox;
 			out.positions[3 * i + 1] = (float)oy;
 			out.positions[3 * i + 2] = (float)oz;

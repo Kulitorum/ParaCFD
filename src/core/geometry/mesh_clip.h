@@ -7,8 +7,16 @@
 namespace paracfd::core
 {
 	// Retain the portion of `mesh` inside lower <= coordinate[axis] <= upper.
-	// Output triangles preserve winding and source-face provenance. The returned bbox
+	// Output triangles preserve winding, exact CPU positions, and source-face provenance.
+	// A retained subsegment of an original CAD half-edge keeps its CAD edge ID/count;
+	// clip-plane edges and triangulation fan diagonals are explicitly marked unavailable.
+	// The returned bbox
 	// spans the requested slab along `axis`, allowing a deliberately thin CFD domain
 	// even when no retained vertex happens to lie exactly on one slab boundary.
-	TriMesh clip_mesh_to_axis_slab(const TriMesh& mesh, int axis, double lower, double upper);
+	// A mirror-domain crop may discard an original surface lying wholly in either
+	// symmetry plane: the physical mirror condition already supplies its no-normal-flow
+	// boundary, and the omitted opposite-side pressure volume is outside the domain.
+	// Crossing sheets are still clipped at the plane and remain open; no cap is created.
+	TriMesh clip_mesh_to_axis_slab(const TriMesh& mesh, int axis, double lower, double upper,
+		bool discard_lower_coplanar = false, bool discard_upper_coplanar = false);
 }

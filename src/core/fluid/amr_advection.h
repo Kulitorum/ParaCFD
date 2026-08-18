@@ -279,7 +279,7 @@ namespace paracfd::core
 		void upload_state(const CompositeCellMomentumState& state);
 		void download_state(CompositeCellMomentumState& state) const;
 		double max_abs_velocity() const; // one scalar D2H reduction for the global CFL step
-		// Exact donor-cell stability rate: maximum over control volumes of the
+		// Conservative outward-flux stability rate: maximum over control volumes of the
 		// sum of outward volumetric fluxes divided by fluid volume [1/s].
 		double max_outflow_rate(const Real* coarse_fine_velocity,
 			const Real* embedded_velocity, bool external_aero = false);
@@ -290,6 +290,8 @@ namespace paracfd::core
 			Real freestream_speed = Real(0));
 		void diffuse(Real kinematic_viscosity, Real dt);
 		void diffuse_smagorinsky(Real molecular_viscosity, Real smagorinsky_cs, Real dt);
+		double last_diffusion_rate() const { return last_diffusion_rate_; }
+		int last_diffusion_substeps() const { return last_diffusion_substeps_; }
 		void apply_smooth_fabric_wall_model(Real dt, Real molecular_viscosity);
 		void download_smooth_fabric_wall_loads(Real density,
 			std::vector<SmoothFabricWallPatchLoad>& host) const;
@@ -321,25 +323,46 @@ namespace paracfd::core
 		const CompositeAmrPressureSystem* system_ = nullptr;
 		DeviceAmrFields* fields_ = nullptr;
 		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
+		std::unique_ptr<DeviceAmrMacFaceMap> regular_pressure_correction_face_map_;
 		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr, *baseline_x_ = nullptr,
 			*baseline_y_ = nullptr, *baseline_z_ = nullptr, *max_abs_scratch_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
 		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr,
-			*outflow_scratch_ = nullptr, *wall_matrix_ = nullptr;
+			*regular_pressure_correction_velocity_ = nullptr, *outflow_scratch_ = nullptr,
+			*sync_weight_ = nullptr, *wall_matrix_ = nullptr;
 		unsigned char *active_ = nullptr, *cut_face_mask_ = nullptr,
-			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr;
+			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr,
+			*flux_fit_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
 		Real *embedded_area_ = nullptr, *embedded_conductance_ = nullptr;
+		Real* embedded_face_displacement_ = nullptr;
 		std::int8_t* embedded_axis_ = nullptr;
 		Real* embedded_upper_weight_ = nullptr;
+		int *embedded_lower_pressure_node_ = nullptr, *embedded_upper_pressure_node_ = nullptr;
+		Real *embedded_pressure_correction_ = nullptr, *embedded_pressure_upper_weight_ = nullptr;
 		int *coarse_fine_a_ = nullptr, *coarse_fine_b_ = nullptr;
 		Real *coarse_fine_area_ = nullptr, *coarse_fine_conductance_ = nullptr;
+		Real* coarse_fine_face_displacement_ = nullptr;
 		std::int8_t* coarse_fine_axis_ = nullptr;
 		Real* coarse_fine_upper_weight_ = nullptr;
+		int *coarse_fine_lower_pressure_node_ = nullptr, *coarse_fine_upper_pressure_node_ = nullptr;
+		Real *coarse_fine_pressure_correction_ = nullptr, *coarse_fine_pressure_upper_weight_ = nullptr;
 		int *regular_a_ = nullptr, *regular_b_ = nullptr;
 		Real *regular_area_ = nullptr, *regular_conductance_ = nullptr;
+		Real* regular_face_displacement_ = nullptr;
 		std::int8_t* regular_axis_ = nullptr;
 		Real* regular_upper_weight_ = nullptr;
+		int *regular_lower_pressure_node_ = nullptr, *regular_upper_pressure_node_ = nullptr;
+		Real *regular_pressure_correction_ = nullptr, *regular_pressure_upper_weight_ = nullptr;
+		int *structured_pressure_correction_lower_ = nullptr,
+			*structured_pressure_correction_upper_ = nullptr,
+			*structured_pressure_correction_lower_node_ = nullptr,
+			*structured_pressure_correction_upper_node_ = nullptr;
+		std::int8_t* structured_pressure_correction_axis_ = nullptr;
+		Real *structured_pressure_correction_area_ = nullptr,
+			*structured_pressure_correction_two_point_delta_ = nullptr,
+			*structured_pressure_correction_vector_ = nullptr,
+			*structured_pressure_correction_upper_weight_ = nullptr;
 		int *surface_dof_ = nullptr, *surface_wall_node_ = nullptr, *wall_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
 		int* pressure_closure_dof_ = nullptr;
@@ -349,18 +372,25 @@ namespace paracfd::core
 			*surface_wall_force_per_density_ = nullptr;
 		std::vector<std::uint32_t> surface_source_triangle_id_, surface_source_face_id_;
 		std::vector<Vec3d> surface_centroid_;
-		int *gradient_special_dof_ = nullptr, *gradient_incidence_special_ = nullptr,
+		int *gradient_special_dof_ = nullptr, *gradient_node_index_ = nullptr,
+			*gradient_incidence_special_ = nullptr,
 			*gradient_incidence_neighbor_ = nullptr;
 		Real *gradient_incidence_weighted_displacement_ = nullptr,
-			*gradient_inverse_ = nullptr, *gradient_rhs_ = nullptr;
+			*gradient_inverse_ = nullptr, *gradient_rhs_ = nullptr, *gradient_value_ = nullptr;
+		int *pressure_gradient_dof_ = nullptr, *pressure_gradient_offset_ = nullptr,
+			*pressure_gradient_neighbour_ = nullptr;
+		Real *pressure_gradient_weight_ = nullptr, *pressure_gradient_value_ = nullptr;
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
-		int storage_size_ = 0;
+		int storage_size_ = 0, pressure_gradient_node_count_ = 0;
 		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
+			structured_pressure_correction_count_ = 0,
 			surface_count_ = 0, wall_count_ = 0, gradient_special_count_ = 0,
 			gradient_incidence_count_ = 0, clamped_flux_interpolation_count_ = 0,
 			pressure_closure_count_ = 0;
 		double max_pressure_closure_acceleration_ = 0.0;
+		double last_diffusion_rate_ = 0.0;
+		int last_diffusion_substeps_ = 1;
 		Real pressure_scale_ = Real(0);
 		bool pressure_correction_ready_ = false;
 		std::size_t bytes_ = 0;

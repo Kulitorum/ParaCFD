@@ -1,0 +1,49 @@
+{
+  "step": {
+    "path": "Test-Data/NACA2412_C1_S2p03.step",
+    "tessellation_deflection_mm": 1.0
+  },
+  "placement": {
+    "tx": 0.0,
+    "ty": 0.0,
+    "tz": 0.0,
+    "matrix": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  },
+  "freestream": {
+    "speed": 10.0,
+    "rho": 1.225,
+    "nu": 1.5e-5
+  },
+  "domain": {
+    "upstream_margin": 2.0,
+    "downstream_margin": 4.0,
+    "lateral_margin": 2.0,
+    "vertical_margin": 2.0,
+    "half_wing_symmetry": false
+  },
+  "amr": {
+    "base_cell_size": 0.03125,
+    "max_levels": 4,
+    "topology_refinement_levels": 0,
+    "brick_size": 4,
+    "ghost_cells": 1,
+    "wing_refinement_distance": 0.05,
+    "surface_refinement_distance": 0.02,
+    "wake_length": 1.5,
+    "wake_radius": 0.15,
+    "complex_subdivisions": 16,
+    "min_volume_fraction": 0.25,
+    "min_aperture_area_fraction": 0.0001
+  },
+  "solver": {
+    "cfl": 0.7,
+    "smagorinsky_cs": 0.10,
+    "projection_tolerance": 1e-5,
+    "projection_max_iterations": 3000
+  },
+  "reference": {
+    "area": 0.125,
+    "length": 1.0,
+    "moment_origin": [0.25, 0.0, 0.0]
+  }
+}

@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <cmath>
+#include <algorithm>
 
 namespace paracfd::core
 {
@@ -25,6 +26,10 @@ namespace paracfd::core
 		{
 			int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=n)return;auto dof=[&](FragmentRef r){return r<0?cell_dof[-r-1]:fragment_dof[r-1];};int a=dof(ar[i]),b=dof(br[i]);if(a<0||b<0||a==b)return;Real v=(area[i]/dist[i])*(p[a]-p[b]);atomicAdd(out+a,v);atomicAdd(out+b,-v);
 		}
+		__global__ void geometry_correction_apply(const Real*p,Real*out,const int*ar,const int*br,const Real*delta,int n)
+		{
+			int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=n)return;const int a=ar[i],b=br[i];if(a<0)return;if(b<0){atomicAdd(out+a,delta[i]*p[a]);return;}if(a==b)return;const Real v=delta[i]*(p[a]-p[b]);atomicAdd(out+a,v);atomicAdd(out+b,-v);
+		}
 		__global__ void precondition_kernel(const Real*r,Real*z,Real*d,const Real*diag,const unsigned char*active,int n){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<n){Real v=active[i]&&diag[i]>Real(0)?r[i]/diag[i]:Real(0);z[i]=v;d[i]=v;}}
 		__global__ void subtract_kernel(Real*r,const Real*value,const unsigned char*active,int n){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<n)r[i]=active[i]?r[i]-value[i]:Real(0);}
 		__global__ void update_xr_kernel(Real*x,Real*r,const Real*d,const Real*Ad,Real alpha,const unsigned char*active,int n){int i=blockIdx.x*blockDim.x+threadIdx.x;if(i<n&&active[i]){x[i]+=alpha*d[i];r[i]-=alpha*Ad[i];}}
@@ -40,10 +45,20 @@ namespace paracfd::core
 
 	DeviceEbPressureOperator::DeviceEbPressureOperator(const EbPressureSystem&s)
 	{
-		grid_=s.eb->grid;storage_size_=s.storage_size;outlet_=s.pressure_outlet_xmax;cell_dof_=up(s.cell_dof);fragment_dof_=up(s.fragment_dof);std::vector<std::uint8_t>mask=s.eb->cut_face_mask;if(mask.empty())mask.assign(grid_.cell_count(),0);cut_face_mask_=up(mask);std::vector<FragmentRef>a,b;std::vector<Real>area,dist;for(const auto&x:s.eb->apertures){a.push_back(x.fragment_a);b.push_back(x.fragment_b);area.push_back((Real)x.area);dist.push_back((Real)std::max(1e-12,std::sqrt(length2(s.eb->fragment_centroid(x.fragment_a)-s.eb->fragment_centroid(x.fragment_b)))));}aperture_count_=(int)a.size();aperture_a_=up(a);aperture_b_=up(b);aperture_area_=up(area);aperture_distance_=up(dist);bytes_=s.cell_dof.size()*sizeof(int)+s.fragment_dof.size()*sizeof(int)+mask.size()*sizeof(std::uint8_t)+a.size()*(2*sizeof(FragmentRef)+2*sizeof(Real));
+		grid_=s.eb->grid;storage_size_=s.storage_size;outlet_=s.pressure_outlet_xmax;cell_dof_=up(s.cell_dof);fragment_dof_=up(s.fragment_dof);std::vector<std::uint8_t>mask=s.eb->cut_face_mask;if(mask.empty())mask.assign(grid_.cell_count(),0);cut_face_mask_=up(mask);
+		auto distance=[&](int da,int db){const double value=std::sqrt(length2(s.centroid[da]-s.centroid[db]));if(!std::isfinite(value)||!(value>0))throw std::runtime_error("coincident GPU EB pressure control-volume centroids");return std::max(1e-12,value);};
+		std::vector<FragmentRef>a,b;std::vector<Real>area,dist;for(const auto&x:s.eb->apertures){const int da=s.dof(x.fragment_a),db=s.dof(x.fragment_b);a.push_back(x.fragment_a);b.push_back(x.fragment_b);area.push_back((Real)x.area);dist.push_back((Real)(da==db?1.0:distance(da,db)));}aperture_count_=(int)a.size();aperture_a_=up(a);aperture_b_=up(b);aperture_area_=up(area);aperture_distance_=up(dist);
+		// Preserve the fast implicit h stencil for ordinary cells and add only compact
+		// coefficient deltas around a shifted aggregate centroid.  The same aggregate
+		// geometry is used by the host operator and physical flux correction.
+		std::vector<int> correction_a,correction_b;std::vector<Real>coefficient_delta;const double face_area=grid_.h*grid_.h,base=grid_.h;
+		auto stage=[&](int da,int db,double actual){const double delta=actual-base;if(std::abs(delta)<=1e-14*std::max({1.0,std::abs(actual),std::abs(base)}))return;correction_a.push_back(da);correction_b.push_back(db);coefficient_delta.push_back((Real)delta);};
+		for(int k=0;k<grid_.nz;++k)for(int j=0;j<grid_.ny;++j)for(int i=0;i<grid_.nx;++i){const int cell=grid_.cell_index(i,j,k),da=s.cell_dof[cell];if(da<0)continue;auto edge=[&](int neighbour){const int db=s.cell_dof[neighbour];if(db>=0&&db!=da)stage(da,db,face_area/distance(da,db));};if(i+1<grid_.nx&&!(mask[cell]&1u))edge(grid_.cell_index(i+1,j,k));if(j+1<grid_.ny&&!(mask[cell]&2u))edge(grid_.cell_index(i,j+1,k));if(k+1<grid_.nz&&!(mask[cell]&4u))edge(grid_.cell_index(i,j,k+1));if(outlet_&&i==grid_.nx-1){const double boundary=grid_.origin.x+grid_.nx*grid_.h,outlet_distance=std::max(1e-12,boundary-s.centroid[da].x),actual=face_area/outlet_distance,delta=actual-2*grid_.h;if(std::abs(delta)>1e-14*std::max({1.0,std::abs(actual),std::abs(2*grid_.h)})){correction_a.push_back(da);correction_b.push_back(-1);coefficient_delta.push_back((Real)delta);}}}
+		geometry_correction_count_=static_cast<int>(correction_a.size());geometry_correction_a_=up(correction_a);geometry_correction_b_=up(correction_b);geometry_coefficient_delta_=up(coefficient_delta);
+		bytes_=s.cell_dof.size()*sizeof(int)+s.fragment_dof.size()*sizeof(int)+mask.size()*sizeof(std::uint8_t)+a.size()*(2*sizeof(FragmentRef)+2*sizeof(Real))+correction_a.size()*(2*sizeof(int)+sizeof(Real));
 	}
-	DeviceEbPressureOperator::~DeviceEbPressureOperator(){for(void*p:{(void*)cell_dof_,(void*)fragment_dof_,(void*)cut_face_mask_,(void*)aperture_a_,(void*)aperture_b_,(void*)aperture_area_,(void*)aperture_distance_})if(p)cudaFree(p);}
-	void DeviceEbPressureOperator::apply(const Real*p,Real*out)const{ck(cudaMemset(out,0,storage_size_*sizeof(Real)),"clear EB apply");regular_apply<<<(grid_.cell_count()+255)/256,256>>>(p,out,grid_,cell_dof_,cut_face_mask_,outlet_);if(aperture_count_)aperture_apply<<<(aperture_count_+255)/256,256>>>(p,out,aperture_a_,aperture_b_,aperture_area_,aperture_distance_,aperture_count_,cell_dof_,fragment_dof_);ck(cudaDeviceSynchronize(),"EB apply");}
+	DeviceEbPressureOperator::~DeviceEbPressureOperator(){for(void*p:{(void*)cell_dof_,(void*)fragment_dof_,(void*)cut_face_mask_,(void*)aperture_a_,(void*)aperture_b_,(void*)aperture_area_,(void*)aperture_distance_,(void*)geometry_correction_a_,(void*)geometry_correction_b_,(void*)geometry_coefficient_delta_})if(p)cudaFree(p);}
+	void DeviceEbPressureOperator::apply(const Real*p,Real*out)const{ck(cudaMemset(out,0,storage_size_*sizeof(Real)),"clear EB apply");regular_apply<<<(grid_.cell_count()+255)/256,256>>>(p,out,grid_,cell_dof_,cut_face_mask_,outlet_);if(geometry_correction_count_)geometry_correction_apply<<<(geometry_correction_count_+255)/256,256>>>(p,out,geometry_correction_a_,geometry_correction_b_,geometry_coefficient_delta_,geometry_correction_count_);if(aperture_count_)aperture_apply<<<(aperture_count_+255)/256,256>>>(p,out,aperture_a_,aperture_b_,aperture_area_,aperture_distance_,aperture_count_,cell_dof_,fragment_dof_);ck(cudaDeviceSynchronize(),"EB apply");}
 
 	DeviceEbPressureSolver::DeviceEbPressureSolver(const EbPressureSystem&s):op_(s),n_(s.storage_size)
 	{

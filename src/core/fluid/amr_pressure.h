@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace paracfd::core
@@ -107,13 +108,51 @@ namespace paracfd::core
 		std::int8_t axis = 0;
 		std::int8_t direction = 1; // +1: first DOF is lower-axis; -1: second DOF is lower-axis
 		Vec3d face_centroid{};
+		double orthogonal_gradient_factor = 0.0; // positive implicit factor selected during topology finalization
+		// Derived once after the complete EB/AMR graph has been assembled.  A skew
+		// centroid connector is split into an implicit two-point part and an
+		// affine-exact non-orthogonal correction evaluated from compact LS pressure
+		// gradients.  Node indices address CompositeAmrPressureSystem's compact
+		// pressure-gradient stencil; ordinary Cartesian cells remain implicit.
+		int lower_gradient_node = -1;
+		int upper_gradient_node = -1;
+		Vec3d nonorthogonal_correction{};
+		double upper_gradient_weight = 0.5;
 	};
 	inline double pressure_gradient_factor(const CoarseFinePressureConnection& connection)
 	{
-		return connection.normal_distance /
-			(connection.centre_distance * connection.centre_distance);
+		return connection.orthogonal_gradient_factor>0?connection.orthogonal_gradient_factor:
+			(connection.normal_distance>0?1.0/connection.normal_distance:0.0);
+	}
+	inline double nonorthogonal_correction_resolution()
+	{
+		return 16.0*static_cast<double>(std::numeric_limits<Real>::epsilon());
+	}
+	inline bool nonorthogonal_correction_is_below_resolution(Vec3d correction)
+	{
+		const double magnitude2=length2(correction),limit=nonorthogonal_correction_resolution();
+		return magnitude2>0&&magnitude2<=limit*limit;
 	}
 	struct CompositePressureGauge { int dof = -1; double coefficient = 0.0; };
+	// Additive correction for an otherwise implicit same-level Cartesian face whose
+	// merged control-volume centroids are not aligned with the face normal.  The
+	// structured A/h two-point term remains on the fast path; this compact record adds
+	// (alpha-1/h)(p_upper-p_lower) plus the affine-exact non-orthogonal LS term.
+	struct RegularPressureCorrection
+	{
+		int lower_dof = -1;
+		int upper_dof = -1;
+		int level = -1;
+		int brick = -1;
+		int i = 0, j = 0, k = 0; // positive face index in the owning brick's MAC layout
+		std::int8_t axis = 0;
+		double open_area = 0.0;
+		double two_point_delta = 0.0; // orthogonal factor minus the structured 1/h factor
+		int lower_gradient_node = -1;
+		int upper_gradient_node = -1;
+		Vec3d nonorthogonal_correction{};
+		double upper_gradient_weight = 0.5;
+	};
 	struct CompositeSurfacePressurePatch
 	{
 		std::uint32_t source_triangle_id = 0;
@@ -141,6 +180,26 @@ namespace paracfd::core
 		std::vector<int> fragment_dof; // atlas fragment -> resolved same-side composite DOF
 	};
 
+	// The CAD-certified solver must reject a non-orthogonal pressure correction that
+	// its compact same-fluid WLS stencil cannot represent.  The second policy exists
+	// solely for the explicitly labelled legacy-triangle qualitative preview: it keeps
+	// the conservative two-point A/d flux and drops only the unsupported deferred term.
+	enum class UnsupportedNonorthogonalCorrectionPolicy : std::uint8_t
+	{
+		reject = 0,
+		qualitative_preview_orthogonal_fallback = 1,
+		// Explicit first-order preview: use the conservative orthogonal A/d term on
+		// every skew face and omit all deferred WLS corrections, supported or not.
+		qualitative_preview_first_order_orthogonal = 2
+	};
+
+	struct CompositeAmrPressureBuildOptions
+	{
+		bool pressure_outlet_xmax = true;
+		UnsupportedNonorthogonalCorrectionPolicy unsupported_nonorthogonal_correction =
+			UnsupportedNonorthogonalCorrectionPolicy::reject;
+	};
+
 	struct CompositeAmrPressureSystem
 	{
 		const AmrHierarchy* hierarchy = nullptr;
@@ -149,6 +208,10 @@ namespace paracfd::core
 		bool pressure_outlet_xmax = true;
 		std::vector<int> level_offset;
 		std::vector<unsigned char> active;
+		// Active control-volume DOFs belonging to a fluid component connected to the
+		// external X-max reference. Sealed pockets remain valid two-sided fluid, but
+		// are initialized quiescent instead of inheriting the external freestream.
+		std::vector<unsigned char> freestream_connected;
 		std::vector<std::uint8_t> cut_face_mask; // +X/+Y/+Z bits on regular Cartesian DOFs
 		std::vector<double> volume;
 		std::vector<Vec3d> centroid; // merged fluid-control-volume centroid
@@ -157,6 +220,41 @@ namespace paracfd::core
 		std::vector<int> preconditioner_aggregate;
 		std::vector<CoarseFinePressureConnection> coarse_fine;
 		std::vector<CoarseFinePressureConnection> embedded;
+		std::vector<RegularPressureCorrection> regular_pressure_corrections;
+		// Compact weighted-least-squares pressure-gradient topology.  Only DOFs
+		// incident to a skew coarse/fine or EB aperture are present.  For node n,
+		// gradient(p) = sum(weight[q] * (p[neighbour[q]] - p[dof[n]])).
+		std::vector<int> pressure_gradient_dof;
+		std::vector<int> pressure_gradient_offset;
+		std::vector<int> pressure_gradient_neighbour;
+		std::vector<Vec3d> pressure_gradient_weight;
+		std::vector<std::uint8_t> pressure_gradient_rank;
+		// Host-side preprocessing diagnostic: minimum same-fluid graph radius used to
+		// construct each WLS stencil (1=incident neighbours, 2/3=extended rings,
+		// 4=a final bounded extension used only for still-planar rank-2 nodes).
+		// The extension follows only real open apertures and therefore never crosses
+		// a zero-thickness fabric surface.
+		std::vector<std::uint8_t> pressure_gradient_ring;
+		// Corrections below 16 production-scalar epsilons are indistinguishable from
+		// orthogonal in the FP32 operator and are explicitly stored as zero. Counts keep
+		// this representation-aware classification observable during validation.
+		std::size_t numerically_orthogonal_regular = 0;
+		std::size_t numerically_orthogonal_coarse_fine = 0;
+		std::size_t numerically_orthogonal_embedded = 0;
+		double maximum_numerically_orthogonal_correction = 0;
+		// Non-zero only for an explicitly requested qualitative-preview build. Each
+		// count is one deferred non-orthogonal term replaced by its conservative
+		// orthogonal two-point flux. The fallback policy counts unsupported terms;
+		// first-order preview counts every represented skew term. Strict builds throw.
+		std::size_t qualitative_preview_orthogonal_fallback_regular = 0;
+		std::size_t qualitative_preview_orthogonal_fallback_coarse_fine = 0;
+		std::size_t qualitative_preview_orthogonal_fallback_embedded = 0;
+		std::size_t qualitative_preview_orthogonal_fallback_count() const
+		{
+			return qualitative_preview_orthogonal_fallback_regular +
+				qualitative_preview_orthogonal_fallback_coarse_fine +
+				qualitative_preview_orthogonal_fallback_embedded;
+		}
 		// Static CAD provenance and two-sided pressure mapping. These records are
 		// consumed only when publishing loads/visualization, not by timestep kernels.
 		std::vector<CompositeSurfacePressurePatch> surface_patches;
@@ -177,7 +275,12 @@ namespace paracfd::core
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
 		bool pressure_outlet_xmax = true);
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
+		const CompositeAmrPressureBuildOptions& options);
+	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
 		const AmrEmbeddedBoundaryAtlas& embedded_boundary, bool pressure_outlet_xmax = true);
+	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
+		const AmrEmbeddedBoundaryAtlas& embedded_boundary,
+		const CompositeAmrPressureBuildOptions& options);
 
 	struct CompositeAmrFluxes
 	{
@@ -202,6 +305,7 @@ namespace paracfd::core
 		DeviceCompositeAmrPressureOperator(const DeviceCompositeAmrPressureOperator&) = delete;
 		DeviceCompositeAmrPressureOperator& operator=(const DeviceCompositeAmrPressureOperator&) = delete;
 		void apply(const Real* pressure, Real* output) const;
+		void apply_orthogonal(const Real* pressure, Real* output) const;
 		int storage_size() const { return storage_size_; }
 		std::size_t bytes() const { return bytes_; }
 
@@ -212,20 +316,50 @@ namespace paracfd::core
 		std::vector<int> brick_counts_;
 		int *coarse_dof_ = nullptr, *fine_dof_ = nullptr;
 		Real* coefficient_ = nullptr;
+		int *gradient_node_dof_ = nullptr, *gradient_offset_ = nullptr,
+			*gradient_neighbour_ = nullptr, *connection_lower_node_ = nullptr,
+			*connection_upper_node_ = nullptr;
+		Real *gradient_weight_ = nullptr, *gradient_ = nullptr,
+			*connection_correction_ = nullptr, *connection_upper_weight_ = nullptr,
+			*connection_area_ = nullptr;
+		int *regular_correction_lower_ = nullptr, *regular_correction_upper_ = nullptr,
+			*regular_correction_lower_node_ = nullptr, *regular_correction_upper_node_ = nullptr;
+		Real *regular_correction_two_point_delta_ = nullptr,
+			*regular_correction_vector_ = nullptr, *regular_correction_upper_weight_ = nullptr,
+			*regular_correction_area_ = nullptr;
+		int *irregular_incident_dof_ = nullptr, *irregular_incident_offset_ = nullptr,
+			*irregular_incident_edge_ = nullptr;
+		std::int8_t* irregular_incident_sign_ = nullptr;
 		int* gauge_dof_ = nullptr;
 		Real* gauge_coefficient_ = nullptr;
 		unsigned char *active_ = nullptr;
 		std::uint8_t *cut_face_mask_ = nullptr;
-		int level_count_ = 0, connection_count_ = 0, gauge_count_ = 0, storage_size_ = 0, brick_size_ = 0;
+		int level_count_ = 0, connection_count_ = 0, regular_correction_count_ = 0,
+			gradient_node_count_ = 0, irregular_incident_dof_count_ = 0,
+			gauge_count_ = 0, storage_size_ = 0, brick_size_ = 0;
 		bool outlet_ = true;
 		std::size_t bytes_ = 0;
 	};
 
-	struct AmrGpuSolveResult { int iterations = 0; double relative_residual = 0.0; bool converged = false; };
+	struct AmrGpuSolveResult
+	{
+		int iterations = 0;
+		double relative_residual = 0.0;
+		bool converged = false;
+		int preconditioner_applications = 0;
+		int inner_iterations_total = 0;
+		int inner_iterations_maximum = 0;
+		double inner_relative_residual_maximum = 0.0;
+		int irregular_schwarz_applications = 0;
+		double irregular_schwarz_best_defect_ratio = 1.0;
+		int irregular_schwarz_block_count = 0;
+		int irregular_schwarz_max_block_size = 0;
+		int recycle_rejections = 0;
+	};
 
-	// Composite Jacobi-PCG: every level and every coarse/fine connection participates
-	// in one solve. A geometric multilevel preconditioner can replace Jacobi without
-	// changing this conservative composite operator.
+	// GPU-resident deferred non-orthogonal solve. Each inner Krylov solve uses the
+	// positive orthogonal finite-volume operator; outer minimal-residual corrections
+	// converge the complete affine-corrected operator used by the physical flux update.
 	class DeviceCompositeAmrPressureSolver
 	{
 	public:
@@ -239,13 +373,40 @@ namespace paracfd::core
 	private:
 		DeviceCompositeAmrPressureOperator op_;
 		int n_ = 0;
-		Real *r_ = nullptr, *z_ = nullptr, *direction_ = nullptr, *Ad_ = nullptr, *diagonal_ = nullptr;
+		Real *r_ = nullptr, *z_ = nullptr, *direction_ = nullptr, *Ad_ = nullptr,
+			*t_ = nullptr, *correction_ = nullptr, *defect_rhs_ = nullptr,
+			*gmres_v_ = nullptr, *gmres_z_ = nullptr,
+			*gmres_recycle_u_ = nullptr, *gmres_recycle_c_ = nullptr,
+			*diagonal_ = nullptr;
 		unsigned char* active_ = nullptr;
-		int *aggregate_ = nullptr, *base_neighbors_ = nullptr, *base_extra_a_ = nullptr, *base_extra_b_ = nullptr;
+		int *aggregate_ = nullptr, *aggregate_restrict_offset_ = nullptr,
+			*aggregate_restrict_dof_ = nullptr, *base_neighbors_ = nullptr,
+			*base_extra_a_ = nullptr, *base_extra_b_ = nullptr,
+			*base_extra_incident_dof_ = nullptr, *base_extra_incident_offset_ = nullptr,
+			*base_extra_incident_edge_ = nullptr;
 		Real *base_positive_ = nullptr, *base_diagonal_ = nullptr, *base_extra_coefficient_ = nullptr, *base_rhs_ = nullptr, *base_x_ = nullptr, *base_tmp_ = nullptr;
-		int base_offset_ = 0, base_bricks_ = 0, base_cells_ = 0, base_extra_count_ = 0, brick_size_ = 0;
+		int *schwarz_block_offset_ = nullptr, *schwarz_factor_offset_ = nullptr,
+			*schwarz_dof_ = nullptr, *schwarz_pivot_ = nullptr;
+		Real *schwarz_lu_ = nullptr, *schwarz_rhs_ = nullptr;
+		int base_offset_ = 0, base_bricks_ = 0, base_cells_ = 0, base_extra_count_ = 0,
+			base_extra_incident_dof_count_ = 0, schwarz_block_count_ = 0,
+			schwarz_dof_count_ = 0, schwarz_max_block_size_ = 0, brick_size_ = 0;
+		// Flexible GCRO/LGMRES retains a few realized solution-space corrections U and
+		// their orthonormal true images C=A*U across restarts. This preserves the modes
+		// that plain short-restart FGMRES discarded without retaining a 128-vector basis.
+		static constexpr int gmres_restart_ = 24;
+		static constexpr int gmres_recycle_capacity_ = 3;
+		int gmres_recycle_count_ = 0;
+		// Non-owning and populated only when PARACFD_PRESSURE_TRACE is set. Pressure
+		// systems already outlive their device projection; this avoids any production
+		// host-memory cost for failure-only residual localization.
+		const CompositeAmrPressureSystem* trace_system_ = nullptr;
 		std::size_t bytes_ = 0;
 		void apply_preconditioner(const Real* residual, Real* output);
+		void apply_irregular_schwarz(const Real* residual, Real* output);
+		void trace_failure_residual(const Real* residual) const;
+		AmrGpuSolveResult solve_orthogonal(Real* pressure, const Real* rhs,
+			double tolerance, int max_iterations, bool warm_start);
 	};
 
 	struct DeviceCompositeAmrFluxLevelView;
@@ -254,7 +415,7 @@ namespace paracfd::core
 	// graph. Regular faces stay implicit and structured; only coarse/fine and EB aperture
 	// velocities occupy the compact `special_velocity_` array. A project() call performs
 	// divergence -> RHS -> coupled pressure solve -> flux correction without bulk host
-	// transfers or per-step CPU geometry work. PCG scalar reductions are host-orchestrated.
+	// transfers or per-step CPU geometry work. Krylov scalar reductions are host-orchestrated.
 	class DeviceCompositeAmrProjection
 	{
 	public:
@@ -336,11 +497,29 @@ namespace paracfd::core
 		DeviceCompositeAmrFluxLevelView* levels_ = nullptr;
 		unsigned char* active_ = nullptr;
 		std::uint8_t* cut_face_mask_ = nullptr;
-		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr, *pressure_ = nullptr;
-		int *first_dof_ = nullptr, *second_dof_ = nullptr;
+		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr,
+			*pressure_ = nullptr;
+		int *first_dof_ = nullptr, *second_dof_ = nullptr,
+			*special_incident_dof_ = nullptr, *special_incident_offset_ = nullptr,
+			*special_incident_edge_ = nullptr;
 		std::int8_t *direction_ = nullptr, *axis_ = nullptr;
+		std::int8_t* special_incident_sign_ = nullptr;
 		Real *open_area_ = nullptr, *centre_distance_ = nullptr, *pressure_gradient_factor_ = nullptr,
 			*special_velocity_ = nullptr, *max_abs_scratch_ = nullptr;
+		int *pressure_gradient_node_dof_ = nullptr, *pressure_gradient_offset_ = nullptr,
+			*pressure_gradient_neighbour_ = nullptr, *special_lower_gradient_node_ = nullptr,
+			*special_upper_gradient_node_ = nullptr;
+		Real *pressure_gradient_weight_ = nullptr, *pressure_gradient_ = nullptr,
+			*special_nonorthogonal_correction_ = nullptr,
+			*special_upper_gradient_weight_ = nullptr;
+		int *regular_correction_lower_ = nullptr, *regular_correction_upper_ = nullptr,
+			*regular_correction_lower_node_ = nullptr, *regular_correction_upper_node_ = nullptr,
+			*regular_correction_level_ = nullptr;
+		std::uint64_t *regular_correction_index_ = nullptr,
+			*regular_correction_mirror_index_ = nullptr;
+		std::int8_t* regular_correction_axis_ = nullptr;
+		Real *regular_correction_two_point_delta_ = nullptr,
+			*regular_correction_vector_ = nullptr, *regular_correction_upper_weight_ = nullptr;
 		int *cf_fine_level_ = nullptr, *cf_group_ = nullptr, *cf_group_level_ = nullptr;
 		std::uint64_t *cf_fine_index_ = nullptr, *cf_group_index_ = nullptr;
 		std::int8_t* cf_group_axis_ = nullptr;
@@ -373,17 +552,22 @@ namespace paracfd::core
 		std::int8_t* wall_unique_carrier_axis_ = nullptr;
 		Real *wall_carrier_mass_ = nullptr, *wall_node_rate_ = nullptr,
 			*wall_node_axis_sum_ = nullptr, *wall_node_axis_weight_ = nullptr,
-			*wall_node_velocity_delta_ = nullptr, *wall_patch_normal_ = nullptr,
+			*wall_node_velocity_delta_ = nullptr, *wall_node_matrix_ = nullptr,
+			*wall_patch_normal_ = nullptr,
 			*wall_patch_area_ = nullptr,
-			*wall_patch_distance_ = nullptr, *wall_patch_force_per_density_ = nullptr,
+			*wall_patch_distance_ = nullptr, *wall_patch_coefficient_ = nullptr,
+			*wall_patch_force_per_density_ = nullptr,
 			*wall_unique_carrier_mass_ = nullptr;
 		double* wall_momentum_scratch_ = nullptr;
 		std::vector<std::uint32_t> wall_patch_source_triangle_id_, wall_patch_source_face_id_;
 		std::vector<Vec3d> wall_patch_centroid_;
 		std::vector<int> brick_counts_;
 		std::vector<std::uint8_t> embedded_gradient_rank_;
-		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0;
-		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0;
+		int storage_size_ = 0, brick_size_ = 0, level_count_ = 0,
+			pressure_gradient_node_count_ = 0;
+		int regular_pressure_correction_count_ = 0;
+		int coarse_fine_count_ = 0, coarse_fine_group_count_ = 0, special_count_ = 0,
+			special_incident_dof_count_ = 0;
 		int embedded_count_ = 0, embedded_node_count_ = 0, embedded_carrier_count_ = 0,
 			embedded_regular_connection_count_ = 0;
 		int embedded_high_order_stencil_count_ = 0;

@@ -63,7 +63,7 @@ namespace paracfd::core
 	AmrHierarchy AmrHierarchy::build_static(const Aabb3d& domain, const TriMesh& wing, const TriangleBvh& bvh,
 		const AmrConfig& c, bool anchor_y_min)
 	{
-		AmrHierarchy out; out.brick_size_ = c.brick_size; out.ghost_cells_ = c.ghost_cells; out.max_levels_ = std::max(1, c.max_levels); out.initialize_base(domain, c.base_cell_size, anchor_y_min);
+		AmrHierarchy out; out.brick_size_ = c.brick_size; out.ghost_cells_ = c.ghost_cells; out.max_levels_ = std::max(1, c.max_levels + c.topology_refinement_levels); out.initialize_base(domain, c.base_cell_size, anchor_y_min);
 		out.rebuild_level_tables_and_metadata(&bvh);
 		Aabb3d wb; wb.lo = {wing.bbox_min[0], wing.bbox_min[1], wing.bbox_min[2]}; wb.hi = {wing.bbox_max[0], wing.bbox_max[1], wing.bbox_max[2]};
 		const Vec3d wc = (wb.lo + wb.hi) * 0.5;
@@ -76,12 +76,19 @@ namespace paracfd::core
 				const BrickMetadata& b = out.levels_[l].bricks[id]; if (!b.active()) continue;
 				const Aabb3d bb = brick_box(b, out.brick_size_);
 				const bool wing_region = l == 0 && box_overlap(bb, expanded(wb, c.wing_refinement_distance));
-				const bool surface_region = !bvh.query_aabb(expanded(bb, c.surface_refinement_distance)).empty();
+				// Normal flow levels retain the configured physical collar. Optional
+				// topology-only levels add one parent-brick halo around intersected
+				// parents, keeping every EB cell away from a 2:1 interface without
+				// multiplying the whole physical collar at the extra resolution.
+				const double surface_distance = l + 1 < c.max_levels
+					? c.surface_refinement_distance
+					: out.brick_size_ * static_cast<double>(b.h);
+				const bool surface_region = !bvh.query_aabb(expanded(bb, surface_distance)).empty();
 				// The finest level is reserved for fabric topology. Refining the entire
 				// volumetric wake to that level multiplies memory while doing nothing to
 				// resolve ribs, openings, or trailing edges. Keep the near wake one level
 				// coarser; its length/radius remain independently configurable.
-				const bool wake_region = l + 1 < out.max_levels_ - 1 && box_overlap(bb, wake);
+				const bool wake_region = l + 1 < c.max_levels - 1 && box_overlap(bb, wake);
 				if (wing_region || surface_region || wake_region) out.refine_brick(l, static_cast<int>(id));
 			}
 			out.rebuild_level_tables_and_metadata(&bvh);

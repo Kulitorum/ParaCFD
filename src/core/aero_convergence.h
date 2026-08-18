@@ -22,6 +22,84 @@ namespace paracfd::core
 		double current_rms_fraction=0;
 	};
 
+	enum class AerodynamicRunExitReason
+	{
+		None,
+		Steady,
+		MeanConverged,
+		MaximumFlowThroughs
+	};
+
+	struct AerodynamicRunExitState
+	{
+		int settling_consecutive=0;
+		int mean_consecutive=0;
+		bool mean_force_ready=false;
+		double mean_force_relative_drift=0;
+		double relative_mean_tolerance=0.02;
+		double flow_throughs=0;
+		double maximum_flow_throughs=2.5;
+	};
+
+	// Single runs and sweep cases use this same ordering. A statistically steady
+	// result wins over the mean-only result, and either converged result wins over
+	// the explicit maximum-flow endpoint reached on the same sample.
+	inline AerodynamicRunExitReason select_aerodynamic_run_exit(
+		const AerodynamicRunExitState& state)
+	{
+		const bool mean_converged=state.mean_force_ready&&
+			state.mean_force_relative_drift<state.relative_mean_tolerance;
+		if(state.settling_consecutive>=3&&mean_converged)
+			return AerodynamicRunExitReason::Steady;
+		if(state.mean_consecutive>=3&&mean_converged)
+			return AerodynamicRunExitReason::MeanConverged;
+		if(state.flow_throughs>=state.maximum_flow_throughs)
+			return AerodynamicRunExitReason::MaximumFlowThroughs;
+		return AerodynamicRunExitReason::None;
+	}
+
+	struct BoundedAerodynamicMean
+	{
+		bool ready=false;
+		bool complete=false;
+		Vec3d force{};
+		double coverage=0;
+	};
+
+	// Time-weighted load over the available tail of the requested final window.
+	// This remains usable (and explicitly marked partial) when a bounded run reaches
+	// its maximum-flow endpoint before a complete adjacent-window comparison exists.
+	inline BoundedAerodynamicMean bounded_aerodynamic_mean(
+		const std::deque<TimedAerodynamicForce>& samples,double end_time,double window)
+	{
+		BoundedAerodynamicMean out;
+		if(!(window>0)||samples.size()<2)return out;
+		const double oldest=end_time-window;
+		Vec3d integral{};
+		double covered=0;
+		int segments=0;
+		for(std::size_t q=0;q+1<samples.size();++q)
+		{
+			const auto& a=samples[q];
+			const auto& b=samples[q+1];
+			if(!(b.time>a.time))continue;
+			const double left=std::max(oldest,a.time),right=std::min(end_time,b.time);
+			if(!(right>left))continue;
+			const double inverse=1.0/(b.time-a.time);
+			const double ta=(left-a.time)*inverse,tb=(right-a.time)*inverse,dt=right-left;
+			const Vec3d fa=a.force+(b.force-a.force)*ta;
+			const Vec3d fb=a.force+(b.force-a.force)*tb;
+			integral=integral+(fa+fb)*(0.5*dt);
+			covered+=dt;
+			++segments;
+		}
+		out.ready=segments>0&&covered>0;
+		out.coverage=std::clamp(covered/window,0.0,1.0);
+		out.complete=out.ready&&out.coverage>=0.98;
+		if(out.ready)out.force=integral/covered;
+		return out;
+	}
+
 	namespace detail
 	{
 		struct ForceWindowStatistics

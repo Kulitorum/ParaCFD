@@ -33,13 +33,23 @@ namespace paracfd::core
 		Int3 maximum_brick_coord{};
 		EmbeddedBoundary topology;
 		std::vector<unsigned char> owned_cell; // active cells whose finest owner is this level
+		std::size_t quality_agglomerations = 0; // same-fluid merges restoring usable aperture geometry
+		std::size_t static_subcell_components = 0; // isolated one-root states with no positive-area aperture
+		std::size_t static_subcell_aggregates = 0;
+		double static_subcell_volume = 0;
+		double maximum_aggregate_span_cells = 0; // constituent-centroid span / h after all merges
 	};
 
 	struct AmrEmbeddedBoundaryAtlas
 	{
 		std::vector<AmrEbLevelAtlas> levels;
+		std::size_t unresolved_count() const;
 		std::size_t owned_unresolved_count() const;
-		bool ready_for_flow() const { return owned_unresolved_count() == 0; }
+		// Covered cells are retained as a one-cell topology halo. A rejection there
+		// invalidates the face/fragment contract seen by its owned neighbour even though
+		// it owns no pressure DOF on this level. Ownership is a storage policy, not a
+		// licence to ignore a geometry failure.
+		bool ready_for_flow() const { return unresolved_count() == 0; }
 	};
 
 	// Build one sparse rectangular topology atlas around the active EB bricks of each

@@ -25,8 +25,57 @@ namespace paracfd::gui
 		VelU = 1,     // x-velocity (cell centre)
 		VelV = 2,     // y-velocity
 		VelW = 3,     // z-velocity
-		Pressure = 4  // cell pressure
+		PressureDelta = 4,        // gauge pressure p-p_inf [Pa]
+		PressureCoefficient = 5,  // Cp=(p-p_inf)/(0.5 rho U_inf^2)
+		PressureGradient = 6,     // |grad p| [Pa/m]
+		VorticityMagnitude = 7,   // |curl u| [1/s]
+		QCriterion = 8            // 0.5 (||Omega||^2-||S||^2) [1/s^2]
 	};
+
+	inline const char* field_short_name(Field field)
+	{
+		switch (field)
+		{
+		case Field::SpeedMag: return "|u|";
+		case Field::VelU: return "u";
+		case Field::VelV: return "v";
+		case Field::VelW: return "w";
+		case Field::PressureDelta: return "Delta p";
+		case Field::PressureCoefficient: return "Cp";
+		case Field::PressureGradient: return "|grad p|";
+		case Field::VorticityMagnitude: return "|omega|";
+		case Field::QCriterion: return "Q";
+		}
+		return "field";
+	}
+
+	inline const char* field_units(Field field)
+	{
+		switch (field)
+		{
+		case Field::SpeedMag:
+		case Field::VelU:
+		case Field::VelV:
+		case Field::VelW: return "m/s";
+		case Field::PressureDelta: return "Pa";
+		case Field::PressureCoefficient: return "";
+		case Field::PressureGradient: return "Pa/m";
+		case Field::VorticityMagnitude: return "1/s";
+		case Field::QCriterion: return "1/s^2";
+		}
+		return "";
+	}
+
+	inline bool field_is_magnitude(Field field)
+	{
+		return field == Field::SpeedMag || field == Field::PressureGradient
+			|| field == Field::VorticityMagnitude;
+	}
+
+	inline bool field_uses_signed_iso_pair(Field field)
+	{
+		return field == Field::PressureDelta || field == Field::PressureCoefficient;
+	}
 
 	// Plane normal axis.
 	enum class Axis : int
@@ -53,6 +102,8 @@ namespace paracfd::gui
 		Field field = Field::SpeedMag;
 		float vmin = 0.0f; // colour-map lower bound (field units)
 		float vmax = 1.0f; // colour-map upper bound
+		float rho = 1.225f; // reference density for Cp
+		float reference_speed = 10.0f; // reference speed for Cp
 	};
 
 	// World position of mesh vertex (a,b) on the slice plane. Shared by the colour path
@@ -75,7 +126,7 @@ namespace paracfd::gui
 	}
 
 	// Fill `out` (device, nu*nv float4 RGBA in [0,1]) from the device MAC fields. `p` may
-	// be null (then Pressure renders as 0). Launches on `stream` (0 = default).
+	// be null (then pressure-derived fields render as 0). Launches on `stream` (0 = default).
 	void slice_fill_gpu(const double* u, const double* v, const double* w, const double* p,
 		const SliceParams& sp, float4* out, cudaStream_t stream);
 
@@ -100,11 +151,14 @@ namespace paracfd::gui
 	// over cells where `solid` is 0 (null ⇒ all fluid); non-finite cells are skipped so a NaN blow-up
 	// never poisons the scale. Initialises out3_dev itself; launches on `stream`. `field` selects the
 	// scalar (same cell-centred sampling as the slice fill), so the reduced range matches the display.
-	// `p` may be null (⇒ Pressure samples as 0), matching the slice fill.
+	// `p` may be null (⇒ pressure fields sample as 0), matching the slice fill. The reference
+	// density and speed only affect Cp.
 	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float* out3_dev, cudaStream_t stream);
+		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float* out3_dev,
+		cudaStream_t stream, float rho = 1.225f, float reference_speed = 10.0f);
 
 	// CPU reference (host fields → out3[3]) with identical arithmetic. Used by the GPU-vs-CPU test.
 	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float out3[3]);
+		const unsigned char* solid, paracfd::core::MacGrid g, Field field, float out3[3],
+		float rho = 1.225f, float reference_speed = 10.0f);
 }

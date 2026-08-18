@@ -17,6 +17,31 @@ namespace paracfd::gui
 	{
 		PARACFD_HD inline int clampi(int x, int lo, int hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
+		PARACFD_HD inline double cell_component(const double* u, const double* v, const double* w,
+			MacGrid g, int component, int i, int j, int k)
+		{
+			i = clampi(i, 0, g.nx - 1); j = clampi(j, 0, g.ny - 1); k = clampi(k, 0, g.nz - 1);
+			if (component == 0) return 0.5 * (u[g.uidx(i, j, k)] + u[g.uidx(i + 1, j, k)]);
+			if (component == 1) return 0.5 * (v[g.vidx(i, j, k)] + v[g.vidx(i, j + 1, k)]);
+			return 0.5 * (w[g.widx(i, j, k)] + w[g.widx(i, j, k + 1)]);
+		}
+
+		PARACFD_HD inline double centred_derivative(const double* u, const double* v, const double* w,
+			MacGrid g, int component, int axis, int i, int j, int k)
+		{
+			const int lo = axis == 0 ? i - 1 : axis == 1 ? j - 1 : k - 1;
+			const int hi = axis == 0 ? i + 1 : axis == 1 ? j + 1 : k + 1;
+			const int n = axis == 0 ? g.nx : axis == 1 ? g.ny : g.nz;
+			const int a = clampi(lo, 0, n - 1), b = clampi(hi, 0, n - 1);
+			if (a == b) return 0.0;
+			int ia = i, ja = j, ka = k, ib = i, jb = j, kb = k;
+			if (axis == 0) { ia = a; ib = b; }
+			else if (axis == 1) { ja = a; jb = b; }
+			else { ka = a; kb = b; }
+			return (cell_component(u, v, w, g, component, ib, jb, kb)
+				- cell_component(u, v, w, g, component, ia, ja, ka)) / ((b - a) * g.h);
+		}
+
 		// Perceptual 5-stop gradient blue->cyan->green->yellow->red over t in [0,1]. Delegates to
 		// the SHARED ramp (gui/colormap.h) so the slice, the flow arrows and the legend agree, and
 		// so the GPU kernel and its CPU reference stay bit-for-bit identical (plain float lerps).
@@ -30,7 +55,7 @@ namespace paracfd::gui
 
 		// Cell-centred scalar of the chosen field at MAC cell (i,j,k).
 		PARACFD_HD inline float sample_scalar(const double* u, const double* v, const double* w, const double* p,
-			MacGrid g, Field field, int i, int j, int k)
+			MacGrid g, Field field, int i, int j, int k, float rho, float reference_speed)
 		{
 			switch (field)
 			{
@@ -40,8 +65,47 @@ namespace paracfd::gui
 				return (float)(0.5 * (v[g.vidx(i, j, k)] + v[g.vidx(i, j + 1, k)]));
 			case Field::VelW:
 				return (float)(0.5 * (w[g.widx(i, j, k)] + w[g.widx(i, j, k + 1)]));
-			case Field::Pressure:
+			case Field::PressureDelta:
 				return p ? (float)p[g.pidx(i, j, k)] : 0.0f;
+			case Field::PressureCoefficient:
+			{
+				const double q = 0.5 * rho * reference_speed * reference_speed;
+				return p && q > 0.0 ? (float)(p[g.pidx(i, j, k)] / q) : 0.0f;
+			}
+			case Field::PressureGradient:
+			{
+				if (!p) return 0.0f;
+				auto dp = [&](int axis)
+				{
+					const int c = axis == 0 ? i : axis == 1 ? j : k;
+					const int n = axis == 0 ? g.nx : axis == 1 ? g.ny : g.nz;
+					const int a = clampi(c - 1, 0, n - 1), b = clampi(c + 1, 0, n - 1);
+					if (a == b) return 0.0;
+					int ia=i,ja=j,ka=k,ib=i,jb=j,kb=k;
+					if(axis==0){ia=a;ib=b;}else if(axis==1){ja=a;jb=b;}else{ka=a;kb=b;}
+					return (p[g.pidx(ib,jb,kb)]-p[g.pidx(ia,ja,ka)])/((b-a)*g.h);
+				};
+				const double x=dp(0),y=dp(1),z=dp(2);return (float)sqrt(x*x+y*y+z*z);
+			}
+			case Field::VorticityMagnitude:
+			case Field::QCriterion:
+			{
+				double a[3][3];
+				for(int row=0;row<3;++row)for(int col=0;col<3;++col)
+					a[row][col]=centred_derivative(u,v,w,g,row,col,i,j,k);
+				if(field==Field::VorticityMagnitude)
+				{
+					const double ox=a[2][1]-a[1][2],oy=a[0][2]-a[2][0],oz=a[1][0]-a[0][1];
+					return (float)sqrt(ox*ox+oy*oy+oz*oz);
+				}
+				double ss=0.0,oo=0.0;
+				for(int row=0;row<3;++row)for(int col=0;col<3;++col)
+				{
+					const double s=0.5*(a[row][col]+a[col][row]);
+					const double o=0.5*(a[row][col]-a[col][row]);ss+=s*s;oo+=o*o;
+				}
+				return (float)(0.5*(oo-ss));
+			}
 			case Field::SpeedMag:
 			default:
 			{
@@ -75,7 +139,7 @@ namespace paracfd::gui
 			int i = clampi((int)floor(paracfd::core::grid_fx(g, (double)x)), 0, g.nx - 1);
 			int j = clampi((int)floor(paracfd::core::grid_fy(g, (double)y)), 0, g.ny - 1);
 			int k = clampi((int)floor(paracfd::core::grid_fz(g, (double)z)), 0, g.nz - 1);
-			float s = sample_scalar(u, v, w, p, g, sp.field, i, j, k);
+			float s = sample_scalar(u, v, w, p, g, sp.field, i, j, k, sp.rho, sp.reference_speed);
 			float denom = (sp.vmax > sp.vmin) ? (sp.vmax - sp.vmin) : 1.0f;
 			return colormap((s - sp.vmin) / denom);
 		}
@@ -126,7 +190,7 @@ namespace paracfd::gui
 		// One block-reduced min/max/speed-max over a grid-stride slice of the pressure-cell index
 		// space (cell == pidx(i,j,k) by construction of the MAC layout), then a single atomic per value.
 		__global__ void k_range_reduce(const double* u, const double* v, const double* w, const double* p,
-			const unsigned char* solid, MacGrid g, Field field, float* out3)
+			const unsigned char* solid, MacGrid g, Field field, float* out3,float rho,float reference_speed)
 		{
 			__shared__ float smin[256];
 			__shared__ float smax[256];
@@ -141,7 +205,7 @@ namespace paracfd::gui
 				const int i = cell % g.nx;
 				const int j = (cell / g.nx) % g.ny;
 				const int k = cell / nxy;
-				float s = sample_scalar(u, v, w, p, g, field, i, j, k);
+				float s = sample_scalar(u, v, w, p, g, field, i, j, k, rho, reference_speed);
 				float sp = cell_speed(u, v, w, g, i, j, k);
 				if (isfinite(s)) { lmin = fminf(lmin, s); lmax = fmaxf(lmax, s); }
 				if (isfinite(sp)) lspd = fmaxf(lspd, sp);
@@ -185,7 +249,8 @@ namespace paracfd::gui
 	}
 
 	void slice_reduce_gpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, MacGrid g, Field field, float* out3_dev, cudaStream_t stream)
+		const unsigned char* solid, MacGrid g, Field field, float* out3_dev, cudaStream_t stream,
+		float rho,float reference_speed)
 	{
 		int ncell = g.p_count();
 		if (ncell <= 0 || !out3_dev) return;
@@ -193,11 +258,11 @@ namespace paracfd::gui
 		const int block = 256;
 		int grid = (ncell + block - 1) / block;
 		if (grid > 1024) grid = 1024; // grid-stride covers the remainder; caps atomic contention
-		k_range_reduce<<<grid, block, 0, stream>>>(u, v, w, p, solid, g, field, out3_dev);
+		k_range_reduce<<<grid, block, 0, stream>>>(u, v, w, p, solid, g, field, out3_dev,rho,reference_speed);
 	}
 
 	void slice_reduce_cpu(const double* u, const double* v, const double* w, const double* p,
-		const unsigned char* solid, MacGrid g, Field field, float out3[3])
+		const unsigned char* solid, MacGrid g, Field field, float out3[3],float rho,float reference_speed)
 	{
 		float fmin = FLT_MAX, fmax = -FLT_MAX, smax = 0.0f;
 		for (int k = 0; k < g.nz; ++k)
@@ -205,7 +270,7 @@ namespace paracfd::gui
 				for (int i = 0; i < g.nx; ++i)
 				{
 					if (solid && solid[g.pidx(i, j, k)]) continue;
-					float s = sample_scalar(u, v, w, p, g, field, i, j, k);
+					float s = sample_scalar(u, v, w, p, g, field, i, j, k, rho, reference_speed);
 					float sp = cell_speed(u, v, w, g, i, j, k);
 					if (std::isfinite(s)) { fmin = std::min(fmin, s); fmax = std::max(fmax, s); }
 					if (std::isfinite(sp)) smax = std::max(smax, sp);

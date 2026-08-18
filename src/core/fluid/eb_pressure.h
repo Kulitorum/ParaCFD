@@ -1,8 +1,9 @@
 // eb_pressure.h — matrix-free finite-volume pressure operator for zero-thickness EB topology.
 //
-// Regular-to-regular faces are never stored: CPU/GPU apply them as a Cartesian stencil. Only
-// split apertures use compact records. Rows are integrated flux balances (coefficient A_open/d),
-// while reported divergence is divided by the actual control-volume volume.
+// Regular-to-regular faces are never stored: CPU/GPU apply them as a Cartesian stencil. Split
+// apertures and the few ordinary faces displaced by fragment agglomeration use compact records.
+// Rows are integrated flux balances (coefficient A_open/d), while reported divergence is divided
+// by the actual control-volume volume.
 #pragma once
 
 #include "core/fluid/real.h"
@@ -62,11 +63,17 @@ namespace paracfd::core
 
 	private:
 		UniformEbGrid grid_;
-		int storage_size_=0, aperture_count_=0;
+		int storage_size_=0, aperture_count_=0, geometry_correction_count_=0;
 		int *cell_dof_=nullptr,*fragment_dof_=nullptr;
 		std::uint8_t* cut_face_mask_=nullptr;
 		FragmentRef *aperture_a_=nullptr,*aperture_b_=nullptr;
 		Real *aperture_area_=nullptr,*aperture_distance_=nullptr;
+		// The ordinary Cartesian kernel retains its h stencil.  Only faces incident to
+		// a pressure control volume displaced by conservative fragment agglomeration
+		// need this compact A/d_actual - A/h adjustment (b < 0 denotes the X-max
+		// pressure-reference face).  This keeps the regular GPU path branch-free.
+		int *geometry_correction_a_=nullptr,*geometry_correction_b_=nullptr;
+		Real* geometry_coefficient_delta_=nullptr;
 		std::size_t bytes_=0;
 		bool outlet_=true;
 	};

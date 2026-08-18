@@ -2,6 +2,7 @@
 build/
 build-*/
 out/
+*.obj
 
 # User geometry experiments (STEP/STL inputs kept out of the repo)
 Experiments/
