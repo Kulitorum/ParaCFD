@@ -54,6 +54,11 @@ namespace paracfd::core
 		int arrangement_index = -1; // exact finite-triangle arrangement for complex cells
 		int exact_locator_index = -1; // OCC-produced closed fragment boundaries, host only
 		std::uint32_t source_face_id = ~std::uint32_t{0}; // common CAD face for an analytic local sheet
+		// Range in EmbeddedBoundary::analytic_plane_support_triangles.  The analytic
+		// plane fit deliberately remains smooth, while this exact finite-triangle
+		// lineage lets a shared-face transaction reuse its once-derived physical trace.
+		int plane_support_offset = -1;
+		std::uint32_t plane_support_count = 0;
 	};
 
 	struct EbOrientedBoundaryTriangle
@@ -165,6 +170,7 @@ namespace paracfd::core
 		std::vector<FragmentRef> sampled_voxel_fragments;
 		std::vector<LocalSurfaceArrangement> arrangements;
 		std::vector<ExactEbCellLocator> exact_locators;
+		std::vector<std::uint32_t> analytic_plane_support_triangles;
 		std::vector<UnresolvedEbCell> unresolved;
 		std::vector<CoincidentSurfaceProvenance> coincident_surface_provenance;
 		double min_volume_fraction = 0.25;

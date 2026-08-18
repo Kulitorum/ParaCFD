@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <numeric>
@@ -361,7 +362,7 @@ namespace
 	}
 }
 
-int main()
+int run_probe()
 {
 	std::setvbuf(stdout,nullptr,_IONBF,0);
 	NacaFourDigitDefinition naca0012,naca2412;std::string naca_error;const bool parsed0012=parse_naca_four_digit("0012",naca0012,&naca_error),parsed2412=parse_naca_four_digit("2412",naca2412,&naca_error);constexpr double radians_per_degree=3.14159265358979323846/180.0;
@@ -1229,7 +1230,11 @@ int main()
 	AmrHostFields ahf(ah);int covered_parent=-1;for(int q=0;q<(int)ah.levels()[0].bricks.size();++q)if(!ah.levels()[0].bricks[q].active()){covered_parent=q;break;}if(covered_parent>=0){auto& cp=ahf.levels()[0];for(int k=0;k<ah.brick_size();++k)for(int j=0;j<ah.brick_size();++j)for(int i=0;i<ah.brick_size();++i)cp.p[cp.layout.cell_index(covered_parent,i,j,k)]=(Real)3.25;prolong_coarse_pressure_to_fine(ah,ahf,1);restrict_fine_pressure_to_coarse(ah,ahf,1);}check(covered_parent>=0&&near(ahf.levels()[0].p[ahf.levels()[0].layout.cell_index(covered_parent,1,1,1)],3.25,1e-7),"AMR prolongation/restriction conserves cell mean");
 
 	ParagliderConfig cfg;std::string err;check(load_paraglider_config("configs/paraglider.json",cfg,&err)&&near(cfg.freestream.speed,10)&&cfg.amr.brick_size==32&&cfg.amr.complex_subdivisions==4&&near(cfg.amr.min_volume_fraction,0.25)&&near(cfg.amr.min_aperture_area_fraction,1e-4),"paraglider configuration schema/default");
-	ParagliderConfig core_config;core_config.domain={1,3,1,1};core_config.amr.base_cell_size=1;core_config.amr.max_levels=1;core_config.amr.brick_size=4;core_config.amr.ghost_cells=1;core_config.amr.complex_subdivisions=8;core_config.solver.cfl=0.2;core_config.solver.projection_tolerance=sizeof(Real)==4?1e-5:1e-10;core_config.solver.projection_max_iterations=500;core_config.freestream.speed=1;core_config.freestream.rho=1;TriangleBvh core_plate_bvh(flat);
+	// Keep this broad ExternalAeroCore lifecycle smoke test away from a Cartesian-face
+	// singular placement.  Exact face-aligned topology, pressure isolation, loads, LES,
+	// and wall flux have dedicated deterministic checks above; this case is intended to
+	// exercise construction, initialization, one timestep, and load publication.
+	ParagliderConfig core_config;core_config.domain={1.125,2.875,1,1};core_config.amr.base_cell_size=1;core_config.amr.max_levels=1;core_config.amr.brick_size=4;core_config.amr.ghost_cells=1;core_config.amr.complex_subdivisions=8;core_config.solver.cfl=0.2;core_config.solver.projection_tolerance=sizeof(Real)==4?1e-5:1e-10;core_config.solver.projection_max_iterations=500;core_config.freestream.speed=1;core_config.freestream.rho=1;TriangleBvh core_plate_bvh(flat);
 	ExternalAeroCore external_core(flat,core_plate_bvh,core_config);ExternalAeroStepStats initialization=external_core.initialize();ExternalAeroStepStats external_step=initialization.pressure.converged?external_core.step():ExternalAeroStepStats{};AerodynamicLoads external_load=external_core.aerodynamic_loads();check(!external_core.uses_conservative_cell_momentum()&&external_core.active_face_count()>0&&initialization.pressure.converged&&external_step.pressure.converged&&external_step.les_applied&&external_step.embedded_transport_applied&&external_step.smooth_fabric_wall_applied&&external_load.viscous_loads_valid&&external_core.physical_time()>0&&external_core.gpu_bytes()>0&&std::isfinite(external_load.pressure_force.x)&&std::isfinite(external_load.total_force.x),"default external-aero core uses face-centred MAC momentum, advances wall flux, and projects");
 	TriMesh cavity_mesh=mesh_from_quads({
 		{{{0,0,0},{0,0,4},{0,4,4},{0,4,0}}},
@@ -1245,4 +1250,22 @@ int main()
 	AmrHostFields aligned_wall_host(uh);for(auto& level:aligned_wall_host.levels()){std::fill(level.u.begin(),level.u.end(),Real(0));std::fill(level.v.begin(),level.v.end(),Real(1));std::fill(level.w.begin(),level.w.end(),Real(0));}DeviceAmrFields aligned_wall_fields(uh);aligned_wall_fields.upload(aligned_wall_host);DeviceCompositeAmrProjection aligned_wall_projection(disconnected_system,aligned_wall_fields);const auto& aligned_layout=aligned_wall_host.levels()[0].layout;const double aligned_before=aligned_wall_host.levels()[0].v[aligned_layout.v_index(0,3,2,1)]+aligned_wall_host.levels()[0].v[aligned_layout.v_index(1,0,2,1)];aligned_wall_projection.transport_embedded_apertures(Real(0.1),Real(0.5),Real(0));aligned_wall_fields.download(aligned_wall_host);const double aligned_after=aligned_wall_host.levels()[0].v[aligned_layout.v_index(0,3,2,1)]+aligned_wall_host.levels()[0].v[aligned_layout.v_index(1,0,2,1)];check(disconnected_system.embedded.empty()&&aligned_wall_projection.fabric_wall_node_count()>0&&aligned_after<aligned_before,"face-aligned fabric receives no-slip wall flux without compact apertures");
 
 	std::printf("[paraglider] geometry/topology probe: %s (%d failures)\n",failures?"FAIL":"PASS",failures);return failures?1:0;
+}
+
+int main()
+{
+	try
+	{
+		return run_probe();
+	}
+	catch(const std::exception& error)
+	{
+		std::fprintf(stderr,"[paraglider] geometry/topology probe aborted by exception: %s\n",error.what());
+		return 2;
+	}
+	catch(...)
+	{
+		std::fprintf(stderr,"[paraglider] geometry/topology probe aborted by an unknown exception\n");
+		return 3;
+	}
 }

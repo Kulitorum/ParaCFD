@@ -697,7 +697,10 @@ bool check_shared_face_fragment_disagreement()
   for (const auto &unresolved : boundary.unresolved)
     named_disagreement = named_disagreement
         || unresolved.reason.find("ownership disagrees") != std::string::npos
-        || unresolved.reason.find("partitions disagree") != std::string::npos;
+        || unresolved.reason.find("partitions disagree") != std::string::npos
+        || unresolved.reason.find(
+            "canonical shared-face tile crosses a continuous transverse fabric trace")
+            != std::string::npos;
   const bool pass = !boundary.ready_for_flow() && boundary.unresolved.size() == 2
       && named_disagreement && boundary.rejected_cross_fabric_apertures == 0
       && close(boundary.rejected_cross_fabric_aperture_area, 0.0);

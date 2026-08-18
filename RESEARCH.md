@@ -59,13 +59,15 @@ The imported 1.3 m cylinder exposed a non-orthogonal aperture case in which the 
 The newer closed-cylinder topology oracle distinguishes geometric aperture measure from
 pressure-owner connectivity. Certified edge-lineage and ULP-stable face traces reduce
 the explicit cross-surface aperture count and area to exactly zero without deleting any
-positive measure. The pressure graph nevertheless exposes 2,348 compact edges whose
-mapped arrangement fragments lie in opposite closed-surface regions. A face-normal
+positive measure. Retaining each analytic plane's source-triangle support lineage
+reduced the pressure graph's wrong closed-surface owner pairings from 2,348 to 1,292.
+The remainder occurs where one analytic cell fits a single plane through multiple
+curved facets while its exact neighbor retains their piecewise traces. A face-normal
 centroid probe misses these edges when the wall is transverse to the Cartesian face.
 A blanket source-face side-mask rejection is also wrong: it closes confirmed-free
 openings, including the retained `3.4911e-16 m^2` vent. The unresolved requirement is
-therefore a per-tile proof that both owners share one local arrangement region, using
-atom/sign and attached/free trace lineage. Ambiguity must reject the whole face
+therefore a piecewise trace-to-fragment face-region adapter which proves that both
+owners share one local region using atom/sign and attached/free trace lineage. Ambiguity must reject the whole face
 transaction; area-based deletion remains forbidden.
 
 ### Production face-centred fabric-safe transport

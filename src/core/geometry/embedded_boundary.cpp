@@ -942,7 +942,19 @@ namespace paracfd::core
 				if(sampled_fallback())continue;
 				eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,"fabric coverage is not one complete local sheet (termination, overlap, or sub-cell opening); refine rather than merge opposite sides"});continue;
 			}
-			EbCellTopology& ct=eb.cells[cell];ct.state=EbCellState::split;ct.first_fragment=static_cast<int>(eb.fragments.size());ct.fragment_count=2;ct.plane_normal=repn;ct.plane_offset=repd;ct.source_face_id=bvh.triangle(clipped.front().id).source_face_id;for(const ClippedTriangle& cp:clipped)if(bvh.triangle(cp.id).source_face_id!=ct.source_face_id){ct.source_face_id=~std::uint32_t{0};break;}eb.irregular_cells.push_back(cell);
+			EbCellTopology& ct=eb.cells[cell];ct.state=EbCellState::split;ct.first_fragment=static_cast<int>(eb.fragments.size());ct.fragment_count=2;ct.plane_normal=repn;ct.plane_offset=repd;ct.source_face_id=bvh.triangle(clipped.front().id).source_face_id;for(const ClippedTriangle& cp:clipped)if(bvh.triangle(cp.id).source_face_id!=ct.source_face_id){ct.source_face_id=~std::uint32_t{0};break;}
+			ct.plane_support_offset=static_cast<int>(eb.analytic_plane_support_triangles.size());
+			for(const ClippedTriangle& cp:clipped)
+				eb.analytic_plane_support_triangles.push_back(cp.id);
+			std::sort(eb.analytic_plane_support_triangles.begin()+ct.plane_support_offset,
+				eb.analytic_plane_support_triangles.end());
+			eb.analytic_plane_support_triangles.erase(std::unique(
+				eb.analytic_plane_support_triangles.begin()+ct.plane_support_offset,
+				eb.analytic_plane_support_triangles.end()),
+				eb.analytic_plane_support_triangles.end());
+			ct.plane_support_count=static_cast<std::uint32_t>(
+				eb.analytic_plane_support_triangles.size()-ct.plane_support_offset);
+			eb.irregular_cells.push_back(cell);
 			eb.fragments.push_back({cell,minus.volume,minus.centroid,-1,irregular_fragment(ct.first_fragment),grid.cell_count()+ct.first_fragment,0,0});
 			eb.fragments.push_back({cell,plus.volume,plus.centroid,1,irregular_fragment(ct.first_fragment+1),grid.cell_count()+ct.first_fragment+1,0,0});
 			for(const auto& cp:clipped)
@@ -1156,7 +1168,17 @@ namespace paracfd::core
 				}
 				if(topology.state!=EbCellState::split||topology.sampled_resolution)
 				{error="shared-face structural adapter received a non-analytic cell";return false;}
-				side.planes.push_back({topology.plane_normal,topology.plane_offset});
+				LocalArrangementSharedFacePartitionPlane plane;
+				plane.normal=topology.plane_normal;plane.offset=topology.plane_offset;
+				if(topology.plane_support_offset>=0&&topology.plane_support_count>0&&
+					static_cast<std::size_t>(topology.plane_support_offset)+
+						topology.plane_support_count<=eb.analytic_plane_support_triangles.size())
+				{
+					const auto begin=eb.analytic_plane_support_triangles.begin()+
+						topology.plane_support_offset;
+					plane.support_triangles.assign(begin,begin+topology.plane_support_count);
+				}
+				side.planes.push_back(std::move(plane));
 				side.regions.push_back({{-1},eb.fragment_for_side(cell,-1)});
 				side.regions.push_back({{1},eb.fragment_for_side(cell,1)});return true;
 			}

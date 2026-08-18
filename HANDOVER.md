@@ -30,9 +30,10 @@ not a current strict-CAD acceptance result. The new fail-closed local-arrangemen
 currently rejects the tracked NACA 2412 case (four OCCT General Fuse warnings and eight
 shared-face ownership mismatches), so `naca_geometry` is intentionally red. A separate
 closed triangulated-cylinder regression now retains every manufactured microscopic
-opening and eliminates all explicit roundoff apertures, but still finds 2,348 compact
-pressure edges whose two fragment owners belong to opposite closed-surface regions.
-The correct next step is tile-local atom/sign lineage at the shared-face transaction;
+opening and eliminates all explicit roundoff apertures. Preserving analytic-plane
+source-triangle lineage reduced wrong pressure-owner edges from 2,348 to 1,292, but
+fitted analytic planes still disagree with exact piecewise traces in adjacent curved
+cells. The correct next step is a piecewise trace-to-fragment face-region adapter;
 neither an aperture-area cutoff nor a whole-face plus/minus mask is acceptable, because
 the latter closes the tested `3.4911e-16 m^2` confirmed-free vent. Until that graph audit
 passes, the GUI's default path remains explicitly labelled qualitative preview and no
