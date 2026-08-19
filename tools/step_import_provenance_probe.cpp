@@ -128,23 +128,185 @@ namespace
 			if (segments < 2) result.structurally_valid = false;
 		return result;
 	}
+
+	bool contact_graph_is_structurally_valid(const StepCadContactGraph& graph)
+	{
+		std::set<std::uint64_t> ids;
+		std::set<std::uint32_t> source_edge_ids;
+		using FailureKey = std::tuple<std::uint64_t, std::uint32_t, StepContactUseKind>;
+		std::set<FailureKey> unresolved_uses;
+		for (const StepCadContactGraph::UvProjectionFailure& failure :
+			graph.unresolved_uv_projections)
+		{
+			if (failure.curve_id == TriMesh::kNoCadContactId || failure.detail.empty()
+				|| !unresolved_uses.emplace(failure.curve_id, failure.source_face_id,
+					failure.kind).second) return false;
+		}
+		std::set<FailureKey> matched_failures;
+		struct TopologyPoint
+		{
+			std::array<double, 3> position{};
+			double tolerance_m = 0.0;
+		};
+		std::map<std::uint32_t, TopologyPoint> topology_points;
+		for (const StepContactCurve& curve : graph.curves)
+		{
+			if (!ids.insert(curve.id).second || curve.source_edge_id == TriMesh::kNoCadEdgeId
+				|| curve.fan_degree < 2 || curve.sample_positions_m.size() < 2
+				|| curve.source_parameters.size() != curve.sample_positions_m.size()
+				|| curve.sample_topology_ids.size() != curve.sample_positions_m.size()
+				|| curve.source_edge_ids.empty()
+				|| !std::is_sorted(curve.source_edge_ids.begin(), curve.source_edge_ids.end())
+				|| std::adjacent_find(curve.source_edge_ids.begin(), curve.source_edge_ids.end())
+					!= curve.source_edge_ids.end()
+				|| curve.source_edge_id != curve.source_edge_ids.front()
+				|| curve.id != curve.source_edge_id
+				|| curve.uses.size() < 2 || !std::isfinite(curve.tolerance_m)
+				|| curve.tolerance_m < 0.0) return false;
+			for (std::uint32_t source_edge : curve.source_edge_ids)
+				if (source_edge == TriMesh::kNoCadEdgeId
+					|| !source_edge_ids.insert(source_edge).second) return false;
+			bool parameters_increasing = true, parameters_decreasing = true;
+			std::set<std::uint32_t> curve_topology_ids;
+			for (std::size_t sample = 0; sample < curve.sample_positions_m.size(); ++sample)
+			{
+				if (!std::isfinite(curve.source_parameters[sample])) return false;
+				if (sample > 0)
+				{
+					parameters_increasing = parameters_increasing
+						&& curve.source_parameters[sample] > curve.source_parameters[sample - 1];
+					parameters_decreasing = parameters_decreasing
+						&& curve.source_parameters[sample] < curve.source_parameters[sample - 1];
+				}
+				if (!curve_topology_ids.insert(curve.sample_topology_ids[sample]).second)
+					return false;
+				const auto& point = curve.sample_positions_m[sample];
+				if (!std::isfinite(point[0]) || !std::isfinite(point[1])
+					|| !std::isfinite(point[2])) return false;
+				auto [existing, inserted] = topology_points.emplace(curve.sample_topology_ids[sample],
+					TopologyPoint{ point, curve.tolerance_m });
+				if (!inserted)
+				{
+					// A shared topology node must already be canonicalized exactly. Downstream
+					// BVH/EB code deliberately refuses to turn native CAD tolerance into an
+					// accidental geometry weld.
+					if (point != existing->second.position) return false;
+				}
+			}
+			if (!parameters_increasing && !parameters_decreasing) return false;
+			std::uint32_t sectors = 0;
+			std::set<std::uint32_t> faces;
+			for (const StepContactFaceUse& use : curve.uses)
+			{
+				if (!faces.insert(use.source_face_id).second || use.sector_count < 1
+					|| use.sector_count > 2) return false;
+				const FailureKey use_key{curve.id, use.source_face_id, use.kind};
+				const bool unresolved = unresolved_uses.contains(use_key);
+				if (unresolved)
+				{
+					if (!use.sample_uv.empty()) return false;
+					matched_failures.insert(use_key);
+				}
+				else if (use.sample_uv.size() != curve.sample_positions_m.size())
+					return false;
+				sectors += use.sector_count;
+				for (const auto& uv : use.sample_uv)
+					if (!std::isfinite(uv[0]) || !std::isfinite(uv[1])) return false;
+			}
+			if (sectors != curve.fan_degree) return false;
+		}
+		std::uint32_t expected_topology_id = 0;
+		for (const auto& [topology_id, point] : topology_points)
+		{
+			(void)point;
+			if (topology_id != expected_topology_id++) return false;
+		}
+		return matched_failures == unresolved_uses;
+	}
+
+	bool mesh_contact_labels_match_graph(const TriMesh& mesh, const StepCadContactGraph& graph)
+	{
+		if (!mesh.has_cad_edge_contact_provenance()) return false;
+		std::map<std::uint64_t, std::uint32_t> fan_by_curve;
+		for (const StepContactCurve& curve : graph.curves)
+			fan_by_curve.emplace(curve.id, curve.fan_degree);
+		std::set<std::uint64_t> seen_contacts;
+		for (std::size_t triangle = 0; triangle < mesh.triangle_count(); ++triangle)
+			for (unsigned half_edge = 0; half_edge < 3; ++half_edge)
+			{
+				const std::uint64_t contact = mesh.cad_edge_contact_id(triangle, half_edge);
+				const std::uint32_t fan = mesh.cad_edge_certified_fan_degree(triangle, half_edge);
+				if (contact == TriMesh::kNoCadContactId)
+				{
+					if (fan != 0) return false;
+					continue;
+				}
+				const auto found = fan_by_curve.find(contact);
+				if (found == fan_by_curve.end() || found->second != fan) return false;
+				seen_contacts.insert(contact);
+			}
+		return seen_contacts.size() == fan_by_curve.size()
+			&& std::all_of(fan_by_curve.begin(), fan_by_curve.end(),
+				[&](const auto& entry) { return seen_contacts.contains(entry.first); });
+	}
+
+	struct ContactGraphCounts
+	{
+		std::size_t source_edges = 0;
+		std::size_t samples = 0;
+		std::size_t shared_topology_nodes = 0;
+	};
+
+	ContactGraphCounts contact_graph_counts(const StepCadContactGraph& graph)
+	{
+		ContactGraphCounts result;
+		std::map<std::uint32_t, std::size_t> topology_use_count;
+		for (const StepContactCurve& curve : graph.curves)
+		{
+			result.source_edges += curve.source_edge_ids.size();
+			result.samples += curve.sample_positions_m.size();
+			for (std::uint32_t topology : curve.sample_topology_ids)
+				++topology_use_count[topology];
+		}
+		result.shared_topology_nodes = static_cast<std::size_t>(std::count_if(
+			topology_use_count.begin(), topology_use_count.end(),
+			[](const auto& entry) { return entry.second > 1; }));
+		return result;
+	}
 }
 
 int main(int argc, char** argv)
 {
 	const std::string path = argc > 1 ? argv[1] : "Test-Data/NACA2412_C1_S2p03.step";
 	bool quality_only = false;
-	std::optional<std::size_t> expected_mini_rib_faces;
+	std::optional<std::size_t> expected_components, expected_warnings, expected_contacts,
+		expected_source_edges, expected_shared_nodes_min, expected_partial_overlaps,
+		expected_uv_failures;
 	for (int argument = 2; argument < argc; ++argument)
 	{
 		const std::string option = argv[argument];
 		if (option == "--quality-only") quality_only = true;
-		else if (option == "--expect-mini-rib-faces" && argument + 1 < argc)
-			expected_mini_rib_faces = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-components" && argument + 1 < argc)
+			expected_components = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-warnings" && argument + 1 < argc)
+			expected_warnings = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-contacts" && argument + 1 < argc)
+			expected_contacts = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-source-edges" && argument + 1 < argc)
+			expected_source_edges = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-shared-nodes-min" && argument + 1 < argc)
+			expected_shared_nodes_min = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-partial-overlaps" && argument + 1 < argc)
+			expected_partial_overlaps = static_cast<std::size_t>(std::stoull(argv[++argument]));
+		else if (option == "--expect-uv-failures" && argument + 1 < argc)
+			expected_uv_failures = static_cast<std::size_t>(std::stoull(argv[++argument]));
 		else
 		{
 			std::fprintf(stderr, "usage: step_import_provenance_probe [file.step] "
-				"[--quality-only] [--expect-mini-rib-faces N]\n");
+				"[--quality-only] [--expect-components N] [--expect-warnings N] "
+				"[--expect-contacts N] [--expect-source-edges N] "
+				"[--expect-shared-nodes-min N] [--expect-partial-overlaps N] "
+				"[--expect-uv-failures N]\n");
 			return 2;
 		}
 	}
@@ -157,64 +319,64 @@ int main(int argc, char** argv)
 		std::fprintf(stderr, "%s\n", error.c_str());
 		return 1;
 	}
-	check(is_unsupported_mini_rib_representation_name("Mini-rib 12")
-		&& is_unsupported_mini_rib_representation_name("  MINI-RIB   7  ")
-		&& is_unsupported_mini_rib_representation_name("Mini-rib 12 repaired")
-		&& !is_unsupported_mini_rib_representation_name("Rib 12")
-		&& !is_unsupported_mini_rib_representation_name("Mini-rib")
-		&& !is_unsupported_mini_rib_representation_name("Mini-rib 12foo")
-		&& !is_unsupported_mini_rib_representation_name("Not a Mini-rib 12"),
-		"mini-rib role matching is narrow, normalized, and deterministic");
 	check(coarse_geometry.source_faces.size() == 1 + *std::max_element(
 		coarse.source_face_ids.begin(), coarse.source_face_ids.end()),
 		"OCC-free source-face metadata parallels deterministic face IDs");
-	GeometryQualityReport connected_semantic_policy;
-	connected_semantic_policy.exact_connected_component_count = 1;
-	GeometryIssue connected_named_surface;
-	connected_named_surface.kind = GeometryIssueKind::unsupported_named_surface;
-	connected_named_surface.source_triangle_ids = {5, 4, 5};
-	connected_semantic_policy.issues.push_back(std::move(connected_named_surface));
-	check(default_excluded_triangle_ids(connected_semantic_policy)
-		== std::vector<std::uint32_t>({4, 5}),
-		"semantic exclusion remains active when the named artifact is topologically connected");
-	if (expected_mini_rib_faces)
-	{
-		std::set<std::uint32_t> semantic_faces, semantic_triangles;
-		std::set<std::string> semantic_names;
-		for (const GeometryIssue& issue : coarse_geometry.quality.issues)
-			if (issue.kind == GeometryIssueKind::unsupported_named_surface)
-			{
-				semantic_faces.insert(issue.source_face_ids.begin(), issue.source_face_ids.end());
-				semantic_triangles.insert(issue.source_triangle_ids.begin(),
-					issue.source_triangle_ids.end());
-				semantic_names.insert(issue.source_representation_names.begin(),
-					issue.source_representation_names.end());
-			}
-		std::size_t metadata_matches = 0;
-		for (const StepSourceFaceMetadata& face : coarse_geometry.source_faces)
-			metadata_matches += std::any_of(face.representation_names.begin(),
-				face.representation_names.end(), is_unsupported_mini_rib_representation_name);
-		check(semantic_faces.size() == *expected_mini_rib_faces
-			&& metadata_matches == *expected_mini_rib_faces,
-			"STEP representation names classify the expected mini-rib source faces");
-		check(!semantic_triangles.empty() && !semantic_names.empty()
-			&& std::all_of(semantic_names.begin(), semantic_names.end(),
-				is_unsupported_mini_rib_representation_name),
-			"semantic diagnostic retains triangle and exact matching-name provenance");
-		const std::vector<std::uint32_t> default_excluded =
-			default_excluded_triangle_ids(coarse_geometry.quality);
-		check(std::includes(default_excluded.begin(), default_excluded.end(),
-			semantic_triangles.begin(), semantic_triangles.end()),
-			"default exclusion policy contains every semantic mini-rib triangle");
-		check(default_excluded.size() == semantic_triangles.size(),
-			"overlapping semantic and disconnected-component suggestions are de-duplicated");
-	}
+	check(contact_graph_is_structurally_valid(coarse_geometry.contacts),
+		"exact CAD contact graph has common samples, per-face UV chains, and correct fans");
+	check(mesh_contact_labels_match_graph(coarse, coarse_geometry.contacts),
+		"source tessellation edge labels reference canonical physical contact IDs and fans");
+	const ContactGraphCounts contact_counts = contact_graph_counts(coarse_geometry.contacts);
+	if (expected_components) check(coarse_geometry.quality.exact_connected_component_count
+		== *expected_components, "fixture has the expected exact CAD component count");
+	if (expected_warnings) check(coarse_geometry.quality.warning_count() == *expected_warnings,
+		"fixture has the expected geometry warning count");
+	if (expected_contacts) check(coarse_geometry.contacts.curves.size() == *expected_contacts,
+		"fixture has the expected deterministic contact-curve count");
+	if (expected_source_edges) check(contact_counts.source_edges == *expected_source_edges,
+		"canonical curves retain every expected source-edge provenance record");
+	if (expected_shared_nodes_min) check(contact_counts.shared_topology_nodes
+		>= *expected_shared_nodes_min,
+		"exact curve junctions share topology IDs across canonical physical curves");
+	if (expected_partial_overlaps)
+		check(coarse_geometry.contacts.unresolved_partial_overlaps.size()
+			== *expected_partial_overlaps,
+			"fixture has the expected exact partial-contact overlap count");
+	if (expected_uv_failures)
+		check(coarse_geometry.contacts.unresolved_uv_projections.size()
+			== *expected_uv_failures,
+			"fixture has the expected unresolved contact UV count");
+	if (!expected_partial_overlaps && !expected_uv_failures)
+		check(coarse_geometry.contacts.conforming_ready(),
+			"contact graph has no unresolved partial overlaps or UV projections");
 	if (quality_only)
 	{
-		std::printf("STEP quality: components=%zu largest-area=%.12g m^2 warnings=%zu blockers=%zu\n",
+		std::printf("STEP quality: components=%zu contacts=%zu source-edges=%zu samples=%zu "
+			"shared-nodes=%zu partial-overlaps=%zu UV-failures=%zu trim-UV-fallbacks=%u "
+			"largest-area=%.12g m^2 warnings=%zu blockers=%zu\n",
 			coarse_geometry.quality.exact_connected_component_count,
+			coarse_geometry.contacts.curves.size(),
+			contact_counts.source_edges, contact_counts.samples,
+			contact_counts.shared_topology_nodes,
+			coarse_geometry.contacts.unresolved_partial_overlaps.size(),
+			coarse_geometry.contacts.unresolved_uv_projections.size(),
+			coarse_geometry.contacts.trim_surface_fallback_count,
 			coarse_geometry.quality.largest_component_area_m2,
 			coarse_geometry.quality.warning_count(), coarse_geometry.quality.blocker_count());
+		for (const StepCadContactGraph::PartialOverlap& overlap :
+			coarse_geometry.contacts.unresolved_partial_overlaps)
+			std::printf("  unresolved partial contact edges %u / %u, owner faces %u / %u "
+				"(full coverage %s / %s)\n",
+				overlap.source_edge_a, overlap.source_edge_b,
+				overlap.owner_face_a, overlap.owner_face_b,
+				overlap.edge_a_fully_covered ? "yes" : "no",
+				overlap.edge_b_fully_covered ? "yes" : "no");
+		for (const StepCadContactGraph::UvProjectionFailure& failure :
+			coarse_geometry.contacts.unresolved_uv_projections)
+			std::printf("  unresolved UV contact curve %llu, face %u, kind=%s: %s\n",
+				static_cast<unsigned long long>(failure.curve_id), failure.source_face_id,
+				failure.kind == StepContactUseKind::trim_boundary ? "boundary" : "interior",
+				failure.detail.c_str());
 		for (const GeometryIssue& issue : coarse_geometry.quality.issues)
 		{
 			std::printf("  issue=%llu kind=%u faces=%zu triangles=%zu area=%.12g m^2 boundary-lines=%zu "
@@ -382,8 +544,11 @@ int main(int argc, char** argv)
 	check(retained_unknown,
 		"slab clipping preserves an inherited unresolved CAD boundary distinctly from synthetic edges");
 
-	std::printf("STEP provenance: vertices=%zu triangles=%zu CAD edges=%zu face-edge uses=%zu\n",
+	std::printf("STEP provenance: vertices=%zu triangles=%zu CAD edges=%zu face-edge uses=%zu "
+		"UV-failures=%zu trim-UV-fallbacks=%u\n",
 		coarse.vertex_count(), coarse.triangle_count(), coarse_topology.edge_incidence.size(),
-		coarse_topology.face_edge_uses.size());
+		coarse_topology.face_edge_uses.size(),
+		coarse_geometry.contacts.unresolved_uv_projections.size(),
+		coarse_geometry.contacts.trim_surface_fallback_count);
 	return failures == 0 ? 0 : 1;
 }

@@ -433,6 +433,10 @@ namespace paracfd::core
 					eb.unresolved.push_back({cell,std::move(source),std::move(reason),true});
 				};
 				ExactCellInput input;input.cell_min=exact_point(box.lo);input.cell_max=exact_point(box.hi);
+				// Exact-cell topology follows the CAD-conforming identity rather than the
+				// face-local render index.  This lets independently shaded/parameterized
+				// rib and skin vertices produce one shared OCCT edge.  The accessor preserves
+				// the historical render-index behaviour when the optional sidecar is absent.
 				std::unordered_map<std::uint32_t,std::uint32_t> vertex_map;
 				const double coordinate_tolerance=std::max(256.0*std::numeric_limits<double>::epsilon()*grid.h,
 					opt.coplanar_distance_tolerance);
@@ -459,11 +463,12 @@ namespace paracfd::core
 					for(int corner=0;corner<3;++corner)
 					{
 						const std::uint32_t global=mesh.indices[3*static_cast<std::size_t>(id)+corner];
-						auto found=vertex_map.find(global);
+						const std::uint32_t topology=mesh.topology_vertex_id(global);
+						auto found=vertex_map.find(topology);
 						if(found==vertex_map.end())
 						{
 							const std::uint32_t local=static_cast<std::uint32_t>(input.vertices.size());
-							input.vertices.push_back(exact_point(point[corner]));vertex_map.emplace(global,local);
+							input.vertices.push_back(exact_point(point[corner]));vertex_map.emplace(topology,local);
 							exact_triangle.vertices[corner]=local;
 						}
 						else
@@ -471,7 +476,7 @@ namespace paracfd::core
 							const Vec3d retained=exact_point(input.vertices[found->second]);
 							if(length2(retained-point[corner])>coordinate_tolerance*coordinate_tolerance)
 							{
-								reject("exact cell decomposition found inconsistent coordinates for one indexed mesh vertex");return true;
+								reject("exact cell decomposition found inconsistent coordinates for one topology vertex");return true;
 							}
 							exact_triangle.vertices[corner]=found->second;
 						}

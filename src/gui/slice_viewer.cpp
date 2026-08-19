@@ -42,7 +42,6 @@ namespace paracfd::gui
 			case GeometryIssueKind::RepairedSeam:        return {1.00f, 0.48f, 0.05f, 0.95f};
 			case GeometryIssueKind::UnsharedSeam:        return {1.00f, 0.68f, 0.08f, 0.95f};
 			case GeometryIssueKind::IsolatedFabricComponent:return {1.00f, 0.08f, 0.32f, 1.00f};
-			case GeometryIssueKind::UnsupportedNamedSurface:return {1.00f, 0.30f, 0.04f, 1.00f};
 			case GeometryIssueKind::IntentionalOpening:  return {0.05f, 0.88f, 1.00f, 0.95f};
 			case GeometryIssueKind::UnclassifiedOpening:return {0.18f, 0.66f, 0.92f, 0.95f};
 			default:                                      return {1.00f, 0.15f, 0.08f, 1.00f};
@@ -54,8 +53,7 @@ namespace paracfd::gui
 			switch (kind)
 			{
 			case GeometryIssueKind::UnexpectedGap:
-			case GeometryIssueKind::IsolatedFabricComponent:
-			case GeometryIssueKind::UnsupportedNamedSurface: return 5.0f;
+			case GeometryIssueKind::IsolatedFabricComponent: return 5.0f;
 			case GeometryIssueKind::RepairedSeam:
 			case GeometryIssueKind::UnsharedSeam: return 3.5f;
 			default: return 3.0f;
@@ -70,7 +68,6 @@ namespace paracfd::gui
 			case GeometryIssueKind::RepairedSeam:         return QStringLiteral("Repaired seam");
 			case GeometryIssueKind::UnsharedSeam:         return QStringLiteral("Unshared seam");
 			case GeometryIssueKind::IsolatedFabricComponent:return QStringLiteral("Detached boundaries");
-			case GeometryIssueKind::UnsupportedNamedSurface:return QStringLiteral("Unsupported named mini-rib");
 			case GeometryIssueKind::IntentionalOpening:   return QStringLiteral("Intentional opening");
 			case GeometryIssueKind::UnclassifiedOpening: return QStringLiteral("Unclassified opening");
 			default:                                      return QStringLiteral("Geometry diagnostic");
@@ -2119,7 +2116,6 @@ void main()
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::RepairedSeam)] > 0
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnsharedSeam)] > 0
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::IsolatedFabricComponent)] > 0
-			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnsupportedNamedSurface)] > 0
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnclassifiedOpening)] > 0;
 		const bool informational_status = !geometry_quality_status_.isEmpty()
 			&& !geometry_quality_warning_;

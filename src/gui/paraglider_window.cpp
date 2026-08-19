@@ -213,7 +213,7 @@ namespace paracfd::gui
 		auto* wind_hint=new QLabel(QString::fromUtf8("FREESTREAM +X  →\nBBox infers span/chord; leading/trailing needs confirmation."));wind_hint->setStyleSheet("font-weight:600;color:#ff9a75;background:#20242a;padding:6px;");column->addWidget(wind_hint);
 		auto* geometry_group=new QGroupBox("CAD geometry quality");auto* geometry_column=new QVBoxLayout(geometry_group);
 		geometry_quality_readout_=new QLabel("Load a STEP file to inspect exact fabric connectivity.");geometry_quality_readout_->setWordWrap(true);geometry_quality_readout_->setStyleSheet("color:#000;");
-		exclude_disconnected_=new QCheckBox("Exclude suggested fabric artifacts from CFD");exclude_disconnected_->setChecked(true);exclude_disconnected_->setEnabled(false);exclude_disconnected_->setToolTip("Reversible preprocessing selection for explicitly unsupported named mini-ribs and exactly disconnected fabric. Excluded surfaces do not affect the aerodynamic bbox, AMR, embedded boundary, or loads; the STEP file is never modified.");
+		exclude_disconnected_=new QCheckBox("Exclude detached fabric from CFD");exclude_disconnected_->setChecked(true);exclude_disconnected_->setEnabled(false);exclude_disconnected_->setToolTip("Reversible preprocessing selection for exactly disconnected fabric components. Connected ribs and mini-ribs remain aerodynamic surfaces regardless of their STEP names. The STEP file is never modified.");
 		geometry_column->addWidget(geometry_quality_readout_);geometry_column->addWidget(exclude_disconnected_);column->addWidget(geometry_group);
 		connect(exclude_disconnected_,&QCheckBox::toggled,this,[this]{applyGeometrySelection(true);});
 		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
@@ -477,17 +477,13 @@ namespace paracfd::gui
 	void ParagliderWindow::updateGeometryIssueDisplay()
 	{
 		std::vector<gui::GeometryIssuePolyline> display;
-		std::set<std::uint32_t> semantic_faces,semantic_triangles,disconnected_triangles;
-		std::size_t disconnected_components=0,topology_semantic_overlap=0,retained_warnings=0,blockers=0;
-		double disconnected_area=0,semantic_area=0;
+		std::set<std::uint32_t> disconnected_triangles;
+		std::size_t disconnected_components=0,retained_warnings=0,blockers=0;
+		double disconnected_area=0;
 		for(const core::GeometryIssue& issue:geometry_quality_.issues)
 		{
 			if(issue.severity==core::GeometryIssueSeverity::blocker)++blockers;
 			if(issue.severity==core::GeometryIssueSeverity::warning_run&&!core::geometry_issue_is_default_exclusion(issue))++retained_warnings;
-			if(issue.kind!=core::GeometryIssueKind::unsupported_named_surface)continue;
-			semantic_faces.insert(issue.source_face_ids.begin(),issue.source_face_ids.end());
-			semantic_triangles.insert(issue.source_triangle_ids.begin(),issue.source_triangle_ids.end());
-			semantic_area+=issue.surface_area_m2;
 		}
 		for(const core::GeometryIssue& issue:geometry_quality_.issues)
 		{
@@ -498,14 +494,7 @@ namespace paracfd::gui
 			case core::GeometryIssueKind::disconnected_fabric_component:
 				display_kind=gui::GeometryIssueKind::IsolatedFabricComponent;
 				++disconnected_components;disconnected_triangles.insert(issue.source_triangle_ids.begin(),issue.source_triangle_ids.end());disconnected_area+=issue.surface_area_m2;
-				if(!issue.source_triangle_ids.empty()&&std::all_of(issue.source_triangle_ids.begin(),issue.source_triangle_ids.end(),[&](std::uint32_t triangle){return semantic_triangles.contains(triangle);}))
-				{
-					++topology_semantic_overlap;
-					draw_issue=false; // semantic outline already identifies the same source surface
-				}
 				break;
-			case core::GeometryIssueKind::unsupported_named_surface:
-				display_kind=gui::GeometryIssueKind::UnsupportedNamedSurface;break;
 			case core::GeometryIssueKind::intentional_opening_boundary:display_kind=gui::GeometryIssueKind::IntentionalOpening;break;
 			case core::GeometryIssueKind::unclassified_free_boundary:display_kind=gui::GeometryIssueKind::UnclassifiedOpening;break;
 			case core::GeometryIssueKind::matched_unshared_seam:display_kind=gui::GeometryIssueKind::UnsharedSeam;break;
@@ -530,22 +519,19 @@ namespace paracfd::gui
 		const bool excluded=has_suggestions&&exclude_disconnected_->isChecked();
 		if(blockers) viewer_->setGeometryQualityStatus("CFD blocked: fix the highlighted model errors.",true);
 		else if(excluded&&retained_warnings) viewer_->setGeometryQualityStatus("Some surfaces skipped; other model warnings remain.",true);
-		else if(excluded) viewer_->setGeometryQualityStatus("Unsupported surfaces were skipped for this run.",false);
+		else if(excluded) viewer_->setGeometryQualityStatus("Detached fabric was skipped for this run.",false);
 		else viewer_->setGeometryQualityStatus("Detailed geometry check not performed.",false);
 
 		QString text;
-		if(!semantic_faces.empty())
-			text+=QString("Unsupported STEP mini-ribs: %1 named face%2 (%3 triangles, %4 m²).\n")
-				.arg(semantic_faces.size()).arg(semantic_faces.size()==1?"":"s")
-				.arg(semantic_triangles.size()).arg(semantic_area,0,'g',6);
 		if(disconnected_components)
-			text+=QString("Exact topology: %1 disconnected component%2 (%3 unique triangles, %4 m²)%5.\n")
+			text+=QString("Exact topology: %1 disconnected component%2 (%3 unique triangles, %4 m²).\n")
 				.arg(disconnected_components).arg(disconnected_components==1?"":"s")
-				.arg(disconnected_triangles.size()).arg(disconnected_area,0,'g',6)
-				.arg(topology_semantic_overlap?QString("; %1 already identified by name").arg(topology_semantic_overlap):QString{});
+				.arg(disconnected_triangles.size()).arg(disconnected_area,0,'g',6);
 		if(retained_warnings)text+=QString("%1 other geometry warning%2 remain represented in CFD.\n").arg(retained_warnings).arg(retained_warnings==1?"":"s");
 		if(blockers)text+=QString("%1 blocking geometry issue%2 must be resolved.\n").arg(blockers).arg(blockers==1?"":"s");
-		if(has_suggestions)text+=excluded?"Suggested artifacts excluded from CFD; STEP unchanged.":"Suggested artifacts INCLUDED for qualitative diagnosis; STEP unchanged.";
+		if(has_suggestions)text+=excluded
+			?"Detached components excluded from CFD; STEP unchanged."
+			:"Detached components INCLUDED; they may be intentional fabric. STEP unchanged.";
 		else text+="No surfaces are eligible for automatic exclusion; warnings remain represented.";
 		geometry_quality_readout_->setText(text.trimmed());
 		geometry_quality_readout_->setStyleSheet(excluded&&!retained_warnings&&!blockers

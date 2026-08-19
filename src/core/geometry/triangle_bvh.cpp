@@ -7,6 +7,8 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 
 namespace paracfd::core
 {
@@ -40,6 +42,32 @@ namespace paracfd::core
 
 	namespace
 	{
+		void validate_topology_vertex_coordinates(const TriMesh& mesh)
+		{
+			if(mesh.has_malformed_topology_vertex_ids())
+				throw std::invalid_argument("TriangleBvh topology vertex sidecar has "+
+					std::to_string(mesh.topology_vertex_ids.size())+" IDs for "+
+					std::to_string(mesh.vertex_count())+" vertices");
+			if(!mesh.has_topology_vertex_ids())return;
+			struct FirstUse
+			{
+				std::size_t vertex=0;
+				std::array<double,3> position{};
+			};
+			std::map<std::uint32_t,FirstUse> first_use;
+			for(std::size_t vertex=0;vertex<mesh.vertex_count();++vertex)
+			{
+				const std::uint32_t topology=mesh.topology_vertex_id(vertex);
+				const std::array<double,3> position=mesh.vertex_position_double(vertex);
+				const auto [found,inserted]=first_use.emplace(topology,FirstUse{vertex,position});
+				if(inserted)continue;
+				if(found->second.position==position)continue;
+				throw std::invalid_argument("TriangleBvh topology vertex ID "+
+					std::to_string(topology)+" has inconsistent coordinates at vertices "+
+					std::to_string(found->second.vertex)+" and "+std::to_string(vertex));
+			}
+		}
+
 		Aabb3d triangle_bounds(const BvhTriangle& t)
 		{
 			Aabb3d b; b.expand(t.a); b.expand(t.b); b.expand(t.c); return b;
@@ -175,6 +203,7 @@ namespace paracfd::core
 	{
 		primitives_.clear(); nodes_.clear(); triangles_.clear(); triangles_by_id_.clear();
 		edge_certificate_by_triangle_.clear();edge_contact_tolerance_=0.0;edge_clearance_tolerance_=0.0;
+		validate_topology_vertex_coordinates(mesh);
 		leaf_size = std::max<std::uint32_t>(1, leaf_size);
 		primitives_.reserve(mesh.triangle_count());
 		triangles_by_id_.resize(mesh.triangle_count());
@@ -282,7 +311,12 @@ namespace paracfd::core
 			for(int edge=0;edge<3;++edge)
 			{
 				const std::uint32_t ia=mesh.indices[3*triangle_id+edge],ib=mesh.indices[3*triangle_id+(edge+1)%3];
-				const std::uint32_t lo=std::min(ia,ib),hi=std::max(ia,ib);
+				// Render vertices remain face-local so a rib and skin may retain independent
+				// UVs/normals.  A conforming CAD import supplies the shared discrete identity
+				// separately; legacy/programmatic meshes fall back to their render indices.
+				const std::uint32_t topology_a=mesh.topology_vertex_id(ia);
+				const std::uint32_t topology_b=mesh.topology_vertex_id(ib);
+				const std::uint32_t lo=std::min(topology_a,topology_b),hi=std::max(topology_a,topology_b);
 				const std::size_t flat=3*static_cast<std::size_t>(triangle_id)+edge;
 				half_edges.push_back({(static_cast<std::uint64_t>(lo)<<32)|hi,triangle_id,static_cast<std::uint8_t>(edge),flat});
 				hard_unknown[flat]=mesh.cad_edge_provenance_unknown(triangle_id,edge)?1u:0u;
@@ -310,14 +344,27 @@ namespace paracfd::core
 				const std::size_t incidence=last-first;
 				bool non_manifold=incidence!=2,provenance_unknown=false,declared_inconsistent=false;
 				std::uint32_t declared_incidence=0;double group_contact=edge_contact_tolerance_;
+				std::uint64_t declared_contact=TriMesh::kNoCadContactId;
+				std::size_t contact_members=0;
 				bool cad_boundary=false,cross_face=false;const std::uint32_t first_face=
 					triangles_by_id_[half_edges[first].triangle].source_face_id;
 				for(std::size_t q=first;q<last;++q)
 				{
 					const auto& edge=half_edges[q];const std::uint32_t cad_incidence=
 						mesh.cad_edge_incident_face_count(edge.triangle,edge.local_edge);
-					const std::uint32_t edge_declared_incidence=std::max<std::uint32_t>(cad_incidence,
-						mesh.cad_edge_is_periodic_seam(edge.triangle,edge.local_edge)?2u:0u);
+					const std::uint64_t contact=mesh.cad_edge_contact_id(
+						edge.triangle,edge.local_edge);
+					const std::uint32_t contact_fan=contact==TriMesh::kNoCadContactId?0u:
+						mesh.cad_edge_certified_fan_degree(edge.triangle,edge.local_edge);
+					const std::uint32_t edge_declared_incidence=std::max({cad_incidence,
+						mesh.cad_edge_is_periodic_seam(edge.triangle,edge.local_edge)?2u:0u,
+						contact_fan});
+					if(contact!=TriMesh::kNoCadContactId)
+					{
+						declared_inconsistent=declared_inconsistent||(declared_contact
+							!=TriMesh::kNoCadContactId&&declared_contact!=contact)||contact_fan<2;
+						declared_contact=contact;++contact_members;
+					}
 					provenance_unknown=provenance_unknown||hard_unknown[edge.flat_index]!=0;
 					if(edge_declared_incidence>=2)
 					{
@@ -332,7 +379,8 @@ namespace paracfd::core
 						triangles_by_id_[edge.triangle].source_face_id!=first_face);
 				}
 				const bool declaration_mismatch=declared_inconsistent||
-					(declared_incidence>=2&&declared_incidence!=incidence);
+					(declared_incidence>=2&&declared_incidence!=incidence)||
+					(contact_members!=0&&contact_members!=incidence);
 				const std::uint16_t fan=static_cast<std::uint16_t>(std::min<std::size_t>(
 					std::numeric_limits<std::uint16_t>::max(),incidence));
 				for(std::size_t q=first;q<last;++q)
@@ -448,6 +496,31 @@ namespace paracfd::core
 					exact_cad_fan,std::numeric_limits<std::uint16_t>::max()));
 				output.contact_tolerance=std::max(edge_contact_tolerance_,
 					std::max(0.0,mesh.cad_edge_tolerance(edge.triangle,edge.local_edge)));
+				continue;
+			}
+			// Explicit topology IDs are the authoritative connectivity contract. Distinct
+			// IDs may deliberately occupy the same coordinates (two coincident but
+			// disconnected sheets), so the legacy geometric recovery below must never
+			// weld them. A declared shared CAD edge that failed to acquire an indexed
+			// peer is an error; an otherwise unclaimed edge is a confirmed opening.
+			if(mesh.has_topology_vertex_ids())
+			{
+				const std::uint32_t cad_incidence=std::max<std::uint32_t>(
+					mesh.cad_edge_incident_face_count(edge.triangle,edge.local_edge),
+					mesh.cad_edge_is_periodic_seam(edge.triangle,edge.local_edge)?2u:0u);
+				const bool invalid_contact=output.cad_contact_id!=TriMesh::kNoCadContactId;
+				if(cad_incidence>=2||invalid_contact)
+				{
+					output.kind=FabricEdgeKind::unknown;output.role=FabricEdgeRole::unknown;
+					output.incident_fan_degree=0;
+					output.unknown_reason=FabricEdgeUnknownReason::indexed_fan_mismatch;
+				}
+				else
+				{
+					output.kind=FabricEdgeKind::confirmed_free;output.role=FabricEdgeRole::none;
+					output.incident_fan_degree=1;
+					output.unknown_reason=FabricEdgeUnknownReason::none;
+				}
 				continue;
 			}
 			const auto source_points=edge_points(edge.flat_index);const Vec3d a=source_points[0],b=source_points[1],delta=b-a;

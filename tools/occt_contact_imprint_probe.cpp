@@ -66,6 +66,7 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -89,6 +90,7 @@ namespace
 		bool run_global = false;
 		bool run_global_native = false;
 		bool run_growing_native = false;
+		bool run_batch_target_prototype = false;
 		bool inspect_overlaps = false;
 		bool scan_only = false;
 	};
@@ -98,6 +100,7 @@ namespace
 		std::printf("Usage: %s [--step FILE] [--exclude-faces 8,9] "
 			"[--contact-offset N] [--max-contacts N] [--cell-mm H] "
 			"[--deflection-mm D] [--global] [--global-native] [--growing-native] "
+			"[--batch-target-prototype] "
 			"[--inspect-overlaps] [--scan-only]\n", exe);
 	}
 
@@ -166,6 +169,7 @@ namespace
 			else if (arg == "--global") options.run_global = true;
 			else if (arg == "--global-native") options.run_global_native = true;
 			else if (arg == "--growing-native") options.run_growing_native = true;
+			else if (arg == "--batch-target-prototype") options.run_batch_target_prototype = true;
 			else if (arg == "--inspect-overlaps") options.inspect_overlaps = true;
 			else if (arg == "--scan-only") options.scan_only = true;
 			else if (arg == "--help" || arg == "-h") { usage(argv[0]); std::exit(0); }
@@ -1388,6 +1392,318 @@ namespace
 			mesh.triangles, mesh.conforming_edges, mesh.nonconforming_edges);
 	}
 
+	// True when every positive-length portion of `candidate` is an exact OCCT
+	// edge/edge common with `support`.  This is intentionally one-way: a batch split
+	// may divide one certified contact curve into several result edges.
+	bool exact_subedge_of(const TopoDS_Edge& candidate, const TopoDS_Edge& support)
+	{
+		BRepAdaptor_Curve candidate_curve(candidate), support_curve(support);
+		const double candidate_first = candidate_curve.FirstParameter();
+		const double candidate_last = candidate_curve.LastParameter();
+		const double support_first = support_curve.FirstParameter();
+		const double support_last = support_curve.LastParameter();
+		if (!std::isfinite(candidate_first) || !std::isfinite(candidate_last)
+			|| !(candidate_last > candidate_first) || !std::isfinite(support_first)
+			|| !std::isfinite(support_last) || !(support_last > support_first)) return false;
+		IntTools_EdgeEdge intersection(candidate, support);
+		intersection.SetFuzzyValue(0.0);
+		intersection.Perform();
+		if (!intersection.IsDone()) return false;
+		std::vector<std::pair<double, double>> candidate_ranges;
+		for (NCollection_Sequence<IntTools_CommonPrt>::Iterator common(
+			intersection.CommonParts()); common.More(); common.Next())
+		{
+			if (common.Value().Type() != TopAbs_EDGE) continue;
+			double lo = 0.0, hi = 0.0;
+			common.Value().Range1(lo, hi);
+			candidate_ranges.emplace_back(lo, hi);
+		}
+		return ranges_cover(std::move(candidate_ranges), candidate_first, candidate_last);
+	}
+
+	struct BatchContactCurve
+	{
+		std::size_t source_edge = 0;
+		TopoDS_Edge edge;
+		// A boundary face contributes one half-sheet sector.  A curve in the
+		// interior of a face contributes two.  max() during reduction removes the
+		// reciprocal reports made by independently modelled face boundaries.
+		std::map<std::size_t, std::uint32_t> face_sectors;
+	};
+
+	struct BatchFaceImage
+	{
+		TopoDS_Face face;
+		std::size_t source_face = 0;
+	};
+
+	using QuantizedPoint = std::array<std::int64_t, 3>;
+	using QuantizedSegment = std::array<std::int64_t, 6>;
+
+	QuantizedPoint quantized_point(const gp_Pnt& point, double quantum)
+	{
+		return { static_cast<std::int64_t>(std::llround(point.X() / quantum)),
+			static_cast<std::int64_t>(std::llround(point.Y() / quantum)),
+			static_cast<std::int64_t>(std::llround(point.Z() / quantum)) };
+	}
+
+	QuantizedSegment quantized_segment(gp_Pnt a, gp_Pnt b, double quantum)
+	{
+		QuantizedPoint qa = quantized_point(a, quantum), qb = quantized_point(b, quantum);
+		if (qb < qa) std::swap(qa, qb);
+		return { qa[0], qa[1], qa[2], qb[0], qb[1], qb[2] };
+	}
+
+	std::array<std::int64_t, 6> edge_endpoint_key(const TopoDS_Edge& edge)
+	{
+		BRepAdaptor_Curve curve(edge);
+		gp_Pnt a = curve.Value(curve.FirstParameter());
+		gp_Pnt b = curve.Value(curve.LastParameter());
+		// Broad-phase only.  exact_same_edge_extent() remains the decision, so this
+		// key cannot join nearby fabric or close a represented opening.
+		return quantized_segment(a, b, 1.0e-5);
+	}
+
+	void run_batch_target_prototype(const Model& model, const Options& options)
+	{
+		Options all_options = options;
+		all_options.contact_offset = 0;
+		all_options.max_contacts = std::numeric_limits<std::size_t>::max();
+		const auto contact_begin = Clock::now();
+		const std::vector<ContactGroup> raw_contacts = find_contacts(model, all_options);
+		const double contact_seconds = std::chrono::duration<double>(
+			Clock::now() - contact_begin).count();
+
+		std::vector<BatchContactCurve> curves;
+		std::map<std::array<std::int64_t, 6>, std::vector<std::size_t>> endpoint_index;
+		std::vector<std::set<std::size_t>> target_curves(model.faces.size());
+		std::size_t raw_pairs = 0;
+		for (const ContactGroup& contact : raw_contacts)
+		{
+			const TopoDS_Edge edge = TopoDS::Edge(model.edges(
+				static_cast<Standard_Integer>(contact.edge + 1)));
+			const auto key = edge_endpoint_key(edge);
+			std::size_t curve_id = std::numeric_limits<std::size_t>::max();
+			for (std::size_t candidate : endpoint_index[key])
+				if (exact_same_edge_extent(edge, curves[candidate].edge))
+				{
+					curve_id = candidate;
+					break;
+				}
+			if (curve_id == std::numeric_limits<std::size_t>::max())
+			{
+				curve_id = curves.size();
+				curves.push_back({ contact.edge, edge, {} });
+				endpoint_index[key].push_back(curve_id);
+			}
+			BatchContactCurve& curve = curves[curve_id];
+			curve.face_sectors[contact.owner_face] = std::max<std::uint32_t>(
+				curve.face_sectors[contact.owner_face], 1u);
+			for (const Contact& target : contact.targets)
+			{
+				++raw_pairs;
+				curve.face_sectors[target.target_face] = std::max(
+					curve.face_sectors[target.target_face], target.target_sectors);
+				target_curves[target.target_face].insert(curve_id);
+			}
+		}
+
+		std::printf("\n[batch target-face contact prototype]\n");
+		std::printf("  complete exact scan %.3f s: raw groups/pairs=%zu/%zu; "
+			"canonical full-extent curves=%zu\n", contact_seconds, raw_contacts.size(),
+			raw_pairs, curves.size());
+
+		std::vector<BatchFaceImage> images;
+		images.reserve(model.faces.size() + curves.size());
+		std::size_t transactions = 0, succeeded = 0, warned = 0, failed = 0;
+		std::size_t tools_total = 0, input_faces = 0, output_faces = 0;
+		double split_milliseconds = 0.0;
+		for (std::size_t face_id = 0; face_id < model.faces.size(); ++face_id)
+		{
+			if (options.excluded_faces.contains(face_id)) continue;
+			++input_faces;
+			if (target_curves[face_id].empty())
+			{
+				images.push_back({ model.faces[face_id], face_id });
+				++output_faces;
+				continue;
+			}
+
+			NCollection_List<TopoDS_Shape> arguments, tools;
+			arguments.Append(model.faces[face_id]);
+			for (std::size_t curve : target_curves[face_id]) tools.Append(curves[curve].edge);
+			tools_total += target_curves[face_id].size();
+			BOPAlgo_Splitter splitter;
+			splitter.SetArguments(arguments);
+			splitter.SetTools(tools);
+			splitter.SetNonDestructive(true);
+			splitter.SetRunParallel(false);
+			splitter.SetUseOBB(true);
+			splitter.SetFuzzyValue(0.0);
+			const auto begin = Clock::now();
+			splitter.Perform();
+			const double elapsed = std::chrono::duration<double, std::milli>(
+				Clock::now() - begin).count();
+			split_milliseconds += elapsed;
+			++transactions;
+			if (splitter.HasErrors() || splitter.Shape().IsNull())
+			{
+				++failed;
+				std::ostringstream report;
+				splitter.DumpErrors(report);
+				std::printf("  target face %zu FAILED (%zu tools, %.2f ms): %s\n", face_id,
+					target_curves[face_id].size(), elapsed, report.str().c_str());
+				// Keep the original only so the final mesh audit can show every missing
+				// contact instead of terminating at the first OCCT transaction failure.
+				images.push_back({ model.faces[face_id], face_id });
+				++output_faces;
+				continue;
+			}
+			++succeeded;
+			if (splitter.HasWarnings())
+			{
+				++warned;
+				std::ostringstream report;
+				splitter.DumpWarnings(report);
+				std::printf("  target face %zu WARNING (%zu tools, %.2f ms): %s\n", face_id,
+					target_curves[face_id].size(), elapsed, report.str().c_str());
+			}
+			std::vector<TopoDS_Face> split_faces = face_images(splitter,
+				model.faces[face_id], splitter.Shape());
+			if (split_faces.empty())
+			{
+				++failed;
+				--succeeded;
+				std::printf("  target face %zu produced no provenance image; retaining source\n",
+					face_id);
+				images.push_back({ model.faces[face_id], face_id });
+				++output_faces;
+				continue;
+			}
+			for (const TopoDS_Face& face : split_faces)
+			{
+				images.push_back({ face, face_id });
+				++output_faces;
+			}
+		}
+
+		std::vector<TopoDS_Shape> assembled_faces;
+		assembled_faces.reserve(images.size());
+		for (const BatchFaceImage& image : images) assembled_faces.push_back(image.face);
+		TopoDS_Shape assembled = compound(assembled_faces);
+		BRepTools::Clean(assembled);
+		const auto mesh_begin = Clock::now();
+		BRepMesh_IncrementalMesh mesher(assembled, options.deflection_mm, false, 0.1, false);
+		const double mesh_seconds = std::chrono::duration<double>(Clock::now() - mesh_begin).count();
+		const Tessellation mesh = tessellate(assembled, options.deflection_mm);
+		std::printf("  target transactions=%zu success/warning/failure=%zu/%zu/%zu; "
+			"tools=%zu; faces %zu -> %zu; split %.2f ms\n", transactions, succeeded,
+			warned, failed, tools_total, input_faces, output_faces, split_milliseconds);
+		std::printf("  assembled valid=%s; mesh %.3f s; triangles=%zu; "
+			"topologically shared conform/non=%zu/%zu\n",
+			BRepCheck_Analyzer(assembled, true).IsValid() ? "yes" : "NO", mesh_seconds,
+			mesh.triangles, mesh.conforming_edges, mesh.nonconforming_edges);
+
+		std::size_t curves_passed = 0, curves_missing = 0, curves_nonconforming = 0;
+		std::size_t boundary_curves = 0, boundary_passed = 0;
+		std::size_t interior_curves = 0, interior_passed = 0;
+		std::size_t printed = 0;
+		for (std::size_t curve_id = 0; curve_id < curves.size(); ++curve_id)
+		{
+			const BatchContactCurve& curve = curves[curve_id];
+			std::uint32_t expected_fan = 0;
+			bool has_interior_participant = false;
+			for (const auto& [face, sectors] : curve.face_sectors)
+				if (!options.excluded_faces.contains(face))
+				{
+					expected_fan += sectors;
+					has_interior_participant = has_interior_participant || sectors > 1;
+				}
+			if (expected_fan < 2) continue;
+			if (has_interior_participant) ++interior_curves;
+			else ++boundary_curves;
+			const double audit_quantum = std::max(1.0e-6,
+				10.0 * std::max(Precision::Confusion(), BRep_Tool::Tolerance(curve.edge)));
+			std::map<QuantizedSegment, std::set<std::uint64_t>> segment_occurrences;
+			std::size_t edge_uses = 0, missing_polygons = 0;
+			for (std::size_t image_id = 0; image_id < images.size(); ++image_id)
+			{
+				const TopoDS_Face& face = images[image_id].face;
+				TopLoc_Location location;
+				const Handle(Poly_Triangulation) triangulation =
+					BRep_Tool::Triangulation(face, location);
+				if (triangulation.IsNull()) continue;
+				std::uint32_t edge_use = 0;
+				for (TopExp_Explorer exp(face, TopAbs_EDGE); exp.More(); exp.Next(), ++edge_use)
+				{
+					const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+					if (!exact_subedge_of(edge, curve.edge)) continue;
+					++edge_uses;
+					const Handle(Poly_PolygonOnTriangulation) polygon =
+						BRep_Tool::PolygonOnTriangulation(edge, triangulation, location);
+					if (polygon.IsNull() || polygon->NbNodes() < 2)
+					{
+						++missing_polygons;
+						continue;
+					}
+					const gp_Trsf transform = location.Transformation();
+					const std::uint64_t occurrence = (static_cast<std::uint64_t>(image_id) << 32)
+						| edge_use;
+					for (Standard_Integer node = 1; node < polygon->NbNodes(); ++node)
+					{
+						gp_Pnt a = triangulation->Node(polygon->Node(node));
+						gp_Pnt b = triangulation->Node(polygon->Node(node + 1));
+						a.Transform(transform);
+						b.Transform(transform);
+						if (a.Distance(b) <= audit_quantum) continue;
+						segment_occurrences[quantized_segment(a, b, audit_quantum)]
+							.insert(occurrence);
+					}
+				}
+			}
+			std::size_t below = 0, exact = 0, above = 0;
+			std::size_t minimum_fan = std::numeric_limits<std::size_t>::max();
+			std::size_t maximum_fan = 0;
+			for (const auto& [segment, occurrences] : segment_occurrences)
+			{
+				const std::size_t fan = occurrences.size();
+				minimum_fan = std::min(minimum_fan, fan);
+				maximum_fan = std::max(maximum_fan, fan);
+				if (fan < expected_fan) ++below;
+				else if (fan == expected_fan) ++exact;
+				else ++above;
+			}
+			const bool pass = !segment_occurrences.empty() && missing_polygons == 0
+				&& below == 0 && above == 0;
+			if (pass)
+			{
+				++curves_passed;
+				if (has_interior_participant) ++interior_passed;
+				else ++boundary_passed;
+			}
+			else if (segment_occurrences.empty()) ++curves_missing;
+			else ++curves_nonconforming;
+			if (!pass && printed++ < 24)
+			{
+				std::printf("    curve %zu edge=%zu kind=%s expected-fan=%u faces=%zu edge-uses=%zu "
+					"mesh-segments=%zu fan[min,max]=%zu/%zu below/exact/above=%zu/%zu/%zu "
+					"missing-chains=%zu\n", curve_id, curve.source_edge,
+					has_interior_participant ? "interior" : "boundary", expected_fan,
+					curve.face_sectors.size(), edge_uses, segment_occurrences.size(),
+					segment_occurrences.empty() ? 0 : minimum_fan, maximum_fan,
+					below, exact, above, missing_polygons);
+			}
+		}
+		std::printf("  certified mesh-curve audit pass/missing/nonconforming=%zu/%zu/%zu "
+			"(audit coordinate quantum >= 1e-6 mm)\n", curves_passed, curves_missing,
+			curves_nonconforming);
+		std::printf("  boundary curves passed=%zu/%zu; interior-constraint curves passed=%zu/%zu\n",
+			boundary_passed, boundary_curves, interior_passed, interior_curves);
+		std::printf("  verdict: %s\n", failed == 0 && curves_missing == 0
+			&& curves_nonconforming == 0 ? "BATCH TARGET SPLIT IS SUFFICIENT"
+			: "BATCH TARGET SPLIT IS NOT YET A CONFORMING SURFACE MESH");
+	}
+
 	double face_area(const TopoDS_Face& face)
 	{
 		GProp_GProps properties;
@@ -1536,6 +1852,7 @@ int main(int argc, char** argv)
 		if (options.run_global) run_global(model, options);
 		if (options.run_global_native) run_global_native_sew(model, options);
 		if (options.run_growing_native) run_growing_native_sew(model, options);
+		if (options.run_batch_target_prototype) run_batch_target_prototype(model, options);
 		if (options.inspect_overlaps) inspect_planar_overlaps(model, options);
 		std::printf("\nInterpretation: acceptance requires valid BRep, one source parent per retained "
 			"fabric face, reproduced fan, and zero nonconforming shared edges.\n");

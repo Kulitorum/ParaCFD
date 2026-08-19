@@ -134,7 +134,10 @@ endfunction()
 
 add_library(paracfd_geometry STATIC
 	src/core/geometry/step_import.cpp
+	src/core/geometry/step_face_uv_projection.cpp
 	src/core/geometry/exact_cell_decomposition.cpp
+	src/core/geometry/uv_constraint_mesh.cpp
+	src/core/geometry/occt_surface_normalization.cpp
 	src/core/geometry/naca_step.cpp)
 set_target_properties(paracfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(paracfd_geometry PUBLIC cxx_std_20)
@@ -194,26 +197,59 @@ paracfd_deploy_occ_dlls(step_import_provenance_probe)
 add_test(NAME step_import_provenance COMMAND step_import_provenance_probe)
 set_tests_properties(step_import_provenance PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-# These semantic-provenance checks intentionally use local CAD exports that are not
-# repository fixtures. Keep the default clean-checkout test graph independent of them,
-# while allowing developers with the matching exports to opt in explicitly.
+# OCC-free face-local constrained triangulation. The probe exercises the production
+# geometry component without requiring a STEP fixture or OpenCascade type in its API.
+add_executable(uv_constraint_mesh_probe tools/uv_constraint_mesh_probe.cpp)
+target_link_libraries(uv_constraint_mesh_probe PRIVATE paracfd_geometry)
+add_test(NAME uv_constraint_mesh COMMAND uv_constraint_mesh_probe)
+
+# Direct OCCT regression for deterministic trim-valid contact UV charts. It
+# manufactures shifted/full-period cylinders to exercise exact boundary
+# pcurves, periodic lifts, 3D round trips, ambiguity and seam discontinuity.
+add_executable(step_face_uv_projection_probe
+	tools/step_face_uv_projection_probe.cpp)
+target_compile_features(step_face_uv_projection_probe PRIVATE cxx_std_20)
+target_include_directories(step_face_uv_projection_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(step_face_uv_projection_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(step_face_uv_projection_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(step_face_uv_projection_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(step_face_uv_projection_probe)
+add_test(NAME step_face_uv_projection COMMAND step_face_uv_projection_probe)
+
+# These topology checks intentionally use local CAD exports that are not repository
+# fixtures. Keep the clean-checkout test graph independent of them while allowing the
+# corrected and known-bad A/B models to be checked explicitly during development.
 option(PARACFD_ENABLE_LOCAL_STEP_TESTS
-	"Register semantic tests that require local user STEP fixtures" OFF)
+	"Register topology tests that require local user STEP fixtures" OFF)
 if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
 	foreach(_local_step_fixture
 		"${CMAKE_SOURCE_DIR}/Test-Data/Two-Cells.stp"
-		"${CMAKE_SOURCE_DIR}/Test-Data/PlanBParakite.step")
+		"${CMAKE_SOURCE_DIR}/Test-Data/Two-Cells-fixed.stp"
+		"${CMAKE_SOURCE_DIR}/Test-Data/MiniripFixed.step")
 		if(NOT EXISTS "${_local_step_fixture}")
 			message(FATAL_ERROR
 				"PARACFD_ENABLE_LOCAL_STEP_TESTS requires ${_local_step_fixture}")
 		endif()
 	endforeach()
-	add_test(NAME step_semantic_exclusion COMMAND step_import_provenance_probe
-		Test-Data/Two-Cells.stp --quality-only --expect-mini-rib-faces 2)
-	set_tests_properties(step_semantic_exclusion PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	add_test(NAME step_semantic_exclusion_planb COMMAND step_import_provenance_probe
-		Test-Data/PlanBParakite.step --quality-only --expect-mini-rib-faces 23)
-	set_tests_properties(step_semantic_exclusion_planb PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	add_test(NAME step_topology_known_bad COMMAND step_import_provenance_probe
+		Test-Data/Two-Cells.stp --quality-only --expect-components 3
+		--expect-warnings 2 --expect-contacts 47 --expect-source-edges 72
+		--expect-uv-failures 6)
+	set_tests_properties(step_topology_known_bad PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	add_test(NAME step_topology_fixed_small COMMAND step_import_provenance_probe
+		Test-Data/Two-Cells-fixed.stp --quality-only --expect-components 1
+		--expect-warnings 0 --expect-contacts 51 --expect-source-edges 76
+		--expect-shared-nodes-min 1 --expect-uv-failures 6)
+	set_tests_properties(step_topology_fixed_small PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	add_test(NAME step_topology_fixed_full COMMAND step_import_provenance_probe
+		Test-Data/MiniripFixed.step --quality-only --expect-components 1
+		--expect-warnings 0 --expect-contacts 235 --expect-source-edges 412
+		--expect-shared-nodes-min 1 --expect-partial-overlaps 2
+		--expect-uv-failures 34)
+	set_tests_properties(step_topology_fixed_full PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 add_executable(mesh_selection_probe
@@ -222,6 +258,10 @@ add_executable(mesh_selection_probe
 target_compile_features(mesh_selection_probe PRIVATE cxx_std_20)
 target_include_directories(mesh_selection_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME mesh_selection COMMAND mesh_selection_probe)
+
+add_executable(topology_vertex_probe tools/topology_vertex_probe.cpp)
+target_link_libraries(topology_vertex_probe PRIVATE libparacfd)
+add_test(NAME topology_vertex_ids COMMAND topology_vertex_probe)
 
 # Lightweight imported-CAD half-edge topology diagnostic. It deliberately stops at
 # STEP/BVH preprocessing so classifier failures can be counted without building EB/AMR.
@@ -255,6 +295,52 @@ target_compile_definitions(occt_contact_imprint_probe PRIVATE OCCT_NO_DEBUG OCCT
 target_link_libraries(occt_contact_imprint_probe PRIVATE paracfd_geometry
 	"${OCC_LIB_DIR}/TKBO.lib" "${OCC_LIB_DIR}/TKShHealing.lib")
 paracfd_deploy_occ_dlls(occt_contact_imprint_probe)
+
+# Guarded face-local constrained-meshing spike.  It injects a manufactured interior
+# T-junction by default and can audit every curved interior-contact face in a STEP
+# model.  Every requested segment must be a two-sided edge in both the transient mesh
+# and final Poly_Triangulation; real-mode success requires every candidate to pass.
+add_executable(occt_constrained_mesh_probe tools/occt_constrained_mesh_probe.cpp)
+target_compile_features(occt_constrained_mesh_probe PRIVATE cxx_std_20)
+target_include_directories(occt_constrained_mesh_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_constrained_mesh_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_constrained_mesh_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_constrained_mesh_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_constrained_mesh_probe)
+add_test(NAME occt_constrained_mesh COMMAND occt_constrained_mesh_probe)
+
+# Production planar-overlap normalizer probe. The helper retains one-to-many source
+# provenance and proves coverage/load-area conservation before accepting each cluster;
+# STEP-import integration is a separate, subsequent milestone.
+add_executable(occt_overlap_normalization_probe
+	tools/occt_overlap_normalization_probe.cpp)
+target_compile_features(occt_overlap_normalization_probe PRIVATE cxx_std_20)
+target_include_directories(occt_overlap_normalization_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_overlap_normalization_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_overlap_normalization_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_overlap_normalization_probe PRIVATE paracfd_geometry
+	"${OCC_LIB_DIR}/TKBO.lib")
+paracfd_deploy_occ_dlls(occt_overlap_normalization_probe)
+add_test(NAME occt_overlap_normalization_manufactured
+	COMMAND occt_overlap_normalization_probe --manufactured-only)
+if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
+	add_test(NAME occt_overlap_normalization_fixed_small
+		COMMAND occt_overlap_normalization_probe --step Test-Data/Two-Cells-fixed.stp
+			--expect-clusters 1 --expect-overlap-pairs 1)
+	set_tests_properties(occt_overlap_normalization_fixed_small PROPERTIES
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	add_test(NAME occt_overlap_normalization_fixed_full
+		COMMAND occt_overlap_normalization_probe --step Test-Data/MiniripFixed.step
+			--expect-clusters 2 --expect-overlap-pairs 2)
+	set_tests_properties(occt_overlap_normalization_fixed_full PROPERTIES
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
 
 # OCCT-backed reference decomposition of finite, conforming zero-thickness sheets inside
 # one Cartesian cell. This is the correctness gate for replacing the inference-heavy EB

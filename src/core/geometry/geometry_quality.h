@@ -26,8 +26,8 @@ namespace paracfd::core
 	};
 
 	// Keep the vocabulary broader than the current producer. STEP import currently emits exact
-	// disconnected components and explicitly unsupported named surfaces; later seam/gap/EB
-	// audits append to the same report without changing client APIs.
+	// disconnected components; later overlap/contact/tessellation/EB audits append to the same
+	// report without changing client APIs.
 	enum class GeometryIssueKind : std::uint8_t
 	{
 		intentional_opening_boundary = 0,
@@ -40,11 +40,7 @@ namespace paracfd::core
 		invalid_self_intersection = 7,
 		nonconforming_tessellation = 8,
 		missing_boundary_provenance = 9,
-		unresolved_embedded_boundary = 10,
-		// A source representation explicitly names a surface role that ParaCFD knows is
-		// unsupported for this simulation.  Unlike disconnected-component detection this
-		// remains valid if an exporter stretches the surface until it touches another face.
-		unsupported_named_surface = 11
+		unresolved_embedded_boundary = 10
 	};
 
 	enum class GeometryIssueSeverity : std::uint8_t
@@ -141,8 +137,7 @@ namespace paracfd::core
 	// the policy in the OCC-free core so GUI and command-line solvers cannot silently disagree.
 	inline bool geometry_issue_is_default_exclusion(const GeometryIssue& issue)
 	{
-		return issue.kind == GeometryIssueKind::disconnected_fabric_component
-			|| issue.kind == GeometryIssueKind::unsupported_named_surface;
+		return issue.kind == GeometryIssueKind::disconnected_fabric_component;
 	}
 
 	inline std::vector<std::uint32_t> default_excluded_triangle_ids(

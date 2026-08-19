@@ -27,6 +27,8 @@ namespace paracfd::core
 				destination.vertex_uv.insert(destination.vertex_uv.end(),
 					source.vertex_uv.begin() + uv, source.vertex_uv.begin() + uv + 2);
 			}
+			if (source.has_topology_vertex_ids())
+				destination.topology_vertex_ids.push_back(source.topology_vertex_id(vertex));
 		}
 
 		void append_half_edge_metadata(TriMesh& destination, const TriMesh& source,

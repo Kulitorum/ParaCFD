@@ -18,15 +18,21 @@
 // load_step_mesh() accumulates every face, including open shells and internal fabric, while
 // deliberately ignoring standalone STEP wires/edges.
 #include "core/geometry/step_import.h"
+#include "core/geometry/step_face_uv_projection.h"
 
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <IntTools_CommonPrt.hxx>
+#include <IntTools_EdgeEdge.hxx>
 #include <IntTools_EdgeFace.hxx>
 #include <IntTools_Range.hxx>
 #include <NCollection_IndexedDataMap.hxx>
@@ -52,6 +58,7 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <Transfer_TransientProcess.hxx>
 #include <TransferBRep.hxx>
 #include <XSControl_TransferReader.hxx>
@@ -73,47 +80,12 @@
 #include <numeric>
 #include <set>
 #include <sstream>
-#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace paracfd::core
 {
-	bool is_unsupported_mini_rib_representation_name(std::string_view name)
-	{
-		// STEP names in the producer are ASCII. Normalize surrounding/repeated whitespace and
-		// case, but intentionally do not normalize punctuation or accept a generic "rib" token:
-		// this classification removes an aerodynamic surface and therefore must be narrow.
-		std::string normalized;
-		normalized.reserve(name.size());
-		bool pending_space = false;
-		for (const unsigned char byte : name)
-		{
-			if (std::isspace(byte))
-			{
-				pending_space = !normalized.empty();
-				continue;
-			}
-			if (pending_space)
-			{
-				normalized.push_back(' ');
-				pending_space = false;
-			}
-			normalized.push_back(static_cast<char>(std::tolower(byte)));
-		}
-
-		constexpr std::string_view prefix = "mini-rib ";
-		if (!normalized.starts_with(prefix) || normalized.size() == prefix.size()) return false;
-		std::size_t index = prefix.size();
-		while (index < normalized.size() && normalized[index] >= '0'
-			&& normalized[index] <= '9') ++index;
-		// It is a role *prefix*: a producer may append a description, but a digit must not
-		// bleed into an arbitrary identifier such as "Mini-rib 12foo".
-		return index > prefix.size()
-			&& (index == normalized.size() || normalized[index] == ' ');
-	}
-
 	namespace
 	{
 		constexpr double kMmToM = 0.001;
@@ -140,6 +112,9 @@ namespace paracfd::core
 			// Zero-based IDs into source_faces. These are exact OCCT full edge-on-face
 			// contacts, not tessellation/proximity matches.
 			std::vector<std::uint32_t> target_face_ids;
+			// Parallel to target_face_ids: one sector for a target trim boundary,
+			// two when the contact lies in the target face interior.
+			std::vector<std::uint8_t> target_sector_counts;
 		};
 
 		using FaceNodePairMap = std::unordered_map<std::uint64_t, CadEdgeProvenance>;
@@ -657,16 +632,34 @@ namespace paracfd::core
 				if(stats)++stats->certified_pairs;
 				fan_degree[candidate.edge_id]+=candidate_result.added_sectors;
 				result[candidate.edge_id].target_face_ids.push_back(candidate.face_id);
+				result[candidate.edge_id].target_sector_counts.push_back(static_cast<std::uint8_t>(
+					candidate_result.added_sectors));
 			}
 			for(std::size_t edge_id=0;edge_id<fan_degree.size();++edge_id)
 				if(fan_degree[edge_id]>1)
 				{
 					auto& certificate=result[edge_id];certificate.contact_id=edge_id;
 					certificate.fan_degree=fan_degree[edge_id];
-					std::sort(certificate.target_face_ids.begin(),certificate.target_face_ids.end());
-					certificate.target_face_ids.erase(std::unique(certificate.target_face_ids.begin(),
-						certificate.target_face_ids.end()),certificate.target_face_ids.end());
-			}
+					std::vector<std::pair<std::uint32_t,std::uint8_t>> targets;
+					targets.reserve(certificate.target_face_ids.size());
+					for(std::size_t target=0;target<certificate.target_face_ids.size();++target)
+						targets.emplace_back(certificate.target_face_ids[target],
+							certificate.target_sector_counts[target]);
+					std::sort(targets.begin(),targets.end());
+					certificate.target_face_ids.clear();certificate.target_sector_counts.clear();
+					for(const auto& target:targets)
+					{
+						if(!certificate.target_face_ids.empty()
+							&&certificate.target_face_ids.back()==target.first)
+						{
+							certificate.target_sector_counts.back()=std::max(
+								certificate.target_sector_counts.back(),target.second);
+							continue;
+						}
+						certificate.target_face_ids.push_back(target.first);
+						certificate.target_sector_counts.push_back(target.second);
+					}
+				}
 			if(stats)std::fprintf(stderr,"[STEP contact] free-edges=%llu candidates=%llu "
 				"exact-calls=%llu midpoint-tests=%llu certified=%llu workers=%u; index=%.3fs query=%.3fs "
 				"IntTools=%.3fs (accepted %.3fs) classifier=%.3fs\n",
@@ -682,6 +675,643 @@ namespace paracfd::core
 				stats->inttools_seconds+stats->classifier_seconds,
 				static_cast<unsigned long long>(contact_certificate_hash(result)));
 			return result;
+		}
+
+		int face_index_of(const std::vector<TopoDS_Face>& faces,const TopoDS_Shape& candidate)
+		{
+			for(std::size_t face=0;face<faces.size();++face)
+				if(faces[face].IsSame(candidate))return static_cast<int>(face);
+			return -1;
+		}
+
+		bool parameter_ranges_cover(std::vector<std::pair<double,double>> ranges,
+			double first,double last)
+		{
+			if(last<first)std::swap(first,last);
+			if(ranges.empty())return false;
+			for(auto& range:ranges)if(range.second<range.first)std::swap(range.first,range.second);
+			std::sort(ranges.begin(),ranges.end());
+			const double tolerance=std::max(Precision::PConfusion(),
+				64.0*std::numeric_limits<double>::epsilon()
+				*std::max({1.0,std::abs(first),std::abs(last)}));
+			double covered=first;
+			for(const auto& range:ranges)
+			{
+				if(range.second<first||range.first>last)continue;
+				if(range.first>covered+tolerance)return false;
+				covered=std::max(covered,std::min(last,range.second));
+			}
+			return covered>=last-tolerance;
+		}
+
+		struct ExactEdgeOverlap
+		{
+			bool has_positive_length_common = false;
+			bool covers_a = false;
+			bool covers_b = false;
+		};
+
+		// This is the authoritative reciprocal/partial-edge decision. Endpoint and AABB
+		// tests below are only a broad phase; no distance-only match can create a physical
+		// contact curve.
+		ExactEdgeOverlap exact_edge_overlap(const TopoDS_Edge& a,const TopoDS_Edge& b)
+		{
+			ExactEdgeOverlap result;
+			BRepAdaptor_Curve curve_a(a),curve_b(b);
+			const double first_a=curve_a.FirstParameter(),last_a=curve_a.LastParameter();
+			const double first_b=curve_b.FirstParameter(),last_b=curve_b.LastParameter();
+			if(!std::isfinite(first_a)||!std::isfinite(last_a)||!(last_a>first_a)
+				||!std::isfinite(first_b)||!std::isfinite(last_b)||!(last_b>first_b))return result;
+			IntTools_EdgeEdge intersection(a,b);
+			intersection.SetFuzzyValue(0.0);
+			intersection.Perform();
+			if(!intersection.IsDone())return result;
+			std::vector<std::pair<double,double>> ranges_a,ranges_b;
+			for(NCollection_Sequence<IntTools_CommonPrt>::Iterator common(
+				intersection.CommonParts());common.More();common.Next())
+			{
+				if(common.Value().Type()!=TopAbs_EDGE)continue;
+				result.has_positive_length_common=true;
+				double lo=0.0,hi=0.0;common.Value().Range1(lo,hi);
+				ranges_a.emplace_back(lo,hi);
+				for(NCollection_Sequence<IntTools_Range>::Iterator range(
+					common.Value().Ranges2());range.More();range.Next())
+					ranges_b.emplace_back(range.Value().First(),range.Value().Last());
+			}
+			result.covers_a=parameter_ranges_cover(std::move(ranges_a),first_a,last_a);
+			result.covers_b=parameter_ranges_cover(std::move(ranges_b),first_b,last_b);
+			return result;
+		}
+
+		double edge_native_tolerance_mm(const TopoDS_Edge& edge)
+		{
+			return std::max(0.0,BRep_Tool::Tolerance(edge))
+				*std::abs(edge.Location().Transformation().ScaleFactor());
+		}
+
+		double vertex_native_tolerance_mm(const TopoDS_Vertex& vertex)
+		{
+			return vertex.IsNull()?0.0:std::max(0.0,BRep_Tool::Tolerance(vertex))
+				*std::abs(vertex.Location().Transformation().ScaleFactor());
+		}
+
+		struct CanonicalContactEdge
+		{
+			std::uint32_t edge_id=TriMesh::kNoCadEdgeId;
+			std::uint32_t owner_face_id=0;
+			TopoDS_Edge edge;
+			std::array<gp_Pnt,2> endpoints;
+			std::array<double,2> endpoint_tolerance_mm{{0.0,0.0}};
+			double edge_tolerance_mm=0.0;
+			NumericAabb bounds;
+			bool has_bounds=false;
+		};
+
+		bool endpoint_pair_within_native_tolerance(const gp_Pnt& a,double tolerance_a,
+			const gp_Pnt& b,double tolerance_b)
+		{
+			const double tolerance=tolerance_a+tolerance_b;
+			return a.SquareDistance(b)<=tolerance*tolerance;
+		}
+
+		bool reciprocal_edge_broad_phase(const CanonicalContactEdge& a,
+			const CanonicalContactEdge& b)
+		{
+			const bool forward=endpoint_pair_within_native_tolerance(a.endpoints[0],
+				a.endpoint_tolerance_mm[0],b.endpoints[0],b.endpoint_tolerance_mm[0])
+				&&endpoint_pair_within_native_tolerance(a.endpoints[1],
+					a.endpoint_tolerance_mm[1],b.endpoints[1],b.endpoint_tolerance_mm[1]);
+			const bool reversed=endpoint_pair_within_native_tolerance(a.endpoints[0],
+				a.endpoint_tolerance_mm[0],b.endpoints[1],b.endpoint_tolerance_mm[1])
+				&&endpoint_pair_within_native_tolerance(a.endpoints[1],
+					a.endpoint_tolerance_mm[1],b.endpoints[0],b.endpoint_tolerance_mm[0]);
+			return forward||reversed;
+		}
+
+		bool point_in_native_edge_bounds(const gp_Pnt& point,double point_tolerance_mm,
+			const CanonicalContactEdge& edge)
+		{
+			if(!edge.has_bounds)return true;
+			const double tolerance=point_tolerance_mm+edge.edge_tolerance_mm;
+			const double coordinate[3]={point.X(),point.Y(),point.Z()};
+			for(int axis=0;axis<3;++axis)
+				if(coordinate[axis]<edge.bounds.lo[axis]-tolerance
+					||coordinate[axis]>edge.bounds.hi[axis]+tolerance)return false;
+			return true;
+		}
+
+		bool endpoint_junction_broad_phase(const CanonicalContactEdge& a,
+			const CanonicalContactEdge& b)
+		{
+			for(std::size_t endpoint=0;endpoint<2;++endpoint)
+				if(point_in_native_edge_bounds(a.endpoints[endpoint],
+					a.endpoint_tolerance_mm[endpoint],b)
+					||point_in_native_edge_bounds(b.endpoints[endpoint],
+						b.endpoint_tolerance_mm[endpoint],a))return true;
+			return false;
+		}
+
+		bool endpoint_lies_on_edge_within_native_tolerance(const gp_Pnt& point,
+			double point_tolerance_mm,const CanonicalContactEdge& edge)
+		{
+			if(!point_in_native_edge_bounds(point,point_tolerance_mm,edge))return false;
+			TopLoc_Location location;Standard_Real first=0.0,last=0.0;
+			const Handle(Geom_Curve) curve=BRep_Tool::Curve(edge.edge,location,first,last);
+			if(curve.IsNull()||!std::isfinite(first)||!std::isfinite(last)||!(last>first))
+				return true; // indeterminate broad phase must retain the exact candidate
+			gp_Pnt local=point;local.Transform(location.Transformation().Inverted());
+			GeomAPI_ProjectPointOnCurve projection(local,curve,first,last);
+			if(projection.NbPoints()<=0)return true;
+			gp_Pnt projected=curve->Value(projection.LowerDistanceParameter());
+			projected.Transform(location.Transformation());
+			const double tolerance=point_tolerance_mm+edge.edge_tolerance_mm;
+			return projected.SquareDistance(point)<=tolerance*tolerance;
+		}
+
+		// A positive-length overlap which is not full/full must terminate at an endpoint
+		// of at least one participating trimmed edge. Requiring that endpoint to lie on the
+		// other exact support curve is a conservative cheap prerequisite for IntTools.
+		bool partial_overlap_broad_phase(const CanonicalContactEdge& a,
+			const CanonicalContactEdge& b)
+		{
+			for(std::size_t endpoint=0;endpoint<2;++endpoint)
+				if(endpoint_lies_on_edge_within_native_tolerance(a.endpoints[endpoint],
+					a.endpoint_tolerance_mm[endpoint],b)
+					||endpoint_lies_on_edge_within_native_tolerance(b.endpoints[endpoint],
+						b.endpoint_tolerance_mm[endpoint],a))return true;
+			return false;
+		}
+
+		struct ContactDisjointSet
+		{
+			explicit ContactDisjointSet(std::size_t count):parent(count),rank(count,0)
+			{
+				std::iota(parent.begin(),parent.end(),std::size_t{0});
+			}
+			std::size_t find(std::size_t value)
+			{
+				if(parent[value]!=value)parent[value]=find(parent[value]);
+				return parent[value];
+			}
+			void merge(std::size_t a,std::size_t b)
+			{
+				a=find(a);b=find(b);if(a==b)return;
+				if(rank[a]<rank[b])std::swap(a,b);
+				parent[b]=a;if(rank[a]==rank[b])++rank[a];
+			}
+			std::vector<std::size_t> parent;
+			std::vector<std::uint8_t> rank;
+		};
+
+		struct ProjectedContactSample
+		{
+			double parameter=0.0;
+			gp_Pnt point;
+			double tolerance_mm=0.0;
+			std::uint32_t source_edge_id=TriMesh::kNoCadEdgeId;
+			std::uint32_t source_node_id=0;
+			std::vector<std::size_t> junction_ids;
+		};
+
+		struct ExactContactJunction
+		{
+			std::size_t first_group=0;
+			std::size_t second_group=0;
+			gp_Pnt point;
+		};
+
+		std::vector<gp_Pnt> exact_edge_vertex_junctions(const TopoDS_Edge& a,
+			const TopoDS_Edge& b)
+		{
+			std::vector<gp_Pnt> result;
+			IntTools_EdgeEdge intersection(a,b);intersection.SetFuzzyValue(0.0);
+			intersection.Perform();if(!intersection.IsDone())return result;
+			BRepAdaptor_Curve curve_a(a);
+			for(NCollection_Sequence<IntTools_CommonPrt>::Iterator common(
+				intersection.CommonParts());common.More();common.Next())
+			{
+				if(common.Value().Type()!=TopAbs_VERTEX)continue;
+				const double parameter_a=common.Value().VertexParameter1();
+				const double parameter_b=common.Value().VertexParameter2();
+				if(!std::isfinite(parameter_a)||!std::isfinite(parameter_b))continue;
+				result.push_back(curve_a.Value(parameter_a));
+			}
+			return result;
+		}
+
+		bool project_to_canonical_edge(const gp_Pnt& world_point,
+			const Handle(Geom_Curve)& curve,const TopLoc_Location& location,
+			double first,double last,double& parameter,gp_Pnt& projected_world)
+		{
+			if(curve.IsNull())return false;
+			gp_Pnt local_point=world_point;
+			local_point.Transform(location.Transformation().Inverted());
+			GeomAPI_ProjectPointOnCurve projection(local_point,curve,first,last);
+			if(projection.NbPoints()<=0)return false;
+			parameter=std::clamp(projection.LowerDistanceParameter(),first,last);
+			projected_world=curve->Value(parameter);
+			projected_world.Transform(location.Transformation());
+			return true;
+		}
+
+		std::vector<TopoDS_Edge> certified_boundary_occurrences(
+			const CanonicalContactEdge& canonical,
+			const std::vector<std::size_t>& members,
+			const std::vector<CanonicalContactEdge>& contact_edges,
+			std::uint32_t face_id,const std::vector<TopoDS_Face>& faces)
+		{
+			std::vector<TopoDS_Edge> result;
+			if(face_id>=faces.size())return result;
+			bool has_owned_member=false;
+			for(const std::size_t member_id:members)
+				if(contact_edges[member_id].owner_face_id==face_id)
+					has_owned_member=true;
+			for(TopExp_Explorer occurrence(faces[face_id],TopAbs_EDGE);
+				occurrence.More();occurrence.Next())
+			{
+				const TopoDS_Edge oriented=TopoDS::Edge(occurrence.Current());
+				if(has_owned_member)
+				{
+					for(const std::size_t member_id:members)
+						if(contact_edges[member_id].owner_face_id==face_id
+							&&oriented.IsSame(contact_edges[member_id].edge))
+						{
+							result.push_back(oriented);
+							break;
+						}
+					continue;
+				}
+				// A target trim may be shared and therefore absent from the free-edge
+				// physical group. It is usable only when both exact extents agree; a
+				// longer/split trim still requires the separately scoped atomization step.
+				const ExactEdgeOverlap overlap=exact_edge_overlap(canonical.edge,oriented);
+				if(overlap.has_positive_length_common&&overlap.covers_a&&overlap.covers_b)
+					result.push_back(oriented);
+			}
+			return result;
+		}
+
+		bool make_contact_graph(const ShapeIndexedMap& shape_edges,
+			const ShapeAncestorMap& edge_faces,const std::vector<TopoDS_Face>& faces,
+			std::vector<CadEdgeContactCertificate>& certificates,
+			StepCadContactGraph& output,std::string& error)
+		{
+			error.clear();
+			std::vector<CanonicalContactEdge> contact_edges;
+			for(std::size_t edge_id=0;edge_id<certificates.size();++edge_id)
+			{
+				const CadEdgeContactCertificate& certificate=certificates[edge_id];
+				if(certificate.contact_id==TriMesh::kNoCadContactId||certificate.fan_degree<=1
+					||edge_id>=static_cast<std::size_t>(shape_edges.Extent()))continue;
+				const TopoDS_Edge edge=TopoDS::Edge(shape_edges(static_cast<Standard_Integer>(edge_id+1)));
+				if(!edge_faces.Contains(edge)||edge_faces.FindFromKey(edge).Size()!=1)continue;
+				const TopoDS_Face owner=TopoDS::Face(edge_faces.FindFromKey(edge).First());
+				const int owner_id=face_index_of(faces,owner);if(owner_id<0)continue;
+				BRepAdaptor_Curve curve(edge);
+				const double first=curve.FirstParameter(),last=curve.LastParameter();
+				if(!std::isfinite(first)||!std::isfinite(last)||!(last>first))continue;
+				CanonicalContactEdge record;
+				record.edge_id=static_cast<std::uint32_t>(edge_id);
+				record.owner_face_id=static_cast<std::uint32_t>(owner_id);
+				record.edge=edge;record.endpoints={{curve.Value(first),curve.Value(last)}};
+				record.edge_tolerance_mm=edge_native_tolerance_mm(edge);
+				TopoDS_Vertex first_vertex,last_vertex;TopExp::Vertices(edge,first_vertex,last_vertex,true);
+				record.endpoint_tolerance_mm={{std::max(record.edge_tolerance_mm,
+					vertex_native_tolerance_mm(first_vertex)),std::max(record.edge_tolerance_mm,
+					vertex_native_tolerance_mm(last_vertex))}};
+				Bnd_Box bounds;BRepBndLib::AddOptimal(edge,bounds,false,true);
+				record.has_bounds=numeric_aabb(bounds,record.bounds);
+				contact_edges.push_back(std::move(record));
+			}
+
+			ContactDisjointSet groups(contact_edges.size());
+			std::vector<StepCadContactGraph::PartialOverlap> unresolved_partial_overlaps;
+			for(std::size_t a=0;a<contact_edges.size();++a)
+				for(std::size_t b=a+1;b<contact_edges.size();++b)
+				{
+					const bool reciprocal=reciprocal_edge_broad_phase(contact_edges[a],contact_edges[b]);
+					if(!reciprocal&&!partial_overlap_broad_phase(contact_edges[a],contact_edges[b]))
+						continue;
+					const ExactEdgeOverlap overlap=exact_edge_overlap(contact_edges[a].edge,
+						contact_edges[b].edge);
+					if(!overlap.has_positive_length_common)continue;
+					if(overlap.covers_a&&overlap.covers_b)
+					{
+						groups.merge(a,b);
+						continue;
+					}
+					unresolved_partial_overlaps.push_back({contact_edges[a].edge_id,
+						contact_edges[b].edge_id,contact_edges[a].owner_face_id,
+						contact_edges[b].owner_face_id,overlap.covers_a,overlap.covers_b});
+				}
+			std::map<std::size_t,std::vector<std::size_t>> members_by_group;
+			for(std::size_t edge=0;edge<contact_edges.size();++edge)
+				members_by_group[groups.find(edge)].push_back(edge);
+			std::vector<std::vector<std::size_t>> physical_groups;
+			physical_groups.reserve(members_by_group.size());
+			for(auto& [unused_root,members]:members_by_group)
+			{
+				(void)unused_root;
+				std::sort(members.begin(),members.end(),[&](std::size_t a,std::size_t b)
+					{return contact_edges[a].edge_id<contact_edges[b].edge_id;});
+				physical_groups.push_back(std::move(members));
+			}
+			std::sort(physical_groups.begin(),physical_groups.end(),[&](const auto& a,const auto& b)
+				{return contact_edges[a.front()].edge_id<contact_edges[b.front()].edge_id;});
+
+			// Curves which are not reciprocal copies can still meet at an exact CAD vertex or
+			// T-node. Insert that OCCT-certified point into both canonical chains, then join
+			// their discrete topology IDs below. The endpoint-vs-edge bounds test is only a
+			// broad phase; a zero-fuzzy IntTools vertex common is the decision.
+			std::vector<ExactContactJunction> junctions;
+			std::vector<std::vector<std::size_t>> junctions_by_group(physical_groups.size());
+			for(std::size_t a=0;a<physical_groups.size();++a)
+				for(std::size_t b=a+1;b<physical_groups.size();++b)
+				{
+					const CanonicalContactEdge& edge_a=contact_edges[physical_groups[a].front()];
+					const CanonicalContactEdge& edge_b=contact_edges[physical_groups[b].front()];
+					if(!endpoint_junction_broad_phase(edge_a,edge_b))continue;
+					for(const gp_Pnt& point:exact_edge_vertex_junctions(edge_a.edge,edge_b.edge))
+					{
+						const std::size_t junction_id=junctions.size();
+						junctions.push_back({a,b,point});
+						junctions_by_group[a].push_back(junction_id);
+						junctions_by_group[b].push_back(junction_id);
+					}
+				}
+
+			StepCadContactGraph graph;
+			graph.unresolved_partial_overlaps=std::move(unresolved_partial_overlaps);
+			// Kept parallel to graph.curves/curve.uses until shared junction coordinates
+			// have been canonicalized. UVs must round-trip to the final public 3D chain,
+			// not to a pre-collapse tolerance-near copy.
+			std::vector<std::vector<std::vector<TopoDS_Edge>>> pending_boundary_edges;
+			std::vector<std::vector<std::size_t>> topology_locations(junctions.size());
+			std::size_t total_sample_count=0;
+			for(std::size_t group_id=0;group_id<physical_groups.size();++group_id)
+			{
+				const std::vector<std::size_t>& members=physical_groups[group_id];
+				const CanonicalContactEdge& canonical=contact_edges[members.front()];
+				StepContactCurve curve;
+				curve.id=canonical.edge_id;curve.source_edge_id=canonical.edge_id;
+				std::map<std::uint32_t,std::uint8_t> use_sectors;
+				for(const std::size_t member_id:members)
+				{
+					const CanonicalContactEdge& member=contact_edges[member_id];
+					curve.source_edge_ids.push_back(member.edge_id);
+					curve.tolerance_m=std::max(curve.tolerance_m,
+						std::max({member.edge_tolerance_mm,member.endpoint_tolerance_mm[0],
+							member.endpoint_tolerance_mm[1]})*kMmToM);
+					use_sectors.emplace(member.owner_face_id,1u);
+					const CadEdgeContactCertificate& certificate=certificates[member.edge_id];
+					for(std::size_t target=0;target<certificate.target_face_ids.size();++target)
+					{
+						const std::uint32_t face_id=certificate.target_face_ids[target];
+						const std::uint8_t sectors=target<certificate.target_sector_counts.size()
+							?certificate.target_sector_counts[target]:1u;
+						auto [found,inserted]=use_sectors.emplace(face_id,sectors);
+						if(!inserted)found->second=std::max(found->second,sectors);
+					}
+				}
+				for(const auto& [face_id,sectors]:use_sectors)
+					if(face_id<faces.size())curve.fan_degree+=sectors;
+
+				TopLoc_Location canonical_location;
+				Standard_Real canonical_first=0.0,canonical_last=0.0;
+				const Handle(Geom_Curve) canonical_curve=BRep_Tool::Curve(canonical.edge,
+					canonical_location,canonical_first,canonical_last);
+				std::vector<ProjectedContactSample> samples;
+				auto append_projected=[&](const gp_Pnt& point,double tolerance_mm,
+					std::uint32_t source_edge_id,std::uint32_t source_node_id,
+					std::size_t junction_id=std::numeric_limits<std::size_t>::max())
+				{
+					double parameter=0.0;gp_Pnt projected;
+					if(!project_to_canonical_edge(point,canonical_curve,canonical_location,
+						canonical_first,canonical_last,parameter,projected))return;
+					ProjectedContactSample sample;
+					sample.parameter=parameter;sample.point=projected;
+					sample.tolerance_mm=tolerance_mm;sample.source_edge_id=source_edge_id;
+					sample.source_node_id=source_node_id;
+					if(junction_id!=std::numeric_limits<std::size_t>::max())
+						sample.junction_ids.push_back(junction_id);
+					samples.push_back(std::move(sample));
+				};
+				BRepAdaptor_Curve canonical_adaptor(canonical.edge);
+				append_projected(canonical_adaptor.Value(canonical_adaptor.FirstParameter()),
+					canonical.endpoint_tolerance_mm[0],canonical.edge_id,0u);
+				append_projected(canonical_adaptor.Value(canonical_adaptor.LastParameter()),
+					canonical.endpoint_tolerance_mm[1],canonical.edge_id,
+					std::numeric_limits<std::uint32_t>::max());
+				for(const std::size_t member_id:members)
+				{
+					const CanonicalContactEdge& member=contact_edges[member_id];
+					const TopoDS_Face& owner=faces[member.owner_face_id];
+					TopLoc_Location location;
+					const Handle(Poly_Triangulation) triangulation=BRep_Tool::Triangulation(owner,location);
+					if(triangulation.IsNull())continue;
+					Handle(Poly_PolygonOnTriangulation) polygon=
+						BRep_Tool::PolygonOnTriangulation(member.edge,triangulation,location);
+					if(polygon.IsNull())
+					{
+						TopoDS_Edge reversed=member.edge;reversed.Reverse();
+						polygon=BRep_Tool::PolygonOnTriangulation(reversed,triangulation,location);
+					}
+					if(polygon.IsNull())continue;
+					for(Standard_Integer node=1;node<=polygon->NbNodes();++node)
+					{
+						gp_Pnt point=triangulation->Node(polygon->Node(node));
+						point.Transform(location.Transformation());
+						double tolerance_mm=member.edge_tolerance_mm;
+						if(node==1)tolerance_mm=std::max(tolerance_mm,
+							member.endpoint_tolerance_mm[0]);
+						if(node==polygon->NbNodes())tolerance_mm=std::max(tolerance_mm,
+							member.endpoint_tolerance_mm[1]);
+						append_projected(point,tolerance_mm,member.edge_id,
+							static_cast<std::uint32_t>(node));
+					}
+				}
+				for(const std::size_t junction_id:junctions_by_group[group_id])
+				{
+					const ExactContactJunction& junction=junctions[junction_id];
+					const std::size_t other_group=junction.first_group==group_id
+						?junction.second_group:junction.first_group;
+					const CanonicalContactEdge& other=
+						contact_edges[physical_groups[other_group].front()];
+					append_projected(junction.point,
+						std::max(canonical.edge_tolerance_mm,other.edge_tolerance_mm),
+						canonical.edge_id,static_cast<std::uint32_t>(junction_id),junction_id);
+				}
+				std::sort(samples.begin(),samples.end(),[](const ProjectedContactSample& a,
+					const ProjectedContactSample& b)
+				{
+					if(a.parameter!=b.parameter)return a.parameter<b.parameter;
+					if(a.source_edge_id!=b.source_edge_id)return a.source_edge_id<b.source_edge_id;
+					return a.source_node_id<b.source_node_id;
+				});
+				std::vector<ProjectedContactSample> unique_samples;
+				for(const ProjectedContactSample& sample:samples)
+				{
+					if(!unique_samples.empty())
+					{
+						ProjectedContactSample& previous=unique_samples.back();
+						const double tolerance=std::max(previous.tolerance_mm,sample.tolerance_mm);
+						// Both samples were projected onto one exact canonical curve. Native
+						// edge/vertex tolerance is the only permitted node de-duplication radius.
+						if(previous.point.SquareDistance(sample.point)<=tolerance*tolerance)
+						{
+							previous.tolerance_mm=tolerance;
+							previous.junction_ids.insert(previous.junction_ids.end(),
+								sample.junction_ids.begin(),sample.junction_ids.end());
+							std::sort(previous.junction_ids.begin(),previous.junction_ids.end());
+							previous.junction_ids.erase(std::unique(previous.junction_ids.begin(),
+								previous.junction_ids.end()),previous.junction_ids.end());
+							continue;
+						}
+					}
+					unique_samples.push_back(sample);
+				}
+				std::vector<gp_Pnt> world_points;world_points.reserve(unique_samples.size());
+				for(const ProjectedContactSample& sample:unique_samples)
+				{
+					curve.source_parameters.push_back(sample.parameter);
+					world_points.push_back(sample.point);
+					curve.sample_positions_m.push_back({{sample.point.X()*kMmToM,
+						sample.point.Y()*kMmToM,sample.point.Z()*kMmToM}});
+				}
+				const auto endpoint_less=[](const std::array<double,3>& a,
+					const std::array<double,3>& b)
+				{
+					if(a[0]!=b[0])return a[0]<b[0];if(a[1]!=b[1])return a[1]<b[1];return a[2]<b[2];
+				};
+				if(curve.sample_positions_m.size()>=2&&endpoint_less(
+					curve.sample_positions_m.back(),curve.sample_positions_m.front()))
+				{
+					std::reverse(unique_samples.begin(),unique_samples.end());
+					std::reverse(world_points.begin(),world_points.end());
+					std::reverse(curve.sample_positions_m.begin(),curve.sample_positions_m.end());
+					std::reverse(curve.source_parameters.begin(),curve.source_parameters.end());
+				}
+				std::vector<std::vector<TopoDS_Edge>> curve_boundary_edges;
+				for(const auto& [face_id,sectors]:use_sectors)
+				{
+					if(face_id>=faces.size())continue;
+					StepContactFaceUse use;use.source_face_id=face_id;use.sector_count=sectors;
+					use.kind=sectors>1?StepContactUseKind::face_interior:
+						StepContactUseKind::trim_boundary;
+					curve_boundary_edges.push_back(use.kind==StepContactUseKind::trim_boundary
+						?certified_boundary_occurrences(canonical,members,contact_edges,
+							face_id,faces):std::vector<TopoDS_Edge>{});
+					curve.uses.push_back(std::move(use));
+				}
+				for(const std::size_t member_id:members)
+				{
+					CadEdgeContactCertificate& certificate=
+						certificates[contact_edges[member_id].edge_id];
+					certificate.contact_id=curve.id;certificate.fan_degree=curve.fan_degree;
+				}
+				for(std::size_t sample=0;sample<unique_samples.size();++sample)
+					for(const std::size_t junction_id:unique_samples[sample].junction_ids)
+						if(junction_id<topology_locations.size())
+							topology_locations[junction_id].push_back(total_sample_count+sample);
+				total_sample_count+=unique_samples.size();
+				graph.curves.push_back(std::move(curve));
+				pending_boundary_edges.push_back(std::move(curve_boundary_edges));
+			}
+			ContactDisjointSet topology_groups(total_sample_count);
+			for(const std::vector<std::size_t>& locations:topology_locations)
+				for(std::size_t location=1;location<locations.size();++location)
+					topology_groups.merge(locations.front(),locations[location]);
+			std::map<std::size_t,std::uint32_t> topology_id_by_root;
+			std::uint32_t next_topology_id=0;std::size_t global_sample=0;
+			for(StepContactCurve& curve:graph.curves)
+			{
+				curve.sample_topology_ids.reserve(curve.sample_positions_m.size());
+				for(std::size_t sample=0;sample<curve.sample_positions_m.size();++sample)
+				{
+					const std::size_t root=topology_groups.find(global_sample++);
+					auto [found,inserted]=topology_id_by_root.emplace(root,next_topology_id);
+					if(inserted)++next_topology_id;
+					curve.sample_topology_ids.push_back(found->second);
+				}
+			}
+			// A topology ID is a discrete identity, not a proximity hint. Curves meeting at
+			// an exact OCCT vertex/T-junction were projected independently onto their own
+			// support curves above, so their floating-point coordinates can legitimately
+			// differ by a native CAD tolerance. Collapse every joined node to the first
+			// deterministic graph coordinate now. The STEP conformer will copy this exact
+			// coordinate into every face-local render vertex carrying the ID; BVH/EB can
+			// therefore require bit-identical coordinates without performing a tolerance weld.
+			std::map<std::uint32_t,std::array<double,3>> canonical_position_by_topology;
+			std::map<std::uint32_t,double> tolerance_by_topology;
+			for(StepContactCurve& curve:graph.curves)
+				for(std::size_t sample=0;sample<curve.sample_positions_m.size();++sample)
+				{
+					const std::uint32_t topology=curve.sample_topology_ids[sample];
+					const auto [position,inserted]=canonical_position_by_topology.emplace(
+						topology,curve.sample_positions_m[sample]);
+					if(!inserted)curve.sample_positions_m[sample]=position->second;
+					auto [tolerance,tolerance_inserted]=tolerance_by_topology.emplace(
+						topology,curve.tolerance_m);
+					if(!tolerance_inserted)tolerance->second=std::max(
+						tolerance->second,curve.tolerance_m);
+				}
+			for(StepContactCurve& curve:graph.curves)
+				for(const std::uint32_t topology:curve.sample_topology_ids)
+					curve.tolerance_m=std::max(curve.tolerance_m,
+						tolerance_by_topology[topology]);
+			for(std::size_t curve_id=0;curve_id<graph.curves.size();++curve_id)
+			{
+				StepContactCurve& curve=graph.curves[curve_id];
+				if(curve_id>=pending_boundary_edges.size()
+					||pending_boundary_edges[curve_id].size()!=curve.uses.size())
+				{
+					error="internal contact UV staging mismatch";
+					return false;
+				}
+				std::vector<gp_Pnt> final_world_points;
+				final_world_points.reserve(curve.sample_positions_m.size());
+				for(const std::array<double,3>& position:curve.sample_positions_m)
+					final_world_points.emplace_back(position[0]/kMmToM,
+						position[1]/kMmToM,position[2]/kMmToM);
+				for(std::size_t use_id=0;use_id<curve.uses.size();++use_id)
+				{
+					StepContactFaceUse& use=curve.uses[use_id];
+					if(use.source_face_id>=faces.size())
+					{
+						error="contact UV use references an invalid source face";
+						return false;
+					}
+					const TopoDS_Face& face=faces[use.source_face_id];
+					TopLoc_Location face_location;
+					(void)BRep_Tool::Surface(face,face_location);
+					const double location_scale=std::abs(
+						face_location.Transformation().ScaleFactor());
+					const double tolerance_mm=std::max({Precision::Confusion(),
+						curve.tolerance_m/kMmToM,
+						BRep_Tool::Tolerance(face)*location_scale});
+					std::string projection_error;
+					bool used_exact_boundary_pcurve=false;
+					if(!detail::project_trim_valid_face_uv(final_world_points,face,
+						pending_boundary_edges[curve_id][use_id],
+						use.kind==StepContactUseKind::trim_boundary,tolerance_mm,
+						use.sample_uv,projection_error,&used_exact_boundary_pcurve))
+					{
+						// Keep the STEP surface available for display and diagnostics, but
+						// retain the exact failure as a hard conforming-mesh prerequisite.
+						// Publishing a partial UV chain would be more dangerous than an
+						// explicit unresolved record, so the failed use remains empty.
+						use.sample_uv.clear();
+						graph.unresolved_uv_projections.push_back({curve.id,
+							use.source_face_id,use.kind,projection_error});
+						continue;
+					}
+					if(use.kind==StepContactUseKind::trim_boundary
+						&&!used_exact_boundary_pcurve)
+						++graph.trim_surface_fallback_count;
+				}
+			}
+			output=std::move(graph);
+			return true;
 		}
 
 		FaceNodePairMap face_cad_edge_segments(const TopoDS_Face& face,
@@ -1086,109 +1716,6 @@ namespace paracfd::core
 			return report;
 		}
 
-		void append_unsupported_named_surface_issue(GeometryQualityReport& report,
-			const ShapeIndexedMap& shape_edges, const std::vector<TopoDS_Face>& source_faces,
-			const std::vector<StepSourceFaceMetadata>& metadata, const TriMesh& mesh)
-		{
-			std::vector<std::uint8_t> unsupported_face(source_faces.size(), 0);
-			GeometryIssue issue;
-			issue.stage = GeometryIssueStage::cad_input;
-			issue.kind = GeometryIssueKind::unsupported_named_surface;
-			issue.severity = GeometryIssueSeverity::warning_run;
-			issue.state = GeometryIssueState::detected;
-
-			for (const StepSourceFaceMetadata& face : metadata)
-			{
-				if (face.source_face_id >= unsupported_face.size()) continue;
-				bool matches = false;
-				for (const std::string& name : face.representation_names)
-					if (is_unsupported_mini_rib_representation_name(name))
-					{
-						matches = true;
-						issue.source_representation_names.push_back(name);
-					}
-				if (!matches) continue;
-				unsupported_face[face.source_face_id] = 1;
-				issue.source_face_ids.push_back(face.source_face_id);
-			}
-			if (issue.source_face_ids.empty()) return;
-
-			std::sort(issue.source_face_ids.begin(), issue.source_face_ids.end());
-			issue.source_face_ids.erase(std::unique(issue.source_face_ids.begin(),
-				issue.source_face_ids.end()), issue.source_face_ids.end());
-			std::sort(issue.source_representation_names.begin(),
-				issue.source_representation_names.end());
-			issue.source_representation_names.erase(std::unique(
-				issue.source_representation_names.begin(), issue.source_representation_names.end()),
-				issue.source_representation_names.end());
-
-			for (std::uint32_t triangle = 0; triangle < mesh.triangle_count(); ++triangle)
-			{
-				const std::uint32_t face = mesh.source_face_ids[triangle];
-				if (face >= unsupported_face.size() || !unsupported_face[face]) continue;
-				issue.source_triangle_ids.push_back(triangle);
-				issue.surface_area_m2 += triangle_area(mesh, triangle);
-			}
-
-			// Outline the entire semantically classified surface. Shared edges are included on
-			// purpose: unlike a topological gap marker this diagnostic must remain visible when
-			// an exporter has stretched the mini-rib into exact contact with the ballooned skin.
-			std::set<std::uint32_t> outlined_edges;
-			for (std::uint32_t face_id : issue.source_face_ids)
-			{
-				if (face_id >= source_faces.size()) continue;
-				const TopoDS_Face& face = source_faces[face_id];
-				for (TopExp_Explorer edge_iterator(face, TopAbs_EDGE); edge_iterator.More();
-					edge_iterator.Next())
-				{
-					const TopoDS_Edge edge = TopoDS::Edge(edge_iterator.Current());
-					const Standard_Integer edge_index = shape_edges.FindIndex(edge);
-					if (edge_index <= 0) continue;
-					const std::uint32_t edge_id = static_cast<std::uint32_t>(edge_index - 1);
-					if (!outlined_edges.insert(edge_id).second) continue;
-					GeometryIssuePolyline polyline = tessellated_edge_polyline(edge, face, edge_id);
-					if (polyline.points.size() < 2) continue;
-					for (std::size_t point = 1; point < polyline.points.size(); ++point)
-					{
-						const auto& a = polyline.points[point - 1];
-						const auto& b = polyline.points[point];
-						const double dx = static_cast<double>(b[0]) - a[0];
-						const double dy = static_cast<double>(b[1]) - a[1];
-						const double dz = static_cast<double>(b[2]) - a[2];
-						issue.boundary_length_m += std::sqrt(dx * dx + dy * dy + dz * dz);
-					}
-					issue.boundary_polylines.push_back(std::move(polyline));
-				}
-			}
-
-			std::uint64_t hash = 1469598103934665603ull;
-			const auto hash_byte = [&hash](std::uint8_t byte)
-			{
-				hash ^= byte;
-				hash *= 1099511628211ull;
-			};
-			for (const char byte : std::string_view("unsupported-mini-rib"))
-				hash_byte(static_cast<std::uint8_t>(byte));
-			for (std::uint32_t face : issue.source_face_ids)
-				for (unsigned shift = 0; shift < 32; shift += 8)
-					hash_byte(static_cast<std::uint8_t>(face >> shift));
-			for (const std::string& name : issue.source_representation_names)
-			{
-				hash_byte(0xff);
-				for (const unsigned char byte : name) hash_byte(byte);
-			}
-			issue.id = hash;
-
-			std::ostringstream summary;
-			summary << "Unsupported named mini-rib source surface detected: "
-				<< issue.source_face_ids.size() << " source face(s), "
-				<< issue.source_triangle_ids.size() << " triangle(s), "
-				<< issue.surface_area_m2 << " m^2. These post-inflation artifacts are not solved "
-				<< "by the structural model and are reversible CFD-exclusion candidates.";
-			issue.summary = summary.str();
-			report.issues.push_back(std::move(issue));
-		}
-
 		void set_error(std::string* error, const std::string& msg)
 		{
 			if (error) *error = msg;
@@ -1240,8 +1767,8 @@ namespace paracfd::core
 		// it or an ancestor). Returns empty() if the shape contributes no triangles.
 		TriMesh mesh_from_faces(const TopoDS_Shape& shape,
 			const std::vector<TopoDS_Face>& source_faces,
-			const std::vector<StepSourceFaceMetadata>& source_metadata,
-			GeometryQualityReport* quality, std::string* error)
+			GeometryQualityReport* quality, StepCadContactGraph* contact_graph,
+			std::string* error)
 		{
 			TriMesh mesh;
 			// IDs are topology traversal IDs, deliberately independent of tessellation density.
@@ -1253,8 +1780,20 @@ namespace paracfd::core
 			// Deliberately retain face-use multiplicity: a periodic seam is the same
 			// TopoDS_Edge used twice by one face and therefore bounds two sheet sectors.
 			TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
-			const std::vector<CadEdgeContactCertificate> edge_contacts=
+			std::vector<CadEdgeContactCertificate> edge_contacts=
 				certify_edge_face_contacts(shape_edges,edge_faces,source_faces);
+			if(contact_graph)
+			{
+				StepCadContactGraph staged_graph;
+				std::string graph_error;
+				if(!make_contact_graph(shape_edges,edge_faces,source_faces,edge_contacts,
+					staged_graph,graph_error))
+				{
+					set_error(error,graph_error);
+					return TriMesh{};
+				}
+				*contact_graph=std::move(staged_graph);
+			}
 
 			// --- Accumulate faces into one flat mesh (metres) ----------------------
 			for (std::size_t source_face_index=0;source_face_index<source_faces.size();++source_face_index)
@@ -1418,8 +1957,9 @@ namespace paracfd::core
 			{
 				*quality = disconnected_component_report(shape_edges, edge_faces, source_faces,
 					edge_contacts, mesh);
-				append_unsupported_named_surface_issue(*quality, shape_edges, source_faces,
-					source_metadata, mesh);
+				// Representation names describe the producer's intent; they are not a geometric
+				// validity test. In particular, a correctly attached mini-rib is real fabric.
+				// Disconnected artifacts are already reported above from exact CAD connectivity.
 			}
 
 			return mesh;
@@ -1441,8 +1981,8 @@ namespace paracfd::core
 
 			StepGeometry result;
 			result.source_faces = source_face_representation_metadata(reader, source_faces);
-			result.mesh = mesh_from_faces(shape, source_faces, result.source_faces,
-				&result.quality, error);
+			result.mesh = mesh_from_faces(shape, source_faces, &result.quality,
+				&result.contacts, error);
 			if (result.mesh.empty())
 			{
 				if (!error || error->empty()) set_error(error, "shape produced no triangulable faces");

@@ -145,6 +145,8 @@ namespace paracfd::core
 		TriangleBvh() = default;
 		explicit TriangleBvh(const TriMesh& mesh) { build(mesh); }
 
+		// Throws std::invalid_argument when one discrete topology ID names different
+		// coordinates. Edge certification relies on that identity being globally exact.
 		void build(const TriMesh& mesh, std::uint32_t leaf_size = 8);
 		bool empty() const { return triangles_.empty(); }
 		std::size_t triangle_count() const { return triangles_.size(); }

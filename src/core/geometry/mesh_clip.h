@@ -8,6 +8,9 @@ namespace paracfd::core
 {
 	// Retain the portion of `mesh` inside lower <= coordinate[axis] <= upper.
 	// Output triangles preserve winding, exact CPU positions, and source-face provenance.
+	// When the input has discrete topology IDs, retained vertices keep them and a cut
+	// point shared by copies of the same topological edge receives one deterministic new
+	// ID. Distinct topological edges are never welded merely because they coincide.
 	// A retained subsegment of an original CAD half-edge keeps its CAD edge ID/count;
 	// clip-plane edges and triangulation fan diagonals are explicitly marked unavailable.
 	// The returned bbox

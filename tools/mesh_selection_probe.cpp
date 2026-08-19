@@ -24,6 +24,7 @@ int main()
 		source.positions_fp64.assign(source.positions.begin(), source.positions.end());
 		source.normals = {0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1};
 		source.vertex_uv = {0,0, 1,0, 0,1, 0,0, 1,0, 0,1};
+		source.topology_vertex_ids = {101,102,103,201,202,203};
 		source.indices = {0,1,2, 3,4,5};
 		source.source_face_ids = {7,11};
 		source.triangle_cad_edge_provenance_states.assign(6,
@@ -44,11 +45,18 @@ int main()
 			"source triangle map was not retained");
 		require(selected.mesh.source_face_ids == std::vector<std::uint32_t>{7},
 			"CAD face provenance was not retained");
+		require(selected.mesh.has_topology_vertex_ids()
+			&& selected.mesh.topology_vertex_ids == std::vector<std::uint32_t>({101,102,103}),
+			"discrete topology vertex IDs were not retained");
 		require(selected.mesh.has_cad_edge_provenance(), "CAD edge provenance was not retained");
 		require(selected.mesh.has_cad_edge_contact_provenance(),
 			"CAD contact provenance was not retained");
 		require(std::abs(selected.mesh.bbox_max[0] - 1.0f) < 1e-7f,
 			"excluded geometry still influenced bbox");
+		TriMesh legacy;
+		legacy.positions = {0,0,0, 1,0,0};
+		require(!legacy.has_topology_vertex_ids() && legacy.topology_vertex_id(1) == 1,
+			"legacy meshes do not fall back to their render vertex indices");
 		std::puts("mesh selection: PASS");
 		return 0;
 	}

@@ -44,6 +44,14 @@ namespace paracfd::core
 		// therefore one (u,v) pair per mesh vertex retains the BRep tessellation provenance
 		// without exposing OpenCascade types to the CFD core. Missing UV data is stored as NaN.
 		std::vector<float> vertex_uv;       // 2 * vertex_count, source-face parameter coordinates
+		// Optional discrete-topology identity, parallel to the face-local render vertices.
+		// Vertices at a conforming CAD seam/contact deliberately remain duplicated because
+		// their UV coordinates and shading normals are face-local, but every copy receives
+		// the same topology ID. Distinct IDs may occupy the same position (for example two
+		// intentional fabric boundaries); consumers must never weld them by proximity.
+		// Programmatic/legacy meshes may omit this sidecar, in which case the ordinary
+		// vertex index is the topology identity.
+		std::vector<std::uint32_t> topology_vertex_ids; // optional vertex_count
 		std::vector<std::uint32_t> indices; // 3 * triangle_count
 		// Stable within one imported STEP shape: the zero-based TopoDS face traversal index that
 		// produced each triangle. This is the key used to accumulate CFD patches back to CAD faces.
@@ -84,6 +92,15 @@ namespace paracfd::core
 		bool empty() const { return indices.empty(); }
 		bool has_fp64_positions() const { return positions_fp64.size() == 3 * vertex_count(); }
 		bool has_uv() const { return vertex_uv.size() == 2 * vertex_count(); }
+		bool has_topology_vertex_ids() const
+		{
+			return !positions.empty() && topology_vertex_ids.size() == vertex_count();
+		}
+		bool has_malformed_topology_vertex_ids() const
+		{
+			return !topology_vertex_ids.empty()
+				&& topology_vertex_ids.size() != vertex_count();
+		}
 		bool has_face_provenance() const { return source_face_ids.size() == triangle_count(); }
 		bool has_cad_edge_provenance() const
 		{
@@ -122,6 +139,12 @@ namespace paracfd::core
 				return { { positions_fp64[offset], positions_fp64[offset + 1], positions_fp64[offset + 2] } };
 			return { { static_cast<double>(positions[offset]), static_cast<double>(positions[offset + 1]),
 				static_cast<double>(positions[offset + 2]) } };
+		}
+
+		std::uint32_t topology_vertex_id(std::size_t vertex) const
+		{
+			return has_topology_vertex_ids() && vertex < topology_vertex_ids.size()
+				? topology_vertex_ids[vertex] : static_cast<std::uint32_t>(vertex);
 		}
 
 		std::uint32_t cad_edge_id(std::size_t triangle, unsigned half_edge) const

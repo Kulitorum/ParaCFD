@@ -47,7 +47,6 @@ namespace paracfd::gui
 		RepairedSeam,
 		UnsharedSeam,
 		IsolatedFabricComponent,
-		UnsupportedNamedSurface,
 		IntentionalOpening,
 		UnclassifiedOpening,
 		Count
