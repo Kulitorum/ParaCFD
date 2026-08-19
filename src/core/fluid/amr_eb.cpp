@@ -43,21 +43,54 @@ namespace paracfd::core
 			EmbeddedBoundary& eb=atlas.topology;const int fragment_count=static_cast<int>(eb.fragments.size());const double cell_volume=h*h*h,minimum_volume=options.min_volume_fraction*cell_volume,maximum_merge_span=2*h,bracket_epsilon=1e-10*h;
 			auto ref_cell=[&](FragmentRef ref){if(ref==invalid_fragment)return -1;return fragment_is_regular(ref)?regular_fragment_cell(ref):eb.fragments[irregular_fragment_index(ref)].parent_cell;};
 			auto ref_owned=[&](FragmentRef ref){const int cell=ref_cell(ref);return cell>=0&&cell<static_cast<int>(atlas.owned_cell.size())&&atlas.owned_cell[cell]!=0;};
+			std::vector<unsigned char> reported_cell(grid.cell_count(),0);auto report_unresolved=[&](int cell,std::string reason,std::vector<std::uint32_t> triangles=std::vector<std::uint32_t>{}){if(cell<0||cell>=grid.cell_count()||!atlas.owned_cell[cell]||reported_cell[cell])return;reported_cell[cell]=1;eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,std::move(triangles),std::move(reason)});};
+			auto finite_vec=[](const Vec3d& value){return std::isfinite(value.x)&&std::isfinite(value.y)&&std::isfinite(value.z);};
+			auto valid_aperture_geometry=[&](const FaceAperture& aperture){return aperture.axis>=0&&aperture.axis<=2&&std::isfinite(aperture.area)&&aperture.area>0&&finite_vec(aperture.centroid);};
+			// Audit every record touching owned fluid before any centroid indexing or merge.
+			// A mixed ownership edge needs an aperture-aware coarse/fine transaction; it
+			// must not disappear merely because this sparse level atlas cannot own both ends.
+			for(const FaceAperture& aperture:eb.apertures)
+			{
+				const bool a_owned=ref_owned(aperture.fragment_a),b_owned=ref_owned(aperture.fragment_b);
+				if(a_owned!=b_owned){const FragmentRef owned=a_owned?aperture.fragment_a:aperture.fragment_b;report_unresolved(ref_cell(owned),"fluid aperture crosses an AMR ownership boundary; aperture-aware coarse/fine topology is required");continue;}
+				if(a_owned&&(!valid_aperture_geometry(aperture)||aperture.fragment_a==aperture.fragment_b))report_unresolved(ref_cell(aperture.fragment_a),"owned fluid aperture has invalid endpoints or non-positive/non-finite geometry; refine and rebuild");
+			}
+			for(const SurfacePatch& patch:eb.patches)
+			{
+				const bool plus_owned=ref_owned(patch.plus_fragment),minus_owned=ref_owned(patch.minus_fragment);
+				if(plus_owned!=minus_owned){const FragmentRef owned=plus_owned?patch.plus_fragment:patch.minus_fragment;report_unresolved(ref_cell(owned),"fabric patch crosses an AMR ownership boundary; both pressure sides must be represented on one composite topology");}
+			}
 			struct Aggregate{double volume=0;Vec3d weighted_centroid{},lo{},hi{};std::vector<FragmentRef> members;};
 			std::vector<FragmentRef> merge_parent(fragment_count,invalid_fragment);std::map<FragmentRef,Aggregate> aggregates;
 			for(int fragment=0;fragment<fragment_count;++fragment)if(atlas.owned_cell[eb.fragments[fragment].parent_cell]){const FragmentRef ref=irregular_fragment(fragment);merge_parent[fragment]=ref;Aggregate value;value.volume=eb.fragments[fragment].volume;value.weighted_centroid=eb.fragments[fragment].centroid*value.volume;value.lo=value.hi=eb.fragments[fragment].centroid;value.members.push_back(ref);aggregates.emplace(ref,std::move(value));eb.fragments[fragment].merge_target=ref;eb.fragments[fragment].pressure_dof=eb.fragments[fragment].parent_cell;eb.fragments[fragment].pressure_static=false;}
 			std::function<FragmentRef(FragmentRef)> find_root=[&](FragmentRef ref)->FragmentRef{if(ref==invalid_fragment||fragment_is_regular(ref))return ref;const int fragment=irregular_fragment_index(ref);if(fragment<0||fragment>=fragment_count||merge_parent[fragment]==invalid_fragment)return invalid_fragment;const FragmentRef parent=merge_parent[fragment];if(parent==ref)return ref;return merge_parent[fragment]=find_root(parent);};
 			auto aggregate=[&](FragmentRef ref)->Aggregate&{ref=find_root(ref);auto found=aggregates.find(ref);if(found!=aggregates.end())return found->second;if(!fragment_is_regular(ref)||!ref_owned(ref))throw std::runtime_error("missing owned EB aggregate");const Vec3d centre=eb.grid.cell_centroid(regular_fragment_cell(ref));Aggregate value;value.volume=cell_volume;value.weighted_centroid=centre*cell_volume;value.lo=value.hi=centre;value.members.push_back(ref);return aggregates.emplace(ref,std::move(value)).first->second;};
 			auto centroid=[&](FragmentRef ref){const Aggregate& value=aggregate(ref);return value.weighted_centroid/value.volume;};
-			std::map<FragmentRef,std::vector<int>> incident_apertures;for(int q=0;q<static_cast<int>(eb.apertures.size());++q){const FaceAperture& aperture=eb.apertures[q];if(!ref_owned(aperture.fragment_a)||!ref_owned(aperture.fragment_b))continue;incident_apertures[aperture.fragment_a].push_back(q);incident_apertures[aperture.fragment_b].push_back(q);aggregate(aperture.fragment_a);aggregate(aperture.fragment_b);}
+			std::map<FragmentRef,std::vector<int>> incident_apertures,all_owned_incident_apertures;for(int q=0;q<static_cast<int>(eb.apertures.size());++q){const FaceAperture& aperture=eb.apertures[q];if(ref_owned(aperture.fragment_a))all_owned_incident_apertures[aperture.fragment_a].push_back(q);if(ref_owned(aperture.fragment_b))all_owned_incident_apertures[aperture.fragment_b].push_back(q);if(!ref_owned(aperture.fragment_a)||!ref_owned(aperture.fragment_b)||!valid_aperture_geometry(aperture)||aperture.fragment_a==aperture.fragment_b)continue;incident_apertures[aperture.fragment_a].push_back(q);incident_apertures[aperture.fragment_b].push_back(q);aggregate(aperture.fragment_a);aggregate(aperture.fragment_b);}
 			std::map<FragmentRef,std::vector<FragmentRef>> forbidden_patch_pair;for(const SurfacePatch& patch:eb.patches)if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment&&patch.plus_fragment!=patch.minus_fragment&&ref_owned(patch.plus_fragment)&&ref_owned(patch.minus_fragment)){forbidden_patch_pair[patch.plus_fragment].push_back(patch.minus_fragment);forbidden_patch_pair[patch.minus_fragment].push_back(patch.plus_fragment);aggregate(patch.plus_fragment);aggregate(patch.minus_fragment);}
 			auto combined_span=[&](FragmentRef a,FragmentRef b){const Aggregate& aa=aggregate(a);const Aggregate& bb=aggregate(b);const Vec3d lo{std::min(aa.lo.x,bb.lo.x),std::min(aa.lo.y,bb.lo.y),std::min(aa.lo.z,bb.lo.z)},hi{std::max(aa.hi.x,bb.hi.x),std::max(aa.hi.y,bb.hi.y),std::max(aa.hi.z,bb.hi.z)};return std::max({hi.x-lo.x,hi.y-lo.y,hi.z-lo.z});};
-			auto legal_union=[&](FragmentRef a,FragmentRef b)
+			enum class UnionRejection
 			{
-				a=find_root(a);b=find_root(b);if(a==invalid_fragment||b==invalid_fragment||a==b||fragment_is_regular(a)&&fragment_is_regular(b))return false;Aggregate& aa=aggregate(a);Aggregate& bb=aggregate(b);if(combined_span(a,b)>maximum_merge_span+1e-12*h)return false;
-				auto crosses_patch=[&](const Aggregate& source,FragmentRef other){for(const FragmentRef member:source.members){const auto found=forbidden_patch_pair.find(member);if(found==forbidden_patch_pair.end())continue;for(const FragmentRef forbidden:found->second)if(find_root(forbidden)==other)return true;}return false;};if(crosses_patch(aa,b)||crosses_patch(bb,a))return false;
-				const double volume=aa.volume+bb.volume;const Vec3d merged_centroid=(aa.weighted_centroid+bb.weighted_centroid)/volume;std::vector<int> edges;for(const FragmentRef member:aa.members){const auto found=incident_apertures.find(member);if(found!=incident_apertures.end())edges.insert(edges.end(),found->second.begin(),found->second.end());}for(const FragmentRef member:bb.members){const auto found=incident_apertures.find(member);if(found!=incident_apertures.end())edges.insert(edges.end(),found->second.begin(),found->second.end());}std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());for(const int edge:edges){const FaceAperture& aperture=eb.apertures[edge];FragmentRef lower=find_root(aperture.fragment_a),upper=find_root(aperture.fragment_b);const bool lower_merged=lower==a||lower==b,upper_merged=upper==a||upper==b;if(lower_merged&&upper_merged)continue;if(lower==invalid_fragment||upper==invalid_fragment)return false;const Vec3d lower_centroid=lower_merged?merged_centroid:centroid(lower),upper_centroid=upper_merged?merged_centroid:centroid(upper);const double coordinate=aperture.centroid[aperture.axis];if(coordinate-lower_centroid[aperture.axis]<=bracket_epsilon||upper_centroid[aperture.axis]-coordinate<=bracket_epsilon)return false;}return true;
+				none,
+				invalid_or_same,
+				ordinary_pair,
+				span,
+				fabric_side,
+				missing_neighbour,
+				aperture_bracketing
 			};
+			auto union_rejection=[&](FragmentRef a,FragmentRef b)
+			{
+				a=find_root(a);b=find_root(b);
+				if(a==invalid_fragment||b==invalid_fragment||a==b)return UnionRejection::invalid_or_same;
+				if(fragment_is_regular(a)&&fragment_is_regular(b))return UnionRejection::ordinary_pair;
+				Aggregate& aa=aggregate(a);Aggregate& bb=aggregate(b);
+				if(combined_span(a,b)>maximum_merge_span+1e-12*h)return UnionRejection::span;
+				auto crosses_patch=[&](const Aggregate& source,FragmentRef other){for(const FragmentRef member:source.members){const auto found=forbidden_patch_pair.find(member);if(found==forbidden_patch_pair.end())continue;for(const FragmentRef forbidden:found->second)if(find_root(forbidden)==other)return true;}return false;};
+				if(crosses_patch(aa,b)||crosses_patch(bb,a))return UnionRejection::fabric_side;
+				const double volume=aa.volume+bb.volume;const Vec3d merged_centroid=(aa.weighted_centroid+bb.weighted_centroid)/volume;std::vector<int> edges;for(const FragmentRef member:aa.members){const auto found=incident_apertures.find(member);if(found!=incident_apertures.end())edges.insert(edges.end(),found->second.begin(),found->second.end());}for(const FragmentRef member:bb.members){const auto found=incident_apertures.find(member);if(found!=incident_apertures.end())edges.insert(edges.end(),found->second.begin(),found->second.end());}std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());for(const int edge:edges){const FaceAperture& aperture=eb.apertures[edge];FragmentRef lower=find_root(aperture.fragment_a),upper=find_root(aperture.fragment_b);const bool lower_merged=lower==a||lower==b,upper_merged=upper==a||upper==b;if(lower_merged&&upper_merged)continue;if(lower==invalid_fragment||upper==invalid_fragment)return UnionRejection::missing_neighbour;const Vec3d lower_centroid=lower_merged?merged_centroid:centroid(lower),upper_centroid=upper_merged?merged_centroid:centroid(upper);const double coordinate=aperture.centroid[aperture.axis];if(coordinate-lower_centroid[aperture.axis]<=bracket_epsilon||upper_centroid[aperture.axis]-coordinate<=bracket_epsilon)return UnionRejection::aperture_bracketing;}return UnionRejection::none;
+			};
+			auto legal_union=[&](FragmentRef a,FragmentRef b){return union_rejection(a,b)==UnionRejection::none;};
 			auto unite=[&](FragmentRef a,FragmentRef b){a=find_root(a);b=find_root(b);if(a==b)return a;Aggregate& aa=aggregate(a);Aggregate& bb=aggregate(b);FragmentRef keep=a,drop=b;if(fragment_is_regular(b)||(!fragment_is_regular(a)&&(bb.volume>aa.volume||(bb.volume==aa.volume&&b<a)))){keep=b;drop=a;}if(fragment_is_regular(drop))throw std::runtime_error("attempted to agglomerate two ordinary EB control volumes");Aggregate& kept=aggregate(keep);Aggregate dropped=aggregate(drop);kept.volume+=dropped.volume;kept.weighted_centroid=kept.weighted_centroid+dropped.weighted_centroid;kept.lo={std::min(kept.lo.x,dropped.lo.x),std::min(kept.lo.y,dropped.lo.y),std::min(kept.lo.z,dropped.lo.z)};kept.hi={std::max(kept.hi.x,dropped.hi.x),std::max(kept.hi.y,dropped.hi.y),std::max(kept.hi.z,dropped.hi.z)};kept.members.insert(kept.members.end(),dropped.members.begin(),dropped.members.end());merge_parent[irregular_fragment_index(drop)]=keep;aggregates.erase(drop);return keep;};
 			// Grow every sub-threshold aggregate by one legal aperture at a time. Prefer
 			// irregular donors so an ordinary structured cell is not displaced unnecessarily.
@@ -68,15 +101,7 @@ namespace paracfd::core
 			}
 			// Repair an initially unbracketed raw connection only if removing that edge by
 			// union preserves every other topology invariant. Otherwise request refinement.
-			std::vector<unsigned char> reported_cell(grid.cell_count(),0);auto report_unresolved=[&](int cell,std::string reason,std::vector<std::uint32_t> triangles=std::vector<std::uint32_t>{}){if(cell<0||cell>=grid.cell_count()||!atlas.owned_cell[cell]||reported_cell[cell])return;reported_cell[cell]=1;eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,std::move(triangles),std::move(reason)});};
-			// A mixed owned/halo aperture is a real same-fluid path that this per-level atlas
-			// cannot represent in the composite pressure graph. Treating only its owned end as
-			// a sealed component would freeze a valid opening and corrupt conservation.
-			for(const FaceAperture& aperture:eb.apertures)
-			{
-				const bool a_owned=ref_owned(aperture.fragment_a),b_owned=ref_owned(aperture.fragment_b);if(a_owned==b_owned)continue;const int owned_cell=ref_cell(a_owned?aperture.fragment_a:aperture.fragment_b);report_unresolved(owned_cell,"fluid aperture crosses an AMR ownership boundary; aperture-aware coarse/fine topology is required");
-			}
-			for(int pass=0;pass<=fragment_count;++pass){bool changed=false,bad=false;for(const FaceAperture& aperture:eb.apertures){if(!ref_owned(aperture.fragment_a)||!ref_owned(aperture.fragment_b))continue;FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);if(a==invalid_fragment||b==invalid_fragment||a==b)continue;const double coordinate=aperture.centroid[aperture.axis],lower_distance=coordinate-centroid(a)[aperture.axis],upper_distance=centroid(b)[aperture.axis]-coordinate;if(lower_distance>bracket_epsilon&&upper_distance>bracket_epsilon)continue;bad=true;if(legal_union(a,b)){unite(a,b);++atlas.quality_agglomerations;changed=true;break;}report_unresolved(aperture.parent_face_cell,"no local topology-safe agglomeration brackets aperture: axis="+std::to_string(static_cast<int>(aperture.axis))+" lower_distance/h="+std::to_string(lower_distance/h)+" upper_distance/h="+std::to_string(upper_distance/h)+"; refine and rebuild");}if(!changed){(void)bad;break;}if(pass==fragment_count)throw std::runtime_error("constrained EB quality agglomeration did not terminate");}
+			for(int pass=0;pass<=fragment_count;++pass){bool changed=false,bad=false;for(const FaceAperture& aperture:eb.apertures){if(!ref_owned(aperture.fragment_a)||!ref_owned(aperture.fragment_b)||!valid_aperture_geometry(aperture))continue;FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);if(a==invalid_fragment||b==invalid_fragment||a==b)continue;const double coordinate=aperture.centroid[aperture.axis],lower_distance=coordinate-centroid(a)[aperture.axis],upper_distance=centroid(b)[aperture.axis]-coordinate;if(lower_distance>bracket_epsilon&&upper_distance>bracket_epsilon)continue;bad=true;if(legal_union(a,b)){unite(a,b);++atlas.quality_agglomerations;changed=true;break;}report_unresolved(ref_cell(aperture.fragment_a),"no local topology-safe agglomeration brackets aperture: axis="+std::to_string(static_cast<int>(aperture.axis))+" lower_distance/h="+std::to_string(lower_distance/h)+" upper_distance/h="+std::to_string(upper_distance/h)+"; refine and rebuild");}if(!changed){(void)bad;break;}if(pass==fragment_count)throw std::runtime_error("constrained EB quality agglomeration did not terminate");}
 			// Pressure activity follows represented fluid topology, not whether a component
 			// happens to touch an ordinary Cartesian cell.  A closed sub-cell channel can be
 			// made entirely of irregular control volumes and still carry conservative flux
@@ -86,7 +111,7 @@ namespace paracfd::core
 			std::map<FragmentRef,std::vector<FragmentRef>> aperture_graph;
 			for(const auto& item:aggregates)aperture_graph[find_root(item.first)];
 			for(const FaceAperture& aperture:eb.apertures)
-				if(aperture.area>0&&ref_owned(aperture.fragment_a)&&ref_owned(aperture.fragment_b))
+				if(valid_aperture_geometry(aperture)&&ref_owned(aperture.fragment_a)&&ref_owned(aperture.fragment_b))
 				{
 					const FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);
 					if(a==invalid_fragment||b==invalid_fragment||a==b)continue;
@@ -110,7 +135,9 @@ namespace paracfd::core
 					represented_edge=represented_edge||!found->second.empty();
 					for(const FragmentRef neighbour:found->second)todo.push_back(neighbour);
 				}
-				if(regular_anchor||represented_edge)continue;
+				bool component_reported=false;
+				for(const FragmentRef root:component)for(const FragmentRef member:aggregate(root).members){const int cell=ref_cell(member);component_reported=component_reported||(cell>=0&&cell<grid.cell_count()&&reported_cell[cell]);}
+				if(regular_anchor||represented_edge||component_reported)continue;
 				++atlas.static_subcell_components;
 				for(const FragmentRef root:component)if(!fragment_is_regular(root))
 				{
@@ -123,9 +150,125 @@ namespace paracfd::core
 			for(const auto& item:aggregates){const Vec3d extent=item.second.hi-item.second.lo;atlas.maximum_aggregate_span_cells=std::max(atlas.maximum_aggregate_span_cells,std::max({extent.x,extent.y,extent.z})/h);}
 			// Final invariants are intentionally redundant with legal_union: a future merge
 			// policy change must fail preprocessing rather than silently short-circuit fabric.
-			for(const SurfacePatch& patch:eb.patches)if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment&&patch.plus_fragment!=patch.minus_fragment&&ref_owned(patch.plus_fragment)&&ref_owned(patch.minus_fragment)&&find_root(patch.plus_fragment)==find_root(patch.minus_fragment)){const int i=std::clamp(static_cast<int>(std::floor((patch.centroid.x-grid.origin.x)/h)),0,grid.nx-1),j=std::clamp(static_cast<int>(std::floor((patch.centroid.y-grid.origin.y)/h)),0,grid.ny-1),k=std::clamp(static_cast<int>(std::floor((patch.centroid.z-grid.origin.z)/h)),0,grid.nz-1);report_unresolved(grid.cell_index(i,j,k),"agglomeration collapsed distinct plus/minus fabric pressure sides; refine and rebuild",{patch.source_triangle_id});}
-			for(const FaceAperture& aperture:eb.apertures)if(ref_owned(aperture.fragment_a)&&ref_owned(aperture.fragment_b)){const FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);if(a==invalid_fragment||b==invalid_fragment||a==b)continue;const double coordinate=aperture.centroid[aperture.axis],lower_distance=coordinate-centroid(a)[aperture.axis],upper_distance=centroid(b)[aperture.axis]-coordinate;if(lower_distance<=bracket_epsilon||upper_distance<=bracket_epsilon)report_unresolved(aperture.parent_face_cell,"final EB aggregate centroids do not bracket aperture; refine and rebuild");}
-			for(const auto& item:aggregates)if(!fragment_is_regular(item.first)&&find_root(item.first)==item.first&&item.second.volume+1e-12*cell_volume<minimum_volume){const int root_fragment=irregular_fragment_index(item.first);if(eb.fragments[root_fragment].pressure_static)continue;std::vector<int> edges;for(const FragmentRef member:item.second.members){const auto incident=incident_apertures.find(member);if(incident!=incident_apertures.end())edges.insert(edges.end(),incident->second.begin(),incident->second.end());}std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());int open=0;for(const int edge:edges){const FaceAperture& aperture=eb.apertures[edge];if(find_root(aperture.fragment_a)!=find_root(aperture.fragment_b))++open;}if(open==0)eb.fragments[root_fragment].pressure_static=true;else report_unresolved(eb.fragments[root_fragment].parent_cell,"owned fluid aggregate remains below min_volume_fraction after all topology-safe donors were rejected: level="+std::to_string(level)+" volume_fraction="+std::to_string(item.second.volume/cell_volume)+" span/h="+std::to_string(combined_span(item.first,item.first)/h)+"; refine and rebuild");}
+			for(const SurfacePatch& patch:eb.patches)if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment&&patch.plus_fragment!=patch.minus_fragment&&ref_owned(patch.plus_fragment)&&ref_owned(patch.minus_fragment)&&find_root(patch.plus_fragment)==find_root(patch.minus_fragment))report_unresolved(ref_cell(patch.plus_fragment),"agglomeration collapsed distinct plus/minus fabric pressure sides; refine and rebuild",{patch.source_triangle_id});
+			for(const FaceAperture& aperture:eb.apertures)if(ref_owned(aperture.fragment_a)&&ref_owned(aperture.fragment_b)&&valid_aperture_geometry(aperture)){const FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);if(a==invalid_fragment||b==invalid_fragment||a==b)continue;const double coordinate=aperture.centroid[aperture.axis],lower_distance=coordinate-centroid(a)[aperture.axis],upper_distance=centroid(b)[aperture.axis]-coordinate;if(!std::isfinite(lower_distance)||!std::isfinite(upper_distance)||lower_distance<=bracket_epsilon||upper_distance<=bracket_epsilon)report_unresolved(ref_cell(aperture.fragment_a),"final EB aggregate centroids do not bracket aperture; refine and rebuild");}
+			for(const auto& item:aggregates)
+			{
+				if(fragment_is_regular(item.first)||find_root(item.first)!=item.first||
+					item.second.volume+1e-12*cell_volume>=minimum_volume)continue;
+				const int root_fragment=irregular_fragment_index(item.first);
+				if(eb.fragments[root_fragment].pressure_static)continue;
+				std::vector<int> edges;
+				for(const FragmentRef member:item.second.members)
+				{
+					const auto incident=all_owned_incident_apertures.find(member);
+					if(incident!=all_owned_incident_apertures.end())
+						edges.insert(edges.end(),incident->second.begin(),incident->second.end());
+				}
+				std::sort(edges.begin(),edges.end());
+				edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+				int open=0,invalid_incident=0;
+				const Vec3d root_centroid=centroid(item.first);
+				bool raw_topology_valid=std::isfinite(item.second.volume)&&item.second.volume>0&&
+					finite_vec(root_centroid),raw_apertures_bracketed=true;
+				std::map<FragmentRef,UnionRejection> donor_rejections;
+				for(const int edge:edges)
+				{
+					const FaceAperture& aperture=eb.apertures[edge];
+					if(!valid_aperture_geometry(aperture)||!ref_owned(aperture.fragment_a)||
+						!ref_owned(aperture.fragment_b)||aperture.fragment_a==aperture.fragment_b)
+					{
+						raw_topology_valid=false;
+						++invalid_incident;
+						continue;
+					}
+					const FragmentRef a=find_root(aperture.fragment_a),b=find_root(aperture.fragment_b);
+					if(a==b)continue;
+					++open;
+					if(a==invalid_fragment||b==invalid_fragment)
+					{
+						raw_topology_valid=false;
+						raw_apertures_bracketed=false;
+						++invalid_incident;
+						continue;
+					}
+					const Vec3d lower_centroid=centroid(a),upper_centroid=centroid(b);
+					const double coordinate=aperture.centroid[aperture.axis];
+					const double lower_distance=coordinate-lower_centroid[aperture.axis];
+					const double upper_distance=upper_centroid[aperture.axis]-coordinate;
+					raw_topology_valid=raw_topology_valid&&std::isfinite(coordinate)&&
+						finite_vec(lower_centroid)&&finite_vec(upper_centroid)&&
+						std::isfinite(lower_distance)&&std::isfinite(upper_distance);
+					raw_apertures_bracketed=raw_apertures_bracketed&&
+						lower_distance>bracket_epsilon&&upper_distance>bracket_epsilon;
+					const FragmentRef other=a==item.first?b:(b==item.first?a:invalid_fragment);
+					if(other==invalid_fragment)raw_apertures_bracketed=false;
+					else donor_rejections[other]=union_rejection(item.first,other);
+				}
+				if(open==0&&invalid_incident==0)
+				{
+					eb.fragments[root_fragment].pressure_static=true;
+					continue;
+				}
+
+				int reject_span=0,reject_fabric=0,reject_bracketing=0,reject_other=0,
+					regular_donors=0;
+				bool legal_donor_remaining=false;
+				for(const auto& rejection:donor_rejections)
+				{
+					regular_donors+=fragment_is_regular(rejection.first);
+					switch(rejection.second)
+					{
+					case UnionRejection::span:++reject_span;break;
+					case UnionRejection::aperture_bracketing:++reject_bracketing;break;
+					case UnionRejection::fabric_side:
+						++reject_fabric;break;
+					case UnionRejection::none:
+						legal_donor_remaining=true;break;
+					default:++reject_other;break;
+					}
+				}
+				const double volume_fraction=item.second.volume/cell_volume;
+				const Real packed_volume=static_cast<Real>(item.second.volume);
+				const bool production_volume_representable=
+					std::isfinite(packed_volume)&&
+					packed_volume>=std::numeric_limits<Real>::min();
+				bool aggregate_already_unresolved=false;
+				for(const FragmentRef member:item.second.members){const int cell=ref_cell(member);aggregate_already_unresolved=aggregate_already_unresolved||(cell>=0&&cell<grid.cell_count()&&reported_cell[cell]);}
+				if(options.retain_signed_bracketed_small_roots_for_face_state&&
+					!aggregate_already_unresolved&&open>0&&invalid_incident==0&&
+					raw_topology_valid&&raw_apertures_bracketed&&!legal_donor_remaining&&
+					production_volume_representable)
+				{
+					// This root remains an independent pressure state. The production MAC path
+					// evolves aperture/dual momentum and projects integrated flux, so it has no
+					// explicit update proportional to 1 / this fragment volume.
+					eb.fragments[root_fragment].face_state_retained=true;
+					++atlas.face_state_retained_small_roots;
+					atlas.face_state_retained_small_volume+=item.second.volume;
+					atlas.minimum_face_state_retained_volume_fraction=std::min(
+						atlas.minimum_face_state_retained_volume_fraction,volume_fraction);
+					continue;
+				}
+
+				const Vec3d extent=item.second.hi-item.second.lo;
+				const double span=std::max({extent.x,extent.y,extent.z})/h;
+				report_unresolved(eb.fragments[root_fragment].parent_cell,
+					"owned fluid aggregate remains below min_volume_fraction after constrained agglomeration: level="+
+					std::to_string(level)+" volume_fraction="+std::to_string(volume_fraction)+
+					" span/h="+std::to_string(span)+" open_apertures="+std::to_string(open)+
+					" invalid_incident="+std::to_string(invalid_incident)+
+					" donor_roots="+std::to_string(donor_rejections.size())+
+					" regular_donors="+std::to_string(regular_donors)+
+					" raw_topology_valid="+std::to_string(raw_topology_valid?1:0)+
+					" raw_bracketed="+std::to_string(raw_apertures_bracketed?1:0)+
+					" production_volume_representable="+
+						std::to_string(production_volume_representable?1:0)+
+					" legal_donor_remaining="+std::to_string(legal_donor_remaining?1:0)+
+					" rejected(span/fabric/bracketing/other)="+std::to_string(reject_span)+"/"+
+					std::to_string(reject_fabric)+"/"+std::to_string(reject_bracketing)+"/"+
+					std::to_string(reject_other)+"; refine and rebuild");
+			}
 			result.levels.push_back(std::move(atlas));
 		}
 		return result;

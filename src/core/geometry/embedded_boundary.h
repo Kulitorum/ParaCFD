@@ -89,6 +89,11 @@ namespace paracfd::core
 		int connection_offset = 0, connection_count = 0;
 		bool pressure_static = false; // isolated sealed pocket: retained state, excluded from projection
 		int surface_side_offset = 0, surface_side_count = 0; // host preprocessing provenance
+		// A topology-safe sub-threshold root that could not be agglomerated without
+		// reversing another aperture. The production face-centred solver retains its
+		// independent pressure DOF and advances only conservative aperture/dual fluxes;
+		// no explicit update is divided by this small volume.
+		bool face_state_retained = false;
 	};
 
 	struct FragmentSurfaceSide
@@ -233,6 +238,12 @@ namespace paracfd::core
 		// on an N^3 local graph whose edges are blocked by exact BVH intersections.
 		int complex_subdivisions = 0;
 		double min_volume_fraction = 0.25;
+		// Agglomeration is preferred, but a real fluid connector around a fabric edge
+		// can touch several independent pressure sides and have no legal merge target.
+		// The production face-centred MAC path may retain such a raw root only when all
+		// of its apertures remain positive, owned, and signed-bracketed. Collocated
+		// volume-state transport must leave this disabled until it has redistribution.
+		bool retain_signed_bracketed_small_roots_for_face_state = false;
 		// Reporting scale for small positive-area apertures, as a fraction of h^2.
 		// It is not a topology threshold: a physical opening remains connected even
 		// when one or every subdivision piece lies below this value.  Coalescing is

@@ -37,6 +37,9 @@ namespace paracfd::core
 		std::size_t static_subcell_components = 0; // isolated one-root states with no positive-area aperture
 		std::size_t static_subcell_aggregates = 0;
 		double static_subcell_volume = 0;
+		std::size_t face_state_retained_small_roots = 0;
+		double face_state_retained_small_volume = 0;
+		double minimum_face_state_retained_volume_fraction = 1;
 		double maximum_aggregate_span_cells = 0; // constituent-centroid span / h after all merges
 	};
 

@@ -2107,14 +2107,19 @@ void main()
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::IsolatedFabricComponent)] > 0
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnsupportedNamedSurface)] > 0
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnclassifiedOpening)] > 0;
+		const bool informational_status = !geometry_quality_status_.isEmpty()
+			&& !geometry_quality_warning_;
+		const bool approximate_status = informational_status &&
+			geometry_quality_status_.compare(QStringLiteral("Detailed geometry check not performed."),
+				Qt::CaseInsensitive) == 0;
 		const QColor border = (has_gap || geometry_quality_warning_) ? QColor(255, 65, 45)
-			: has_warning ? QColor(255, 174, 42) : QColor(30, 210, 235);
+			: (has_warning || informational_status) ? QColor(255, 174, 42) : QColor(30, 210, 235);
 		QFont font = painter.font();
 		font.setFamily(QStringLiteral("Consolas"));
 		font.setPointSizeF(8.5);
 		QFont title_font = font; title_font.setBold(true);
 		const int row_height = 19;
-		const int box_width = 310;
+		const int box_width = 370;
 		const int status_rows = geometry_quality_status_.isEmpty() ? 0 : 1;
 		const int box_height = 30 + row_height * (static_cast<int>(visible_kinds.size()) + status_rows) + 8;
 		const QRect box(std::max(8, width() - box_width - 16),
@@ -2127,8 +2132,9 @@ void main()
 		painter.drawRect(box.adjusted(0, 0, -1, -1));
 		painter.setFont(title_font);
 		painter.setPen(border);
-		painter.drawText(box.adjusted(10, 4, -8, -box.height() + 27), Qt::AlignVCenter,
-			total ? QString("CAD GEOMETRY  %1").arg(total) : QStringLiteral("CAD GEOMETRY"));
+		const QString title = approximate_status ? QStringLiteral("APPROXIMATE RESULT")
+			: total ? QString("MODEL PROBLEMS  %1").arg(total) : QStringLiteral("MODEL CHECK");
+		painter.drawText(box.adjusted(10, 4, -8, -box.height() + 27), Qt::AlignVCenter,title);
 		painter.setFont(font);
 
 		int y = box.y() + 31;

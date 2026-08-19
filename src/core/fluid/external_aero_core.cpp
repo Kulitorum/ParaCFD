@@ -27,6 +27,8 @@ namespace paracfd::core
 
 		EmbeddedBoundaryBuildOptions eb_options;
 		eb_options.min_volume_fraction=config_.amr.min_volume_fraction;
+		eb_options.retain_signed_bracketed_small_roots_for_face_state=
+			!use_conservative_cell_momentum_;
 		eb_options.min_aperture_area_fraction=config_.amr.min_aperture_area_fraction;
 		eb_options.complex_subdivisions=config_.amr.complex_subdivisions;
 		eb_options.allow_unverified_same_fragment_patches_for_diagnostics=

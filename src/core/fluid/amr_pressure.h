@@ -208,6 +208,12 @@ namespace paracfd::core
 		bool pressure_outlet_xmax = true;
 		std::vector<int> level_offset;
 		std::vector<unsigned char> active;
+		// Number of mapped, active pressure roots that were deliberately retained
+		// below the configured small-fragment volume threshold.  The production
+		// face-centred MAC path advances these through conservative face fluxes; the
+		// experimental collocated transport must reject them because its explicit
+		// control-volume update would divide by their small volume.
+		std::size_t face_state_retained_small_root_count = 0;
 		// Active control-volume DOFs belonging to a fluid component connected to the
 		// external X-max reference. Sealed pockets remain valid two-sided fluid, but
 		// are initialized quiescent instead of inheriting the external freestream.

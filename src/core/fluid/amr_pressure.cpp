@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -334,10 +335,26 @@ namespace paracfd::core
 			// Allocate one appended DOF for every owned root fragment. Volume and centroid
 			// are accumulated below from owned fragments only; using the atlas-local EB
 			// aggregates here would incorrectly include covered halo fragments.
-			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell]&&eb.fragments[fragment].merge_target==irregular_fragment(fragment))
+			std::size_t mapped_face_state_retained_roots=0;
+			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)
 			{
-				const int global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(eb.fragments[fragment].pressure_static?0:1);system.volume.push_back(0);system.centroid.push_back({});system.cut_face_mask.push_back(0);system.preconditioner_aggregate.push_back(-1);
+				const FluidFragment& state=eb.fragments[fragment];
+				if(!level_atlas.owned_cell[state.parent_cell])continue;
+				const bool root=state.merge_target==irregular_fragment(fragment);
+				if(state.face_state_retained&&(!root||state.pressure_static))throw std::runtime_error(
+					"AMR EB retained face-state small-root metadata does not identify an active root");
+				if(!root)continue;
+				const int global_dof=system.storage_size++;fragment_global[fragment]=global_dof;system.active.push_back(state.pressure_static?0:1);system.volume.push_back(0);system.centroid.push_back({});system.cut_face_mask.push_back(0);system.preconditioner_aggregate.push_back(-1);
+				if(state.face_state_retained)
+				{
+					if(!system.active[global_dof])throw std::runtime_error(
+						"AMR EB retained face-state small root mapped to an inactive pressure DOF");
+					++mapped_face_state_retained_roots;
+				}
 			}
+			if(mapped_face_state_retained_roots!=level_atlas.face_state_retained_small_roots)throw std::runtime_error(
+				"AMR EB retained face-state small-root count does not match mapped pressure roots");
+			system.face_state_retained_small_root_count+=mapped_face_state_retained_roots;
 			std::vector<unsigned char> resolving(eb.fragments.size(),0);std::function<int(FragmentRef)> map_ref=[&](FragmentRef ref)->int
 			{
 				if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int cell=regular_fragment_cell(ref);return cell>=0&&cell<static_cast<int>(cell_global.size())?cell_global[cell]:-1;}const int fragment=irregular_fragment_index(ref);if(fragment<0||fragment>=static_cast<int>(fragment_global.size()))return -1;if(fragment_global[fragment]>=0)return fragment_global[fragment];if(resolving[fragment])throw std::runtime_error("cyclic AMR EB fragment merge mapping");resolving[fragment]=1;fragment_global[fragment]=map_ref(eb.fragments[fragment].merge_target);resolving[fragment]=0;return fragment_global[fragment];
@@ -357,6 +374,17 @@ namespace paracfd::core
 			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)if(level_atlas.owned_cell[eb.fragments[fragment].parent_cell])
 			{
 				const int target=map_ref(irregular_fragment(fragment));system.preconditioner_aggregate[target]=base_aggregate_dof(system,system.centroid[target]);
+			}
+			for(int fragment=0;fragment<static_cast<int>(eb.fragments.size());++fragment)
+			{
+				const FluidFragment& state=eb.fragments[fragment];
+				if(!level_atlas.owned_cell[state.parent_cell]||!state.face_state_retained)continue;
+				const int target=map_ref(irregular_fragment(fragment));
+				const double host_volume=target>=0?system.volume[target]:0;
+				const Real packed_volume=static_cast<Real>(host_volume);
+				if(!(host_volume>0)||!std::isfinite(host_volume)||!std::isfinite(packed_volume)||
+					packed_volume<std::numeric_limits<Real>::min())
+					throw std::runtime_error("AMR EB retained face-state small-root volume is not representable as a positive normal production Real");
 			}
 			for(const FaceAperture& aperture:eb.apertures)
 			{

@@ -270,6 +270,13 @@ add_executable(amr_eb_transaction_probe tools/amr_eb_transaction_probe.cpp)
 target_link_libraries(amr_eb_transaction_probe PRIVATE libparacfd)
 add_test(NAME amr_eb_transactions COMMAND amr_eb_transaction_probe)
 
+# A three-node aperture fan can contain a real sub-threshold fluid connector for
+# which either local merge would reverse the surviving pressure distance. Exercise
+# the production atlas stabilizer through its deterministic exact-cell test seam.
+add_executable(amr_small_root_probe tools/amr_small_root_probe.cpp)
+target_link_libraries(amr_small_root_probe PRIVATE libparacfd)
+add_test(NAME amr_small_root COMMAND amr_small_root_probe)
+
 # The strict composite pressure builder rejects an unsupported compact WLS
 # correction. Only the explicitly labelled qualitative preview may fall back to
 # the conservative orthogonal A/d term, and that fallback remains observable.
