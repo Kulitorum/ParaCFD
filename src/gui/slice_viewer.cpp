@@ -460,6 +460,7 @@ void main()
 		if (amr_debug_vbo_) glDeleteBuffers(1, &amr_debug_vbo_);
 		if (eb_debug_vbo_) glDeleteBuffers(1, &eb_debug_vbo_);
 		if (geometry_issue_vbo_) glDeleteBuffers(1, &geometry_issue_vbo_);
+		if (geometry_error_vbo_) glDeleteBuffers(1, &geometry_error_vbo_);
 		if (arrow_glyph_vbo_) glDeleteBuffers(1, &arrow_glyph_vbo_);
 		if (arrow_inst_vbo_) glDeleteBuffers(1, &arrow_inst_vbo_);
 		if (tracer_vbo_) glDeleteBuffers(1, &tracer_vbo_);
@@ -477,6 +478,7 @@ void main()
 		if (amr_debug_vao_) glDeleteVertexArrays(1, &amr_debug_vao_);
 		if (eb_debug_vao_) glDeleteVertexArrays(1, &eb_debug_vao_);
 		if (geometry_issue_vao_) glDeleteVertexArrays(1, &geometry_issue_vao_);
+		if (geometry_error_vao_) glDeleteVertexArrays(1, &geometry_error_vao_);
 		if (arrow_vao_) glDeleteVertexArrays(1, &arrow_vao_);
 		if (tracer_vao_) glDeleteVertexArrays(1, &tracer_vao_);
 		if (axis_vao_) glDeleteVertexArrays(1, &axis_vao_);
@@ -915,6 +917,57 @@ void main()
 	void SliceViewer::clearGeometryIssuePolylines()
 	{
 		setGeometryIssuePolylines({});
+	}
+
+	void SliceViewer::setGeometryErrorDiagnosticSegments(
+		std::vector<std::array<float, 6>> world_segments,const QString& overlay_text,
+		bool frame_segments)
+	{
+		constexpr int stride=11;geometry_error_vertices_.clear();geometry_error_firsts_.clear();
+		geometry_error_counts_.clear();geometry_error_bounds_valid_=false;
+		const QVector4D colour(1.0f,0.04f,0.02f,1.0f);
+		for(const auto& segment:world_segments)
+		{
+			bool finite=true;for(float coordinate:segment)finite=finite&&std::isfinite(coordinate);if(!finite)continue;
+			const QVector3D a(segment[0],segment[1],segment[2]),b(segment[3],segment[4],segment[5]);
+			QVector3D tangent=b-a;if(tangent.lengthSquared()<=1e-20f)continue;tangent.normalize();
+			const int first=static_cast<int>(geometry_error_vertices_.size()/stride);
+			for(const QVector3D& point:{a,b})for(float side:{-1.0f,1.0f})
+				geometry_error_vertices_.insert(geometry_error_vertices_.end(),
+					{point.x(),point.y(),point.z(),side,tangent.x(),tangent.y(),tangent.z(),
+					 colour.x(),colour.y(),colour.z(),colour.w()});
+			geometry_error_firsts_.push_back(first);geometry_error_counts_.push_back(4);
+			if(!geometry_error_bounds_valid_){geometry_error_bounds_min_=geometry_error_bounds_max_=a;geometry_error_bounds_valid_=true;}
+			for(const QVector3D& point:{a,b})
+			{
+				geometry_error_bounds_min_.setX(std::min(geometry_error_bounds_min_.x(),point.x()));
+				geometry_error_bounds_min_.setY(std::min(geometry_error_bounds_min_.y(),point.y()));
+				geometry_error_bounds_min_.setZ(std::min(geometry_error_bounds_min_.z(),point.z()));
+				geometry_error_bounds_max_.setX(std::max(geometry_error_bounds_max_.x(),point.x()));
+				geometry_error_bounds_max_.setY(std::max(geometry_error_bounds_max_.y(),point.y()));
+				geometry_error_bounds_max_.setZ(std::max(geometry_error_bounds_max_.z(),point.z()));
+			}
+		}
+		geometry_error_active_=!geometry_error_firsts_.empty();
+		geometry_error_overlay_text_=overlay_text.trimmed();
+		if(geometry_error_active_&&geometry_error_overlay_text_.isEmpty())
+			geometry_error_overlay_text_=QString("GEOMETRY ERROR DIAGNOSTIC — %1 SEGMENT%2")
+				.arg(geometry_error_firsts_.size()).arg(geometry_error_firsts_.size()==1?"":"S");
+		geometry_error_upload_pending_=true;
+		if(frame_segments&&geometry_error_active_)frameGeometryErrorDiagnosticView();else update();
+	}
+
+	void SliceViewer::clearGeometryErrorDiagnostic()
+	{
+		geometry_error_vertices_.clear();geometry_error_firsts_.clear();geometry_error_counts_.clear();
+		geometry_error_overlay_text_.clear();geometry_error_bounds_valid_=false;
+		geometry_error_active_=false;geometry_error_upload_pending_=true;update();
+	}
+
+	bool SliceViewer::frameGeometryErrorDiagnosticView()
+	{
+		if(!geometry_error_active_||!geometry_error_bounds_valid_)return false;
+		camera_.frameBounds(geometry_error_bounds_min_,geometry_error_bounds_max_,1.35f);update();return true;
 	}
 
 	std::size_t SliceViewer::geometryIssueCount(GeometryIssueKind kind) const
@@ -1383,6 +1436,7 @@ void main()
 		glGenVertexArrays(1, &amr_debug_vao_);
 		glGenVertexArrays(1, &eb_debug_vao_);
 		glGenVertexArrays(1, &geometry_issue_vao_);
+		glGenVertexArrays(1, &geometry_error_vao_);
 		glGenVertexArrays(1, &arrow_vao_);
 		glGenVertexArrays(1, &tracer_vao_);
 		glGenVertexArrays(1, &axis_vao_);
@@ -1403,6 +1457,7 @@ void main()
 		glGenBuffers(1, &amr_debug_vbo_);
 		glGenBuffers(1, &eb_debug_vbo_);
 		glGenBuffers(1, &geometry_issue_vbo_);
+		glGenBuffers(1, &geometry_error_vbo_);
 		glGenBuffers(1, &arrow_glyph_vbo_);
 		glGenBuffers(1, &arrow_inst_vbo_);
 		glGenBuffers(1, &tracer_vbo_);
@@ -1442,6 +1497,7 @@ void main()
 		buildArrowGlyph();
 		buildTracerBuffers();
 		buildGeometryIssueBuffers();
+		buildGeometryErrorDiagnosticBuffers();
 		buildCornerGizmo();
 		if (have_info_) { buildSliceGeometry(); buildAxesGeometry(); }
 		fps_timer_.start();
@@ -1810,6 +1866,27 @@ void main()
 		glDepthFunc(GL_LESS);
 	}
 
+	void SliceViewer::drawGeometryErrorDiagnosticSegments(const QMatrix4x4& mvp)
+	{
+		PARACFD_ASSERT_GL_THREAD();
+		if(!geometry_error_active_||geometry_error_firsts_.empty())return;
+		// Focused errors are intentionally an always-readable overlay: the diagnostic canopy is
+		// transparent and these opaque ribbons do not disappear behind either canopy skin.
+		glDisable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glDisable(GL_BLEND);glDisable(GL_CLIP_DISTANCE0);
+		geometry_issue_prog_.bind();QMatrix4x4 identity;identity.setToIdentity();
+		geometry_issue_prog_.setUniformValue("uVP",mvp);
+		geometry_issue_prog_.setUniformValue("uModel",identity);
+		geometry_issue_prog_.setUniformValue("uClipPlane",QVector4D(0,0,0,1));
+		const float dpr=static_cast<float>(devicePixelRatioF());
+		geometry_issue_prog_.setUniformValue("uViewport",QVector2D(static_cast<float>(width())*dpr,static_cast<float>(height())*dpr));
+		geometry_issue_prog_.setUniformValue("uHalfPx",3.5f*dpr);
+		glBindVertexArray(geometry_error_vao_);
+		glMultiDrawArrays(GL_TRIANGLE_STRIP,geometry_error_firsts_.data(),geometry_error_counts_.data(),
+			static_cast<GLsizei>(geometry_error_firsts_.size()));
+		glBindVertexArray(0);geometry_issue_prog_.release();
+		glDepthMask(GL_TRUE);glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LESS);
+	}
+
 	bool SliceViewer::projectPoint(const QMatrix4x4& mvp, const QVector3D& w, QPointF& px) const
 	{
 		QVector4D clip = mvp * QVector4D(w, 1.0f);
@@ -2082,6 +2159,22 @@ void main()
 			y += row_height;
 		}
 		painter.restore();
+	}
+
+	void SliceViewer::drawGeometryErrorDiagnosticOverlay(QPainter& painter)
+	{
+		if(!geometry_error_active_)return;
+		const int box_width=std::max(220,std::min(560,width()-36)),box_height=64;
+		const QRect box(18,std::max(18,height()-box_height-18),box_width,box_height);
+		painter.save();painter.setRenderHint(QPainter::Antialiasing,true);
+		painter.fillRect(box,QColor(24,8,8,232));painter.setPen(QPen(QColor(255,42,28),2.0));
+		painter.drawRect(box.adjusted(0,0,-1,-1));QFont font=painter.font();font.setFamily(QStringLiteral("Consolas"));
+		font.setPointSizeF(10.0);font.setBold(true);painter.setFont(font);painter.setPen(QColor(255,72,54));
+		painter.drawText(box.adjusted(12,5,-10,-box.height()+27),Qt::AlignLeft|Qt::AlignVCenter,
+			QString("CFD PREPROCESSING DIAGNOSTIC  —  %1 RED SEGMENT%2").arg(geometry_error_firsts_.size()).arg(geometry_error_firsts_.size()==1?"":"S"));
+		font.setPointSizeF(8.5);font.setBold(false);painter.setFont(font);painter.setPen(QColor(255,232,228));
+		painter.drawText(box.adjusted(12,29,-10,-6),Qt::AlignLeft|Qt::AlignVCenter|Qt::TextWordWrap,
+			geometry_error_overlay_text_);painter.restore();
 	}
 
 	void SliceViewer::buildSliceGeometry()
@@ -2475,6 +2568,27 @@ void main()
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
 	}
 
+	void SliceViewer::buildGeometryErrorDiagnosticBuffers()
+	{
+		PARACFD_ASSERT_GL_THREAD();if(!gl_ready_)return;constexpr int stride=11*sizeof(float);
+		glBindVertexArray(geometry_error_vao_);glBindBuffer(GL_ARRAY_BUFFER,geometry_error_vbo_);
+		glBufferData(GL_ARRAY_BUFFER,0,nullptr,GL_DYNAMIC_DRAW);
+		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,stride,(void*)0);
+		glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,stride,(void*)(4*sizeof(float)));
+		glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,stride,(void*)(7*sizeof(float)));
+		glEnableVertexAttribArray(0);glEnableVertexAttribArray(1);glEnableVertexAttribArray(2);
+		glBindVertexArray(0);
+	}
+
+	void SliceViewer::uploadGeometryErrorDiagnosticSegments()
+	{
+		PARACFD_ASSERT_GL_THREAD();if(!gl_ready_||!geometry_error_upload_pending_)return;
+		geometry_error_upload_pending_=false;glBindBuffer(GL_ARRAY_BUFFER,geometry_error_vbo_);
+		glBufferData(GL_ARRAY_BUFFER,geometry_error_vertices_.size()*sizeof(float),
+			geometry_error_vertices_.empty()?nullptr:geometry_error_vertices_.data(),GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER,0);
+	}
+
 	void SliceViewer::buildIsoSurface(const ScalarVolume& volume)
 	{
 		iso_vertices_.clear();iso_negative_vertices_=iso_positive_vertices_=0;
@@ -2621,6 +2735,7 @@ void main()
 		if (mesh_triangle_colour_upload_pending_) uploadTriangleSurfaceColours();
 		if (paraglider_debug_upload_pending_) uploadParagliderDebugBoxes();
 		if (geometry_issue_upload_pending_) uploadGeometryIssuePolylines();
+		if (geometry_error_upload_pending_) uploadGeometryErrorDiagnosticSegments();
 		updateScalarRepresentations();
 		if(show_pressure_forces_&&pressure_force_dirty_)buildPressureForceInstances();
 
@@ -2703,11 +2818,13 @@ void main()
 			mesh_prog_.bind();
 			mesh_prog_.setUniformValue("uEye", camera_.eye());
 			mesh_prog_.setUniformValue("uClipPlane", clipPlane);
-			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.74f, 0.71f, 0.66f, 1.0f));
+			const bool error_diagnostic=geometry_error_active_;
+			mesh_prog_.setUniformValue("uBaseColor", QVector4D(0.74f, 0.71f, 0.66f,error_diagnostic?0.22f:1.0f));
 			mesh_prog_.setUniformValue("uUseVertexColor", 0); // STEP model: flat base colour
 			mesh_prog_.setUniformValue("uUseTriangleColor", has_mesh_triangle_colours_ ? 1 : 0);
 			if (has_mesh_triangle_colours_) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, mesh_triangle_colour_ssbo_);
 			if (clip_enabled_) glEnable(GL_CLIP_DISTANCE0); // visual section only; CFD remains two-sided fabric
+			if(error_diagnostic){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);}
 			glBindVertexArray(mesh_vao_);
 			const QMatrix4x4 model = modelMatrix();
 			mesh_prog_.setUniformValue("uMVP", mvp * model);
@@ -2716,6 +2833,7 @@ void main()
 			if (has_mesh_triangle_colours_) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, 0);
 			glBindVertexArray(0);
 			glDisable(GL_CLIP_DISTANCE0);
+			if(error_diagnostic){glDepthMask(GL_TRUE);glDisable(GL_BLEND);}
 			mesh_prog_.release();
 		}
 		drawIsoSurface(mvp,clipPlane);
@@ -2751,6 +2869,7 @@ void main()
 		// CAD diagnostics are drawn after the surface and slice. Their slight depth bias keeps a curve
 		// on the fabric legible, while normal depth testing still hides back-side findings.
 		drawGeometryIssuePolylines(mvp, clipPlane);
+		drawGeometryErrorDiagnosticSegments(mvp);
 
 		// Flow arrows are blended without writing depth. The scalar plane cannot occlude them, but the
 		// opaque STEP surface already in the depth buffer can.
@@ -2786,6 +2905,7 @@ void main()
 		drawLegendWith(painter);
 		drawAxesLabels(painter); // X/Y/Z + metre tick labels (same QPainter-after-GL path as the legend)
 		drawGeometryIssueLegend(painter);
+		drawGeometryErrorDiagnosticOverlay(painter);
 		drawProbe(painter);
 
 		// fps bookkeeping.

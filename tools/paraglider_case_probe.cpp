@@ -14,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <deque>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -261,6 +262,21 @@ int main(int argc,char** argv)
 			if(step==1||step==steps||reached_time||step%sample_every==0)report(step,core,stats,config.freestream.rho,diagnostic_fields.get(),&bvh,&wing_box,surface_temporal?&surface_history:nullptr,&wing);
 		}
 		if(target_physical_time>0&&core.physical_time()<target_physical_time){std::fprintf(stderr,"[paraglider-case] physical-time target %.9g s not reached within %d steps (t=%.9g s)\n",target_physical_time,steps,core.physical_time());return 6;}const AerodynamicLoads summary_loads=core.aerodynamic_loads();const Vec3d summary_force=summary_loads.viscous_loads_valid?summary_loads.total_force:summary_loads.pressure_force;const ExternalAeroConservationStats summary_conservation=core.conservation_stats();const double summary_cd=summary_loads.force_coefficients_valid?summary_loads.cd:std::numeric_limits<double>::quiet_NaN(),summary_cl=summary_loads.force_coefficients_valid?summary_loads.cl:std::numeric_limits<double>::quiet_NaN();std::printf("[paraglider-case-summary] levels=%zu finest_h=%.9g steps=%d t=%.9g prestep_regular_max=%.9g prestep_special_max=%.9g Fx=%.9g Fy=%.9g Fz=%.9g Fpx=%.9g Fpy=%.9g Fpz=%.9g Fvx=%.9g Fvy=%.9g Fvz=%.9g Cd=%.9g Cl=%.9g div_max=%.9g div_rms=%.9g flux_net=%.9g gpu_mib=%.9g step_ms=%.9g projection_ms=%.9g pressure_iterations=%d pressure_residual=%.9g\n",core.hierarchy().levels().size(),core.hierarchy().finest_cell_size(),completed_steps,core.physical_time(),stats.max_abs_regular_velocity,stats.max_abs_special_velocity,summary_force.x,summary_force.y,summary_force.z,summary_loads.pressure_force.x,summary_loads.pressure_force.y,summary_loads.pressure_force.z,summary_loads.viscous_force.x,summary_loads.viscous_force.y,summary_loads.viscous_force.z,summary_cd,summary_cl,summary_conservation.max_abs_divergence,summary_conservation.volume_weighted_rms_divergence,summary_conservation.net_integrated_flux_error,core.gpu_bytes()/(1024.0*1024.0),stats.gpu_step_ms,stats.projection_ms,stats.pressure.iterations,stats.pressure.relative_residual);report_circulation(core,wing,config.freestream.speed,config.reference.length);
+	}
+	catch(const ExternalAeroPreprocessingError& exception)
+	{
+		std::set<std::uint32_t> triangles,candidates,faces;std::size_t owned=0;
+		for(const ExternalAeroPreprocessingProblem& problem:exception.problems())
+		{
+			owned+=problem.owned;
+			triangles.insert(problem.source_triangles.begin(),problem.source_triangles.end());
+			if(problem.source_triangles_are_candidates)
+				candidates.insert(problem.source_triangles.begin(),problem.source_triangles.end());
+			faces.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
+		}
+		std::fprintf(stderr,"[paraglider-case] preprocessing diagnostic: %zu records (%zu owned), %zu source/candidate triangles (%zu BVH candidates) on %zu CAD faces\n",
+			exception.problems().size(),owned,triangles.size(),candidates.size(),faces.size());
+		std::fprintf(stderr,"[paraglider-case] failed: %s\n",exception.what());return 5;
 	}
 	catch(const std::exception& exception){std::fprintf(stderr,"[paraglider-case] failed: %s\n",exception.what());return 5;}
 	return 0;

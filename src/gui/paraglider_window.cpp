@@ -132,6 +132,35 @@ namespace paracfd::gui
 			}
 			return {};
 		}
+
+		std::vector<Vec3d> clip_triangle_to_box(const std::array<Vec3d,3>& triangle,
+			const Vec3d& lo,const Vec3d& hi)
+		{
+			std::vector<Vec3d> polygon(triangle.begin(),triangle.end());
+			auto clip_plane=[&](int axis,double coordinate,bool keep_greater)
+			{
+				if(polygon.empty())return;
+				std::vector<Vec3d> clipped;clipped.reserve(polygon.size()+2);
+				auto inside=[&](const Vec3d& point)
+				{
+					return keep_greater?point[axis]>=coordinate:point[axis]<=coordinate;
+				};
+				for(std::size_t endpoint=0;endpoint<polygon.size();++endpoint)
+				{
+					const Vec3d a=polygon[endpoint],b=polygon[(endpoint+1)%polygon.size()];
+					const bool a_inside=inside(a),b_inside=inside(b);
+					if(a_inside)clipped.push_back(a);
+					if(a_inside==b_inside)continue;
+					const double denominator=b[axis]-a[axis];
+					if(std::abs(denominator)<=1e-30)continue;
+					const double t=std::clamp((coordinate-a[axis])/denominator,0.0,1.0);
+					clipped.push_back(a+(b-a)*t);
+				}
+				polygon=std::move(clipped);
+			};
+			for(int axis=0;axis<3;++axis){clip_plane(axis,lo[axis],true);clip_plane(axis,hi[axis],false);}
+			return polygon;
+		}
 	}
 
 	ParagliderWindow::ParagliderWindow(QWidget* parent):QMainWindow(parent)
@@ -556,6 +585,7 @@ namespace paracfd::gui
 		{
 			if(aoa_sweep_active_)cancelAoaSweep("geometry selection changed");
 			shutdownWorker();thin_debug_display_=false;half_wing_display_=false;
+			embedded_boundary_diagnostic_display_=false;viewer_->clearGeometryErrorDiagnostic();
 		}
 		std::vector<std::uint32_t> excluded=exclude_disconnected_&&exclude_disconnected_->isChecked()
 			?default_excluded_triangle_ids(geometry_quality_):std::vector<std::uint32_t>{};
@@ -597,6 +627,7 @@ namespace paracfd::gui
 
 	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation,bool remember_file)
 	{
+		if(embedded_boundary_diagnostic_display_)restoreFullWingDisplay();
 		if(aoa_sweep_active_)cancelAoaSweep("wing changed");shutdownWorker();resetSimulationAfterGeometryChange();viewer_->setSimulationCaseLabel({});
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string error;
@@ -611,7 +642,8 @@ namespace paracfd::gui
 		// A newly imported STEP is always shown in its full source frame.  In particular, do
 		// not let the previous run's identity-placed half-wing/thin-slab display state suppress
 		// this file's model-local CAD issue curves or leak into its status/readouts.
-		thin_debug_display_=false;half_wing_display_=false;viewer_->setThinDebugState(false,0);
+		thin_debug_display_=false;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;
+		viewer_->clearGeometryErrorDiagnostic();viewer_->setThinDebugState(false,0);
 		imported_mesh_=std::move(geometry.mesh);geometry_quality_=std::move(geometry.quality);
 		step_path_=QFileInfo(path).absoluteFilePath();config_.step_path=step_path_.toStdString();
 		const bool has_suggested_exclusions=!default_excluded_triangle_ids(geometry_quality_).empty();
@@ -653,7 +685,7 @@ namespace paracfd::gui
 
 	bool ParagliderWindow::saveConfigFile(const QString& path)
 	{
-		config_=configFromUi();if(!thin_debug_display_&&!half_wing_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
+		config_=configFromUi();if(!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
 	}
 
 	void ParagliderWindow::updateGridReadout()
@@ -661,9 +693,109 @@ namespace paracfd::gui
 		if(!grid_readout_)return;const auto c=configFromUi();const int ratio=1<<std::max(0,c.amr.max_levels-1);const double finest=c.amr.base_cell_size/ratio;QString text=QString("flow-collar h = %1 m (2:1 ×%2)\nbrick = %3³, coarse width %4 m\nEB merge < %5 h³, small-aperture audit < %6 h² (retained)\nproduction fields = %7").arg(finest,0,'g',5).arg(ratio).arg(c.amr.brick_size).arg(c.amr.base_cell_size*c.amr.brick_size,0,'g',5).arg(c.amr.min_volume_fraction,0,'g',4).arg(c.amr.min_aperture_area_fraction,0,'g',4).arg(sizeof(Real)==4?"FP32":"FP64 validation");text+=strict_exact_eb_&&strict_exact_eb_->isChecked()?"\nEB topology = strict CAD-certified / fail closed":"\nEB topology = qualitative preview / not CAD-certified";if(c.amr.topology_refinement_levels>0){const int topology_ratio=1<<std::max(0,c.amr.max_levels+c.amr.topology_refinement_levels-1);text+=QString("\ntopology h = %1 m (+%2 surface level%3)").arg(c.amr.base_cell_size/topology_ratio,0,'g',5).arg(c.amr.topology_refinement_levels).arg(c.amr.topology_refinement_levels==1?"":"s");}if(half_wing_&&half_wing_->isChecked())text+="\nHALF-WING: +Y half, Y-min symmetry plane; whole loads reconstructed";if(thin_y_debug_&&thin_y_debug_->isChecked()){const int layers=std::max(2,static_cast<int>(std::ceil(thin_y_width_->value()/finest-1e-9)));text+=QString("\nCROPPED-Y DEBUG: uniform h=%1 m, %2 cells = %3 m, station=%4%5").arg(finest,0,'g',5).arg(layers).arg(layers*finest,0,'g',5).arg(thin_y_fraction_->value(),0,'f',3).arg(layers>128?" (too wide: max 128 cells)":"");}grid_readout_->setText(text);
 	}
 
+	void ParagliderWindow::showEmbeddedBoundaryDiagnostic(const TriMesh& wing,
+		const ExternalAeroPreprocessingError& error)
+	{
+		// The solver mesh is already placed in CFD world coordinates. Show that exact
+		// tessellation under an identity transform so both the failed-cell boxes and
+		// their source-triangle evidence share one unambiguous coordinate frame.
+		viewer_->setMesh(wing);
+		viewer_->setMeshPlacement(ModelPlacement{});
+		viewer_->setThinDebugState(false,0);
+		thin_debug_display_=false;
+		half_wing_display_=false;
+		embedded_boundary_diagnostic_display_=true;
+
+		std::set<std::uint32_t> triangle_ids,candidate_triangle_ids,face_ids;
+		std::vector<std::array<float,6>> error_segments;
+		std::size_t owned_cells=0,halo_cells=0;
+		eb_boxes_.clear();
+		for(const ExternalAeroPreprocessingProblem& problem:error.problems())
+		{
+			if(problem.owned)++owned_cells;else ++halo_cells;
+			eb_boxes_.push_back({static_cast<float>(problem.cell_lo.x),
+				static_cast<float>(problem.cell_lo.y),static_cast<float>(problem.cell_lo.z),
+				static_cast<float>(problem.cell_hi.x),static_cast<float>(problem.cell_hi.y),
+				static_cast<float>(problem.cell_hi.z)});
+			triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
+			if(problem.source_triangles_are_candidates)
+				candidate_triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
+			face_ids.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
+			for(const std::uint32_t triangle_id:problem.source_triangles)
+			{
+				if(triangle_id>=wing.triangle_count())continue;
+				std::array<Vec3d,3> triangle{};bool valid=true;
+				for(int corner=0;corner<3;++corner)
+				{
+					const std::uint32_t vertex=wing.indices[3*triangle_id+corner];
+					if(vertex>=wing.vertex_count()){valid=false;break;}
+					const auto point=wing.vertex_position_double(vertex);
+					triangle[corner]={point[0],point[1],point[2]};
+				}
+				if(!valid)continue;
+				const std::vector<Vec3d> polygon=clip_triangle_to_box(triangle,
+					problem.cell_lo,problem.cell_hi);
+				for(std::size_t edge=0;edge<polygon.size();++edge)
+				{
+					const Vec3d a=polygon[edge],b=polygon[(edge+1)%polygon.size()];
+					if(length2(b-a)<=1e-24)continue;
+					error_segments.push_back({static_cast<float>(a.x),static_cast<float>(a.y),
+						static_cast<float>(a.z),static_cast<float>(b.x),static_cast<float>(b.y),
+						static_cast<float>(b.z)});
+				}
+			}
+		}
+		// A producer may have no triangle lineage (for example a pure AMR ownership
+		// transaction). The failed-cell boxes still give a deterministic location.
+		if(error_segments.empty())
+		{
+			static constexpr int box_edges[12][2]={{0,1},{0,2},{0,4},{1,3},{1,5},{2,3},
+				{2,6},{3,7},{4,5},{4,6},{5,7},{6,7}};
+			for(const auto& box:eb_boxes_)
+			{
+				const float p[8][3]={{box[0],box[1],box[2]},{box[3],box[1],box[2]},
+					{box[0],box[4],box[2]},{box[3],box[4],box[2]},{box[0],box[1],box[5]},
+					{box[3],box[1],box[5]},{box[0],box[4],box[5]},{box[3],box[4],box[5]}};
+				for(const auto& edge:box_edges)error_segments.push_back({p[edge[0]][0],p[edge[0]][1],p[edge[0]][2],
+					p[edge[1]][0],p[edge[1]][1],p[edge[1]][2]});
+			}
+		}
+
+		amr_boxes_.clear();
+		viewer_->setParagliderDebugBoxes({},eb_boxes_);
+		viewer_->clearGeometryIssuePolylines();
+		viewer_->setGeometryQualityStatus({});
+		const QString candidate_note=candidate_triangle_ids.empty()
+			?QString("red fabric has direct topology lineage")
+			:QString("red fabric is a BVH candidate crossing the failed cells, not proof of a CAD defect");
+		viewer_->setGeometryErrorDiagnosticSegments(std::move(error_segments),
+			QString("%1 unresolved cell%2 (%3 active, %4 topology halo); %5. Red wire boxes mark exact cells.")
+				.arg(eb_boxes_.size()).arg(eb_boxes_.size()==1?"":"s")
+				.arg(owned_cells).arg(halo_cells).arg(candidate_note),true);
+		viewer_->setShowGeometryIssues(true);
+		{const QSignalBlocker blocker(show_geometry_issues_);show_geometry_issues_->setChecked(true);}
+		show_geometry_issues_->setEnabled(true);
+		{const QSignalBlocker blocker(show_eb_);show_eb_->setChecked(true);}
+
+		const QString detail=QString(
+			"CFD PREPROCESSING DIAGNOSTIC MODE\n"
+			"%1 unresolved embedded-boundary cell%2 (%3 active, %4 topology halo)\n"
+			"%5 source/candidate triangle%6 on %7 CAD face%8 (%9 BVH candidate%10)\n\n"
+			"Opaque red fabric intersects failed regions; red boxes are exact failed CFD cells. "
+			"This can indicate a CAD gap/junction, local topology, or insufficient grid resolution. "
+			"A red candidate is not by itself proof of bad CAD; ParaCFD has not modified the STEP file.")
+			.arg(eb_boxes_.size()).arg(eb_boxes_.size()==1?"":"s")
+			.arg(owned_cells).arg(halo_cells)
+			.arg(triangle_ids.size()).arg(triangle_ids.size()==1?"":"s")
+			.arg(face_ids.size()).arg(face_ids.size()==1?"":"s")
+			.arg(candidate_triangle_ids.size()).arg(candidate_triangle_ids.size()==1?"":"s");
+		solver_readout_->setText(detail);
+		statusBar()->showMessage("CFD preprocessing stopped. Red boxes are exact failures; red fabric is source/candidate context.",12000);
+	}
+
 	void ParagliderWindow::restoreFullWingDisplay()
 	{
-		if((!thin_debug_display_&&!half_wing_display_)||source_mesh_.empty())return;viewer_->setMesh(source_mesh_);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);thin_debug_display_=false;half_wing_display_=false;updateGeometryIssueDisplay();
+		if((!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)||source_mesh_.empty())return;viewer_->clearGeometryErrorDiagnostic();viewer_->setMesh(source_mesh_);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);thin_debug_display_=false;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;amr_boxes_.clear();eb_boxes_.clear();updateDebugBoxes();updateGeometryIssueDisplay();
 	}
 
 	bool ParagliderWindow::buildGrid()
@@ -684,7 +816,7 @@ namespace paracfd::gui
 		else wing=placed_mesh(source_mesh_,config_.placement);
 		std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config_.placement.tx,config_.placement.ty,config_.placement.tz,config_.placement.m[0],config_.placement.m[1],config_.placement.m[2],config_.placement.m[3],config_.placement.m[4],config_.placement.m[5],config_.placement.m[6],config_.placement.m[7],config_.placement.m[8]);TriangleBvh bvh(wing);
 		const bool strict_exact_eb=strict_exact_eb_&&strict_exact_eb_->isChecked();
-		ExternalAeroExecutionOptions execution;execution.exact_cell_decomposer=strict_exact_eb?&decompose_exact_cell:nullptr;execution.allow_unsafe_same_fragment_patches=!strict_exact_eb;execution.use_qualitative_first_order_orthogonal_pressure=!strict_exact_eb;execution.conservative_cell_momentum=conservative_momentum_&&conservative_momentum_->isChecked();QApplication::setOverrideCursor(Qt::WaitCursor);std::unique_ptr<ExternalAeroCore> core;try{core=std::make_unique<ExternalAeroCore>(wing,bvh,run_config,execution);}catch(const std::exception& e){build_wall_timer_active_=false;QApplication::restoreOverrideCursor();std::fprintf(stderr,"[paraglider] CFD grid failed: %s\n",e.what());QMessageBox::critical(this,"CFD grid failed",e.what());return false;}QApplication::restoreOverrideCursor();const AmrHierarchy& hierarchy=core->hierarchy();
+		ExternalAeroExecutionOptions execution;execution.exact_cell_decomposer=strict_exact_eb?&decompose_exact_cell:nullptr;execution.allow_unsafe_same_fragment_patches=!strict_exact_eb;execution.use_qualitative_first_order_orthogonal_pressure=!strict_exact_eb;execution.conservative_cell_momentum=conservative_momentum_&&conservative_momentum_->isChecked();QApplication::setOverrideCursor(Qt::WaitCursor);std::unique_ptr<ExternalAeroCore> core;try{core=std::make_unique<ExternalAeroCore>(wing,bvh,run_config,execution);}catch(const ExternalAeroPreprocessingError& e){build_wall_timer_active_=false;QApplication::restoreOverrideCursor();std::fprintf(stderr,"[paraglider] CFD grid preprocessing failed: %s\n",e.what());showEmbeddedBoundaryDiagnostic(wing,e);auto* notice=new QMessageBox(QMessageBox::Critical,"CFD preprocessing needs attention",QString::fromUtf8(e.what())+"\n\nThe viewer is now in diagnostic mode. Red boxes are unresolved CFD cells; red fabric marks source or candidate geometry crossing them. This is not automatically a CAD defect.",QMessageBox::Ok,this);notice->setAttribute(Qt::WA_DeleteOnClose);notice->setModal(false);notice->open();return false;}catch(const std::exception& e){build_wall_timer_active_=false;QApplication::restoreOverrideCursor();std::fprintf(stderr,"[paraglider] CFD grid failed: %s\n",e.what());QMessageBox::critical(this,"CFD grid failed",e.what());return false;}QApplication::restoreOverrideCursor();const AmrHierarchy& hierarchy=core->hierarchy();
 		amr_boxes_.clear();eb_boxes_.clear();for(const auto& level:hierarchy.levels())for(const auto& brick:level.bricks)if(brick.active()){const float width=hierarchy.brick_size()*brick.h;amr_boxes_.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});}
 		std::size_t fragments=0,apertures=0,patches=0,unresolved=0,static_pockets=0,small_apertures=0,unmapped_surface_patches=0;double small_aperture_area=0,unmapped_surface_area=0;for(const auto& level:core->embedded_boundary().levels){const auto& eb=level.topology;small_apertures+=eb.retained_subgrid_apertures;small_aperture_area+=eb.retained_subgrid_aperture_area;unmapped_surface_patches+=eb.diagnostic_unmapped_surface_patches;unmapped_surface_area+=eb.diagnostic_unmapped_surface_area;for(const auto& fragment:eb.fragments)if(level.owned_cell[fragment.parent_cell]){++fragments;if(fragment.pressure_static)++static_pockets;}for(const auto& aperture:eb.apertures)if(level.owned_cell[aperture.parent_face_cell])++apertures;for(const auto& patch:eb.patches){const auto owner=hierarchy.locate_finest(patch.centroid);if(owner.found()&&owner.level==level.level)++patches;}for(int cell:eb.irregular_cells)if(level.owned_cell[cell]){const auto q=eb.grid.cell_coord(cell);const auto box=eb.grid.cell_box(q[0],q[1],q[2]);eb_boxes_.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}for(const auto& problem:eb.unresolved)if(level.owned_cell[problem.parent_cell])++unresolved;}
 		const Vec3d size=hierarchy.domain().hi-hierarchy.domain().lo;SimInfo info;info.h=hierarchy.levels().front().h;info.coarse_h=info.h;info.finest_h=hierarchy.finest_cell_size();info.nx=(int)std::llround(size.x/info.h);info.ny=(int)std::llround(size.y/info.h);info.nz=(int)std::llround(size.z/info.h);info.Lx=size.x;info.Ly=size.y;info.Lz=size.z;info.U=run_config.freestream.speed;info.rho=run_config.freestream.rho;info.nu=run_config.freestream.nu;info.name=thin_debug?"thin-y-debug":(half_wing?"half-wing-symmetry":"paraglider");viewer_->setInfo(info);slice_position_->setValue(500);

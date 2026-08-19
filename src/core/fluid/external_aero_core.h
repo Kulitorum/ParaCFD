@@ -6,11 +6,57 @@
 #include "core/fluid/amr_pressure.h"
 #include "core/paraglider_config.h"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace paracfd::core
 {
+	// Structured preprocessing evidence retained when the zero-thickness EB topology
+	// cannot be made safe for flow. Front ends use this to point at the actual fabric
+	// involved instead of presenting only an internal Cartesian-cell index.
+	struct ExternalAeroPreprocessingProblem
+	{
+		int level = -1;
+		std::array<int, 3> cell_coordinate{}; // sparse level-atlas coordinates, not brick-local
+		Vec3d cell_lo{};                     // placed CFD world coordinates, metres
+		Vec3d cell_hi{};
+		Vec3d centroid{};
+		bool owned = false;
+		// IDs index the exact placed_wing passed to ExternalAeroCore. When the
+		// topology producer supplied no causal lineage, the BVH-intersecting fabric
+		// is retained as a candidate repair region and this flag is true.
+		bool source_triangles_are_candidates = false;
+		std::vector<std::uint32_t> source_triangles;
+		std::vector<std::uint32_t> source_face_ids;
+		std::string reason;
+	};
+
+	class ExternalAeroPreprocessingError final : public std::runtime_error
+	{
+	public:
+		ExternalAeroPreprocessingError(std::string message,
+			std::vector<ExternalAeroPreprocessingProblem> problems,
+			std::size_t owned_count)
+			: std::runtime_error(std::move(message)), problems_(std::move(problems)),
+			  owned_count_(owned_count) {}
+
+		const std::vector<ExternalAeroPreprocessingProblem>& problems() const noexcept
+		{
+			return problems_;
+		}
+		std::size_t ownedCount() const noexcept { return owned_count_; }
+
+	private:
+		std::vector<ExternalAeroPreprocessingProblem> problems_;
+		std::size_t owned_count_ = 0;
+	};
+
 	struct ExternalAeroStepStats
 	{
 		double dt = 0.0;

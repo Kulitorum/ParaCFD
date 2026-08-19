@@ -23,7 +23,11 @@ class QSpinBox;
 class QThread;
 class QTimer;
 
-namespace paracfd::core { class ExternalAeroCore; }
+namespace paracfd::core
+{
+	class ExternalAeroCore;
+	class ExternalAeroPreprocessingError;
+}
 
 namespace paracfd::gui
 {
@@ -85,6 +89,8 @@ namespace paracfd::gui
 		void updateWingLabel();
 		void resetSimulationAfterGeometryChange();
 		void restoreFullWingDisplay();
+		void showEmbeddedBoundaryDiagnostic(const paracfd::core::TriMesh& wing,
+			const paracfd::core::ExternalAeroPreprocessingError& error);
 		void spawnWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core);
 		void shutdownWorker();
 
@@ -139,5 +145,6 @@ namespace paracfd::gui
 		float delta_cp_range_=1,side_cp_range_=1;
 		bool thin_debug_display_=false;
 		bool half_wing_display_=false;
+		bool embedded_boundary_diagnostic_display_=false;
 	};
 }

@@ -232,6 +232,15 @@ namespace paracfd::gui
 		bool showGeometryIssues() const { return show_geometry_issues_; }
 		std::size_t geometryIssueCount(GeometryIssueKind kind) const;
 		std::optional<double> geometryIssueMaximumGap(GeometryIssueKind kind) const;
+		// Focused geometry-error inspection. Segment endpoints are WORLD coordinates in metres;
+		// unlike CAD issue polylines they are not transformed by the model placement. While active,
+		// the canopy is rendered transparently and the supplied errors are opaque screen-space red
+		// ribbons drawn through it. Clearing the diagnostic restores normal canopy rendering.
+		void setGeometryErrorDiagnosticSegments(std::vector<std::array<float, 6>> world_segments,
+			const QString& overlay_text = QString{}, bool frame_segments = false);
+		void clearGeometryErrorDiagnostic();
+		bool geometryErrorDiagnosticActive() const { return geometry_error_active_; }
+		bool frameGeometryErrorDiagnosticView();
 
 		// Draw the loaded model at an explicit translate (metres) instead of the auto bed placement.
 		void setMeshTranslate(double tx, double ty, double tz);
@@ -291,6 +300,10 @@ namespace paracfd::gui
 		void uploadGeometryIssuePolylines();
 		void drawGeometryIssuePolylines(const QMatrix4x4& mvp, const QVector4D& clip_plane);
 		void drawGeometryIssueLegend(QPainter& painter);
+		void buildGeometryErrorDiagnosticBuffers();
+		void uploadGeometryErrorDiagnosticSegments();
+		void drawGeometryErrorDiagnosticSegments(const QMatrix4x4& mvp);
+		void drawGeometryErrorDiagnosticOverlay(QPainter& painter);
 		void ensureFabricBvh();     // rebuild placed zero-thickness collision geometry lazily
 		void updateRange();
 		void applyAutoRange(const FieldRange& fr); // EMA-fold a live reduction into [vmin_,vmax_]+speed scale
@@ -438,6 +451,16 @@ namespace paracfd::gui
 		bool show_geometry_issues_ = true;
 		QString geometry_quality_status_;
 		bool geometry_quality_warning_ = false;
+
+		// Focused world-coordinate error inspection is deliberately independent of the classified,
+		// model-local CAD issue layer above. It reuses the same ribbon shader/layout.
+		unsigned int geometry_error_vao_ = 0, geometry_error_vbo_ = 0;
+		std::vector<float> geometry_error_vertices_;
+		std::vector<int> geometry_error_firsts_, geometry_error_counts_;
+		bool geometry_error_upload_pending_ = false, geometry_error_active_ = false;
+		QString geometry_error_overlay_text_;
+		QVector3D geometry_error_bounds_min_, geometry_error_bounds_max_;
+		bool geometry_error_bounds_valid_ = false;
 
 		// Cached coarse-volume representations. Iso-surfaces use marching tetrahedra on the active
 		// field; the focused ray caster always uses Cp and makes the free stream transparent.

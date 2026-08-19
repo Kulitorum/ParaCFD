@@ -38,6 +38,7 @@ namespace paracfd::core
 		{
 			std::size_t owned_count=0;
 			std::string first_owned,first_any;
+			std::vector<ExternalAeroPreprocessingProblem> diagnostics;
 			auto describe=[&](const AmrEbLevelAtlas& level,const UnresolvedEbCell& problem,
 				bool owned)
 			{
@@ -73,15 +74,51 @@ namespace paracfd::core
 					const bool owned=problem.parent_cell>=0&&
 						problem.parent_cell<static_cast<int>(level.owned_cell.size())&&
 						level.owned_cell[problem.parent_cell];
+					const auto coordinate=level.topology.grid.cell_coord(problem.parent_cell);
+					const Aabb3d cell_box=level.topology.grid.cell_box(
+						coordinate[0],coordinate[1],coordinate[2]);
+					ExternalAeroPreprocessingProblem diagnostic;
+					diagnostic.level=level.level;
+					diagnostic.cell_coordinate={coordinate[0],coordinate[1],coordinate[2]};
+					diagnostic.cell_lo=cell_box.lo;
+					diagnostic.cell_hi=cell_box.hi;
+					diagnostic.centroid=level.topology.grid.cell_centroid(problem.parent_cell);
+					diagnostic.owned=owned;
+					diagnostic.reason=problem.reason;
+					diagnostic.source_triangles=problem.source_triangles;
+					// Some stabilization failures are aggregate-level and therefore have no
+					// direct source list. The exact BVH query recovers every fabric triangle
+					// crossing the failed control volume without guessing from its centroid.
+					if(diagnostic.source_triangles.empty())
+					{
+						diagnostic.source_triangles=bvh.query_aabb(cell_box);
+						diagnostic.source_triangles_are_candidates=true;
+					}
+					diagnostic.source_triangles.erase(std::remove_if(
+						diagnostic.source_triangles.begin(),diagnostic.source_triangles.end(),
+						[&](std::uint32_t triangle){return triangle>=wing.triangle_count();}),
+						diagnostic.source_triangles.end());
+					std::sort(diagnostic.source_triangles.begin(),diagnostic.source_triangles.end());
+					diagnostic.source_triangles.erase(std::unique(
+						diagnostic.source_triangles.begin(),diagnostic.source_triangles.end()),
+						diagnostic.source_triangles.end());
+					for(const std::uint32_t triangle:diagnostic.source_triangles)
+						if(triangle<wing.source_face_ids.size())
+							diagnostic.source_face_ids.push_back(wing.source_face_ids[triangle]);
+					std::sort(diagnostic.source_face_ids.begin(),diagnostic.source_face_ids.end());
+					diagnostic.source_face_ids.erase(std::unique(
+						diagnostic.source_face_ids.begin(),diagnostic.source_face_ids.end()),
+						diagnostic.source_face_ids.end());
+					diagnostics.push_back(std::move(diagnostic));
 					owned_count+=owned;
 					if(first_any.empty())first_any=describe(level,problem,owned);
 					if(owned&&first_owned.empty())first_owned=describe(level,problem,true);
 				}
 			const std::size_t total=embedded_boundary_.unresolved_count();
-			throw std::runtime_error("external aerodynamic core has "+std::to_string(total)+
+			throw ExternalAeroPreprocessingError("external aerodynamic core has "+std::to_string(total)+
 				" unresolved EB cell(s) ("+std::to_string(owned_count)+" owned, "+
 				std::to_string(total-owned_count)+" topology halo); first: "+
-				(first_owned.empty()?first_any:first_owned));
+				(first_owned.empty()?first_any:first_owned),std::move(diagnostics),owned_count);
 		}
 
 		CompositeAmrPressureBuildOptions pressure_options;
