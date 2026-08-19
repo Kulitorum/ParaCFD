@@ -29,8 +29,9 @@ namespace paracfd::core
 		Vec3d centroid{};
 		bool owned = false;
 		// IDs index the exact placed_wing passed to ExternalAeroCore. When the
-		// topology producer supplied no causal lineage, the BVH-intersecting fabric
-		// is retained as a candidate repair region and this flag is true.
+		// topology producer supplied no causal lineage, either its complete local
+		// input or BVH-intersecting fabric is retained as a candidate repair region
+		// and this flag is true.
 		bool source_triangles_are_candidates = false;
 		std::vector<std::uint32_t> source_triangles;
 		std::vector<std::uint32_t> source_face_ids;

@@ -206,9 +206,12 @@ namespace
 		atlas.levels.push_back(std::move(level));
 
 		std::size_t owned_unresolved = 0, halo_unresolved = 0;
+		bool unresolved_inputs_are_candidates = true;
 		for (const AmrEbLevelAtlas& level : atlas.levels)
 			for (const UnresolvedEbCell& problem : level.topology.unresolved)
 			{
+				unresolved_inputs_are_candidates = unresolved_inputs_are_candidates
+					&& problem.source_triangles_are_candidates;
 				const bool owned = problem.parent_cell >= 0
 					&& problem.parent_cell < static_cast<int>(level.owned_cell.size())
 					&& level.owned_cell[problem.parent_cell] != 0;
@@ -218,6 +221,8 @@ namespace
 			"fixture rejects exact topology only in an unowned fine-level halo");
 		check(!atlas.ready_for_flow(),
 			"an unresolved topology halo makes the composite atlas non-flow-ready");
+		check(unresolved_inputs_are_candidates,
+			"a rejected whole-cell operation labels its broad triangle input as diagnostic context");
 	}
 
 	void shared_face_rollback_test()
@@ -236,6 +241,11 @@ namespace
 			"second shared-face rejection invalidates both participating cells");
 		check(rejected_cells_are_transactionally_clean(eb),
 			"rejected cells retain no fragments, patches, apertures, or connections");
+		check(std::all_of(eb.unresolved.begin(), eb.unresolved.end(),
+			[](const UnresolvedEbCell& problem)
+			{
+				return problem.source_triangles_are_candidates;
+			}), "shared-face BVH context is not reported as causal CAD geometry");
 	}
 }
 

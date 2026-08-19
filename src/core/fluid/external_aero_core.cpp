@@ -54,7 +54,9 @@ namespace paracfd::core
 				if(!problem.source_triangles.empty())
 				{
 					const std::uint32_t triangle=problem.source_triangles.front();
-					reason+=" (triangle "+std::to_string(triangle);
+					reason+=problem.source_triangles_are_candidates?
+						" (candidate triangle ":" (source triangle ";
+					reason+=std::to_string(triangle);
 					if(triangle<wing.source_face_ids.size())
 						reason+=", CAD face "+std::to_string(wing.source_face_ids[triangle]);
 					if(triangle<bvh.triangle_count())
@@ -88,6 +90,8 @@ namespace paracfd::core
 					diagnostic.owned=owned;
 					diagnostic.reason=problem.reason;
 					diagnostic.source_triangles=problem.source_triangles;
+					diagnostic.source_triangles_are_candidates=
+						problem.source_triangles_are_candidates;
 					// Some stabilization failures are aggregate-level and therefore have no
 					// direct source list. The exact BVH query recovers every fabric triangle
 					// crossing the failed control volume without guessing from its centroid.

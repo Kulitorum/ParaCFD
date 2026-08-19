@@ -427,7 +427,10 @@ namespace paracfd::core
 					std::vector<std::uint32_t> source;source.reserve(clipped.size());
 					for(const ClippedTriangle& triangle:clipped)source.push_back(triangle.id);
 					std::sort(source.begin(),source.end());source.erase(std::unique(source.begin(),source.end()),source.end());
-					eb.unresolved.push_back({cell,std::move(source),std::move(reason)});
+					// The exact decomposer rejected the operation as a whole.  Every local
+					// triangle was an input, but OCCT did not identify which one caused the
+					// warning.  Preserve these as search context, not causal lineage.
+					eb.unresolved.push_back({cell,std::move(source),std::move(reason),true});
 				};
 				ExactCellInput input;input.cell_min=exact_point(box.lo);input.cell_max=exact_point(box.hi);
 				std::unordered_map<std::uint32_t,std::uint32_t> vertex_map;
@@ -1484,7 +1487,10 @@ namespace paracfd::core
 		auto mark_exact_face_unresolved=[&](int cell,const std::vector<std::uint32_t>& triangles,const std::string& reason)
 		{
 			if(cell<0||cell>=static_cast<int>(eb.cells.size())||eb.cells[cell].state==EbCellState::unresolved)return;
-			eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,triangles,reason});
+			// This list is a BVH query spanning both adjacent cells. It locates the
+			// failed transaction but does not identify a causal CAD triangle.
+			eb.cells[cell].state=EbCellState::unresolved;
+			eb.unresolved.push_back({cell,triangles,reason,true});
 		};
 
 		// Split only those Cartesian faces that touch an irregular cell. Pairwise half-space clipping

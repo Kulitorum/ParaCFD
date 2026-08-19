@@ -706,7 +706,9 @@ namespace paracfd::gui
 		half_wing_display_=false;
 		embedded_boundary_diagnostic_display_=true;
 
-		std::set<std::uint32_t> triangle_ids,candidate_triangle_ids,face_ids;
+		std::set<std::uint32_t> direct_triangle_ids,candidate_triangle_ids;
+		std::set<std::uint32_t> direct_face_ids,candidate_face_ids;
+		std::set<std::array<float,6>> unique_error_segments;
 		std::vector<std::array<float,6>> error_segments;
 		std::size_t owned_cells=0,halo_cells=0;
 		eb_boxes_.clear();
@@ -717,10 +719,17 @@ namespace paracfd::gui
 				static_cast<float>(problem.cell_lo.y),static_cast<float>(problem.cell_lo.z),
 				static_cast<float>(problem.cell_hi.x),static_cast<float>(problem.cell_hi.y),
 				static_cast<float>(problem.cell_hi.z)});
-			triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
 			if(problem.source_triangles_are_candidates)
+			{
 				candidate_triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
-			face_ids.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
+				candidate_face_ids.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
+				// A rejected whole-cell operation only tells us that these triangles
+				// participated.  Painting all of them red would falsely identify broad
+				// local context as defective fabric and rapidly obscures the model.
+				continue;
+			}
+			direct_triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
+			direct_face_ids.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
 			for(const std::uint32_t triangle_id:problem.source_triangles)
 			{
 				if(triangle_id>=wing.triangle_count())continue;
@@ -739,39 +748,33 @@ namespace paracfd::gui
 				{
 					const Vec3d a=polygon[edge],b=polygon[(edge+1)%polygon.size()];
 					if(length2(b-a)<=1e-24)continue;
-					error_segments.push_back({static_cast<float>(a.x),static_cast<float>(a.y),
-						static_cast<float>(a.z),static_cast<float>(b.x),static_cast<float>(b.y),
-						static_cast<float>(b.z)});
+					std::array<float,3> first{static_cast<float>(a.x),static_cast<float>(a.y),
+						static_cast<float>(a.z)};
+					std::array<float,3> second{static_cast<float>(b.x),static_cast<float>(b.y),
+						static_cast<float>(b.z)};
+					for(float& coordinate:first)if(coordinate==0.0f)coordinate=0.0f;
+					for(float& coordinate:second)if(coordinate==0.0f)coordinate=0.0f;
+					if(second<first)std::swap(first,second);
+					unique_error_segments.insert({first[0],first[1],first[2],
+						second[0],second[1],second[2]});
 				}
 			}
 		}
-		// A producer may have no triangle lineage (for example a pure AMR ownership
-		// transaction). The failed-cell boxes still give a deterministic location.
-		if(error_segments.empty())
-		{
-			static constexpr int box_edges[12][2]={{0,1},{0,2},{0,4},{1,3},{1,5},{2,3},
-				{2,6},{3,7},{4,5},{4,6},{5,7},{6,7}};
-			for(const auto& box:eb_boxes_)
-			{
-				const float p[8][3]={{box[0],box[1],box[2]},{box[3],box[1],box[2]},
-					{box[0],box[4],box[2]},{box[3],box[4],box[2]},{box[0],box[1],box[5]},
-					{box[3],box[1],box[5]},{box[0],box[4],box[5]},{box[3],box[4],box[5]}};
-				for(const auto& edge:box_edges)error_segments.push_back({p[edge[0]][0],p[edge[0]][1],p[edge[0]][2],
-					p[edge[1]][0],p[edge[1]][1],p[edge[1]][2]});
-			}
-		}
+		error_segments.assign(unique_error_segments.begin(),unique_error_segments.end());
 
 		amr_boxes_.clear();
 		viewer_->setParagliderDebugBoxes({},eb_boxes_);
 		viewer_->clearGeometryIssuePolylines();
 		viewer_->setGeometryQualityStatus({});
-		const QString candidate_note=candidate_triangle_ids.empty()
-			?QString("red fabric has direct topology lineage")
-			:QString("red fabric is a BVH candidate crossing the failed cells, not proof of a CAD defect");
+		const QString source_note=direct_triangle_ids.empty()
+			?QString("No specific faulty fabric feature was identified; broad local triangle context is hidden")
+			:QString("%1 directly identified source triangle%2 highlighted red; broad local context is hidden")
+				.arg(direct_triangle_ids.size()).arg(direct_triangle_ids.size()==1?"":"s");
 		viewer_->setGeometryErrorDiagnosticSegments(std::move(error_segments),
-			QString("%1 unresolved cell%2 (%3 active, %4 topology halo); %5. Red wire boxes mark exact cells.")
+			QString("%1 unresolved cell%2 (%3 active, %4 topology halo). %5. Red wire boxes mark exact cells.")
 				.arg(eb_boxes_.size()).arg(eb_boxes_.size()==1?"":"s")
-				.arg(owned_cells).arg(halo_cells).arg(candidate_note),true);
+				.arg(owned_cells).arg(halo_cells).arg(source_note),true);
+		if(direct_triangle_ids.empty())viewer_->frameWingView();
 		viewer_->setShowGeometryIssues(true);
 		{const QSignalBlocker blocker(show_geometry_issues_);show_geometry_issues_->setChecked(true);}
 		show_geometry_issues_->setEnabled(true);
@@ -780,17 +783,20 @@ namespace paracfd::gui
 		const QString detail=QString(
 			"CFD PREPROCESSING DIAGNOSTIC MODE\n"
 			"%1 unresolved embedded-boundary cell%2 (%3 active, %4 topology halo)\n"
-			"%5 source/candidate triangle%6 on %7 CAD face%8 (%9 BVH candidate%10)\n\n"
-			"Opaque red fabric intersects failed regions; red boxes are exact failed CFD cells. "
-			"This can indicate a CAD gap/junction, local topology, or insufficient grid resolution. "
-			"A red candidate is not by itself proof of bad CAD; ParaCFD has not modified the STEP file.")
+			"%5 directly identified source triangle%6 on %7 CAD face%8\n"
+			"%9 local-context triangle%10 on %11 CAD face%12 hidden\n\n"
+			"Red boxes are exact failed CFD cells. Only specifically identified source fabric is highlighted red. "
+			"Whole-cell input context is deliberately hidden because it does not prove that those surfaces are defective. "
+			"A failure can indicate a CAD gap/junction, local topology, insufficient grid resolution, or a checker limitation; "
+			"ParaCFD has not modified the STEP file.")
 			.arg(eb_boxes_.size()).arg(eb_boxes_.size()==1?"":"s")
 			.arg(owned_cells).arg(halo_cells)
-			.arg(triangle_ids.size()).arg(triangle_ids.size()==1?"":"s")
-			.arg(face_ids.size()).arg(face_ids.size()==1?"":"s")
-			.arg(candidate_triangle_ids.size()).arg(candidate_triangle_ids.size()==1?"":"s");
+			.arg(direct_triangle_ids.size()).arg(direct_triangle_ids.size()==1?"":"s")
+			.arg(direct_face_ids.size()).arg(direct_face_ids.size()==1?"":"s")
+			.arg(candidate_triangle_ids.size()).arg(candidate_triangle_ids.size()==1?"":"s")
+			.arg(candidate_face_ids.size()).arg(candidate_face_ids.size()==1?"":"s");
 		solver_readout_->setText(detail);
-		statusBar()->showMessage("CFD preprocessing stopped. Red boxes are exact failures; red fabric is source/candidate context.",12000);
+		statusBar()->showMessage("CFD preprocessing stopped. Red boxes are exact failed cells; only specifically identified fabric is red.",12000);
 	}
 
 	void ParagliderWindow::restoreFullWingDisplay()
@@ -816,7 +822,55 @@ namespace paracfd::gui
 		else wing=placed_mesh(source_mesh_,config_.placement);
 		std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config_.placement.tx,config_.placement.ty,config_.placement.tz,config_.placement.m[0],config_.placement.m[1],config_.placement.m[2],config_.placement.m[3],config_.placement.m[4],config_.placement.m[5],config_.placement.m[6],config_.placement.m[7],config_.placement.m[8]);TriangleBvh bvh(wing);
 		const bool strict_exact_eb=strict_exact_eb_&&strict_exact_eb_->isChecked();
-		ExternalAeroExecutionOptions execution;execution.exact_cell_decomposer=strict_exact_eb?&decompose_exact_cell:nullptr;execution.allow_unsafe_same_fragment_patches=!strict_exact_eb;execution.use_qualitative_first_order_orthogonal_pressure=!strict_exact_eb;execution.conservative_cell_momentum=conservative_momentum_&&conservative_momentum_->isChecked();QApplication::setOverrideCursor(Qt::WaitCursor);std::unique_ptr<ExternalAeroCore> core;try{core=std::make_unique<ExternalAeroCore>(wing,bvh,run_config,execution);}catch(const ExternalAeroPreprocessingError& e){build_wall_timer_active_=false;QApplication::restoreOverrideCursor();std::fprintf(stderr,"[paraglider] CFD grid preprocessing failed: %s\n",e.what());showEmbeddedBoundaryDiagnostic(wing,e);auto* notice=new QMessageBox(QMessageBox::Critical,"CFD preprocessing needs attention",QString::fromUtf8(e.what())+"\n\nThe viewer is now in diagnostic mode. Red boxes are unresolved CFD cells; red fabric marks source or candidate geometry crossing them. This is not automatically a CAD defect.",QMessageBox::Ok,this);notice->setAttribute(Qt::WA_DeleteOnClose);notice->setModal(false);notice->open();return false;}catch(const std::exception& e){build_wall_timer_active_=false;QApplication::restoreOverrideCursor();std::fprintf(stderr,"[paraglider] CFD grid failed: %s\n",e.what());QMessageBox::critical(this,"CFD grid failed",e.what());return false;}QApplication::restoreOverrideCursor();const AmrHierarchy& hierarchy=core->hierarchy();
+		ExternalAeroExecutionOptions execution;
+		execution.exact_cell_decomposer=strict_exact_eb?&decompose_exact_cell:nullptr;
+		execution.allow_unsafe_same_fragment_patches=!strict_exact_eb;
+		execution.use_qualitative_first_order_orthogonal_pressure=!strict_exact_eb;
+		execution.conservative_cell_momentum=conservative_momentum_&&conservative_momentum_->isChecked();
+		QApplication::setOverrideCursor(Qt::WaitCursor);
+		std::unique_ptr<ExternalAeroCore> core;
+		try
+		{
+			core=std::make_unique<ExternalAeroCore>(wing,bvh,run_config,execution);
+		}
+		catch(const ExternalAeroPreprocessingError& e)
+		{
+			build_wall_timer_active_=false;QApplication::restoreOverrideCursor();
+			std::fprintf(stderr,"[paraglider] CFD grid preprocessing failed: %s\n",e.what());
+			showEmbeddedBoundaryDiagnostic(wing,e);
+			std::size_t shared_face_count=0,local_cell_count=0;
+			for(const ExternalAeroPreprocessingProblem& problem:e.problems())
+			{
+				if(problem.reason.find("shared-face")!=std::string::npos)++shared_face_count;
+				else ++local_cell_count;
+			}
+			const QString shared_summary=shared_face_count==1?
+				QStringLiteral("1 cell was rejected by a neighbour-cell consistency check."):
+				QString("%1 cells were rejected by neighbour-cell consistency checks.").arg(shared_face_count);
+			const QString local_summary=local_cell_count==1?
+				QStringLiteral("1 cell was rejected during a local geometry operation."):
+				QString("%1 cells were rejected during local geometry operations.").arg(local_cell_count);
+			const QString summary=QString(
+				"The detailed geometry check could not verify %1 CFD cell%2 across the wing. "
+				"This does not mean the CAD is faulty everywhere.\n\n"
+				"%3\n%4\n\n"
+				"The viewer now shows the affected CFD cells as red boxes. Fabric is red only "
+				"when the checker identified a specific source; broad candidate geometry is hidden.")
+				.arg(e.problems().size()).arg(e.problems().size()==1?"":"s")
+				.arg(shared_summary).arg(local_summary);
+			auto* notice=new QMessageBox(QMessageBox::Warning,
+				"Detailed geometry check could not finish",summary,QMessageBox::Ok,this);
+			notice->setDetailedText(QString::fromUtf8(e.what()));
+			notice->setAttribute(Qt::WA_DeleteOnClose);notice->setModal(false);notice->open();
+			return false;
+		}
+		catch(const std::exception& e)
+		{
+			build_wall_timer_active_=false;QApplication::restoreOverrideCursor();
+			std::fprintf(stderr,"[paraglider] CFD grid failed: %s\n",e.what());
+			QMessageBox::critical(this,"CFD grid failed",e.what());return false;
+		}
+		QApplication::restoreOverrideCursor();const AmrHierarchy& hierarchy=core->hierarchy();
 		amr_boxes_.clear();eb_boxes_.clear();for(const auto& level:hierarchy.levels())for(const auto& brick:level.bricks)if(brick.active()){const float width=hierarchy.brick_size()*brick.h;amr_boxes_.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});}
 		std::size_t fragments=0,apertures=0,patches=0,unresolved=0,static_pockets=0,small_apertures=0,unmapped_surface_patches=0,face_state_retained_small_roots=0;double small_aperture_area=0,unmapped_surface_area=0,minimum_face_state_retained_volume_fraction=1;for(const auto& level:core->embedded_boundary().levels){const auto& eb=level.topology;small_apertures+=eb.retained_subgrid_apertures;small_aperture_area+=eb.retained_subgrid_aperture_area;unmapped_surface_patches+=eb.diagnostic_unmapped_surface_patches;unmapped_surface_area+=eb.diagnostic_unmapped_surface_area;face_state_retained_small_roots+=level.face_state_retained_small_roots;if(level.face_state_retained_small_roots)minimum_face_state_retained_volume_fraction=std::min(minimum_face_state_retained_volume_fraction,level.minimum_face_state_retained_volume_fraction);for(const auto& fragment:eb.fragments)if(level.owned_cell[fragment.parent_cell]){++fragments;if(fragment.pressure_static)++static_pockets;}for(const auto& aperture:eb.apertures)if(level.owned_cell[aperture.parent_face_cell])++apertures;for(const auto& patch:eb.patches){const auto owner=hierarchy.locate_finest(patch.centroid);if(owner.found()&&owner.level==level.level)++patches;}for(int cell:eb.irregular_cells)if(level.owned_cell[cell]){const auto q=eb.grid.cell_coord(cell);const auto box=eb.grid.cell_box(q[0],q[1],q[2]);eb_boxes_.push_back({(float)box.lo.x,(float)box.lo.y,(float)box.lo.z,(float)box.hi.x,(float)box.hi.y,(float)box.hi.z});}for(const auto& problem:eb.unresolved)if(level.owned_cell[problem.parent_cell])++unresolved;}
 		const Vec3d size=hierarchy.domain().hi-hierarchy.domain().lo;SimInfo info;info.h=hierarchy.levels().front().h;info.coarse_h=info.h;info.finest_h=hierarchy.finest_cell_size();info.nx=(int)std::llround(size.x/info.h);info.ny=(int)std::llround(size.y/info.h);info.nz=(int)std::llround(size.z/info.h);info.Lx=size.x;info.Ly=size.y;info.Lz=size.z;info.U=run_config.freestream.speed;info.rho=run_config.freestream.rho;info.nu=run_config.freestream.nu;info.name=thin_debug?"thin-y-debug":(half_wing?"half-wing-symmetry":"paraglider");viewer_->setInfo(info);slice_position_->setValue(500);

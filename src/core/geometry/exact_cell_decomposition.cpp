@@ -667,6 +667,10 @@ ExactCellDecomposition decompose_exact_cell(const ExactCellInput &input)
 	  builder.DumpWarnings(report);
 	  const std::string message="OCCT General Fuse warning:\n"+report.str();
 	  result.warnings.push_back(message);
+	  // A warning can denote discarded construction debris, but it can also mean a
+	  // membrane split was lost while area and volume still happen to balance.  Until
+	  // fragment connectivity is independently cross-checked, warning-only results
+	  // are not safe enough to become pressure topology.
 	  result.errors.push_back("General Fuse emitted warnings; cell topology is not accepted");
 	  return result;
 	}

@@ -143,6 +143,10 @@ namespace paracfd::core
 		int parent_cell = -1;
 		std::vector<std::uint32_t> source_triangles;
 		std::string reason;
+		// True when source_triangles is the complete local fabric input used while
+		// diagnosing this cell, rather than a producer-certified causal subset.  UI
+		// diagnostics must not paint this broad context as confirmed bad geometry.
+		bool source_triangles_are_candidates = false;
 	};
 
 	// Exact duplicate CAD triangles on one Cartesian face represent one physical

@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace paracfd::gui
@@ -79,12 +80,22 @@ namespace paracfd::gui
 		std::vector<float> debug_box_lines(const std::vector<std::array<float, 6>>& boxes)
 		{
 			std::vector<float> lines;lines.reserve(boxes.size()*12*2*3);
+			std::set<std::array<float,6>> unique_lines;
 			static constexpr int edges[12][2]={{0,1},{0,2},{0,4},{1,3},{1,5},{2,3},{2,6},{3,7},{4,5},{4,6},{5,7},{6,7}};
 			for(const auto& b:boxes)
 			{
 				const float p[8][3]={{b[0],b[1],b[2]},{b[3],b[1],b[2]},{b[0],b[4],b[2]},{b[3],b[4],b[2]},{b[0],b[1],b[5]},{b[3],b[1],b[5]},{b[0],b[4],b[5]},{b[3],b[4],b[5]}};
-				for(const auto& edge:edges)for(int endpoint:edge)lines.insert(lines.end(),{p[endpoint][0],p[endpoint][1],p[endpoint][2]});
+				for(const auto& edge:edges)
+				{
+					std::array<float,3> a{p[edge[0]][0],p[edge[0]][1],p[edge[0]][2]};
+					std::array<float,3> c{p[edge[1]][0],p[edge[1]][1],p[edge[1]][2]};
+					for(float& coordinate:a)if(coordinate==0.0f)coordinate=0.0f;
+					for(float& coordinate:c)if(coordinate==0.0f)coordinate=0.0f;
+					if(c<a)std::swap(a,c);
+					unique_lines.insert({a[0],a[1],a[2],c[0],c[1],c[2]});
+				}
 			}
+			for(const auto& line:unique_lines)lines.insert(lines.end(),line.begin(),line.end());
 			return lines;
 		}
 
@@ -948,8 +959,11 @@ void main()
 				geometry_error_bounds_max_.setZ(std::max(geometry_error_bounds_max_.z(),point.z()));
 			}
 		}
-		geometry_error_active_=!geometry_error_firsts_.empty();
 		geometry_error_overlay_text_=overlay_text.trimmed();
+		// A failed-cell diagnostic remains active even when preprocessing could only
+		// identify broad local context.  In that case the UI deliberately draws no
+		// fabric ribbons instead of claiming the whole candidate region is defective.
+		geometry_error_active_=!geometry_error_firsts_.empty()||!geometry_error_overlay_text_.isEmpty();
 		if(geometry_error_active_&&geometry_error_overlay_text_.isEmpty())
 			geometry_error_overlay_text_=QString("GEOMETRY ERROR DIAGNOSTIC — %1 SEGMENT%2")
 				.arg(geometry_error_firsts_.size()).arg(geometry_error_firsts_.size()==1?"":"S");
@@ -2177,7 +2191,7 @@ void main()
 		painter.drawRect(box.adjusted(0,0,-1,-1));QFont font=painter.font();font.setFamily(QStringLiteral("Consolas"));
 		font.setPointSizeF(10.0);font.setBold(true);painter.setFont(font);painter.setPen(QColor(255,72,54));
 		painter.drawText(box.adjusted(12,5,-10,-box.height()+27),Qt::AlignLeft|Qt::AlignVCenter,
-			QString("CFD PREPROCESSING DIAGNOSTIC  —  %1 RED SEGMENT%2").arg(geometry_error_firsts_.size()).arg(geometry_error_firsts_.size()==1?"":"S"));
+			QStringLiteral("CFD PREPROCESSING NEEDS ATTENTION"));
 		font.setPointSizeF(8.5);font.setBold(false);painter.setFont(font);painter.setPen(QColor(255,232,228));
 		painter.drawText(box.adjusted(12,29,-10,-6),Qt::AlignLeft|Qt::AlignVCenter|Qt::TextWordWrap,
 			geometry_error_overlay_text_);painter.restore();
