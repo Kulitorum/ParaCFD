@@ -1282,13 +1282,12 @@ namespace paracfd::core
 						return false;
 					}
 					const TopoDS_Face& face=faces[use.source_face_id];
-					TopLoc_Location face_location;
-					(void)BRep_Tool::Surface(face,face_location);
-					const double location_scale=std::abs(
-						face_location.Transformation().ScaleFactor());
-					const double tolerance_mm=std::max({Precision::Confusion(),
-						curve.tolerance_m/kMmToM,
-						BRep_Tool::Tolerance(face)*location_scale});
+					// This argument is the source-chain side of the exact CAD contact
+					// certificate. The projector reads and adds the target occurrence and
+					// face native bounds itself; passing the face bound here as well would
+					// count it twice on exact boundary-pcurve uses.
+					const double tolerance_mm=std::max(Precision::Confusion(),
+						curve.tolerance_m/kMmToM);
 					std::string projection_error;
 					bool used_exact_boundary_pcurve=false;
 					if(!detail::project_trim_valid_face_uv(final_world_points,face,

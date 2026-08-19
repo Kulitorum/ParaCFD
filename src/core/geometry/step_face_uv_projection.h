@@ -14,10 +14,14 @@
 
 namespace paracfd::core::detail
 {
-	// Boundary uses prefer the exact edge pcurve(s).  If no supplied edge has a
-	// pcurve on `face`, the same trim-valid surface-candidate path used for an
-	// interior use is applied.  The operation fails closed when a periodic chart
-	// has no continuous branch or has more than one equally valid branch.
+	// Boundary uses prefer the exact oriented face-edge pcurve(s). For this path,
+	// `geometric_tolerance_mm` is the native source-chain side of the exact CAD
+	// contact certificate; the implementation combines it with the actual target
+	// edge/face native tolerances and independently verifies the target 3D curve
+	// and pcurve-on-surface round trips. If no supplied edge has a pcurve on
+	// `face`, the same trim-valid surface-candidate path used for an interior use
+	// is applied. The operation fails closed when a periodic chart has no
+	// continuous branch or has more than one equally valid branch.
 	bool project_trim_valid_face_uv(
 		const std::vector<gp_Pnt>& world_points,
 		const TopoDS_Face& face,

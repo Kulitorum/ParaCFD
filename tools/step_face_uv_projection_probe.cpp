@@ -3,6 +3,7 @@
 
 #include "core/geometry/step_face_uv_projection.h"
 
+#include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepTools.hxx>
@@ -15,6 +16,7 @@
 #include <TopoDS.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pnt2d.hxx>
+#include <gp_Vec.hxx>
 #include <gp.hxx>
 
 #include <array>
@@ -134,7 +136,11 @@ namespace
 				error.empty() || replay_error.empty() ? "" : " | ", replay_error.c_str());
 
 		const TopoDS_Edge boundary = top_boundary_occurrence(face);
-		const std::vector<gp_Pnt> boundary_points = points_at(face, parameters, kHeight);
+		const std::vector<double> boundary_parameters = {u_min,
+			1.8 * std::numbers::pi, 1.95 * std::numbers::pi,
+			2.05 * std::numbers::pi, 2.2 * std::numbers::pi, u_max};
+		const std::vector<gp_Pnt> boundary_points = points_at(face,
+			boundary_parameters, kHeight);
 		std::vector<std::array<double, 2>> boundary_uv;
 		error.clear();
 		const bool boundary_projected = !boundary.IsNull()
@@ -146,6 +152,84 @@ namespace
 		if (!boundary_projected)
 			std::printf("[exact boundary pcurve] FAIL: %s\n", boundary.IsNull()
 				? "top edge occurrence not found" : error.c_str());
+		return ok;
+	}
+
+	bool combined_native_boundary_tolerance_regression()
+	{
+		const double u_min = 1.5 * std::numbers::pi;
+		const double u_max = 2.5 * std::numbers::pi;
+		const TopoDS_Face face = cylindrical_face(u_min, u_max);
+		TopoDS_Edge boundary = top_boundary_occurrence(face);
+		if (face.IsNull() || boundary.IsNull())
+		{
+			std::printf("[combined native boundary tolerance] FAIL: construction\n");
+			return false;
+		}
+		constexpr double source_native_tolerance = 3.0e-6;
+		constexpr double target_native_tolerance = 2.0e-6;
+		BRep_Builder builder;
+		builder.UpdateEdge(boundary, target_native_tolerance);
+		const double actual_target_tolerance = BRep_Tool::Tolerance(boundary)
+			* std::abs(boundary.Location().Transformation().ScaleFactor());
+		const double actual_face_tolerance = BRep_Tool::Tolerance(face)
+			* std::abs(face.Location().Transformation().ScaleFactor());
+		const double combined_tolerance = source_native_tolerance
+			+ actual_target_tolerance + actual_face_tolerance;
+		const double accepted_offset = 4.0e-6;
+		if (!(accepted_offset > source_native_tolerance)
+			|| !(accepted_offset < combined_tolerance))
+		{
+			std::printf("[combined native boundary tolerance] FAIL: invalid test bounds\n");
+			return false;
+		}
+
+		const std::vector<double> parameters = {u_min, 1.8 * std::numbers::pi,
+			2.2 * std::numbers::pi, u_max};
+		std::vector<gp_Pnt> points = points_at(face, parameters, kHeight);
+		for (gp_Pnt& point : points) point.Translate(gp_Vec(0.0, 0.0, accepted_offset));
+		std::vector<std::array<double, 2>> uv, replay_uv;
+		std::string error, replay_error;
+		bool used_exact = false, replay_used_exact = false;
+		const bool projected = paracfd::core::detail::project_trim_valid_face_uv(
+			points, face, {boundary}, true, source_native_tolerance, uv, error,
+			&used_exact);
+		const bool replayed = paracfd::core::detail::project_trim_valid_face_uv(
+			points, face, {boundary}, true, source_native_tolerance, replay_uv,
+			replay_error, &replay_used_exact);
+		bool accepted = projected && replayed && used_exact && replay_used_exact
+			&& error.empty() && replay_error.empty() && uv == replay_uv
+			&& uv.size() == points.size();
+		const std::string acceptance_error = error.empty() ? replay_error : error;
+		for (std::size_t sample = 0; accepted && sample < uv.size(); ++sample)
+		{
+			const double residual = world_value(face, uv[sample][0], uv[sample][1])
+				.Distance(points[sample]);
+			accepted = residual > source_native_tolerance
+				&& residual <= combined_tolerance;
+		}
+
+		std::vector<gp_Pnt> rejected_points = points_at(face, parameters, kHeight);
+		for (gp_Pnt& point : rejected_points)
+			point.Translate(gp_Vec(0.0, 0.0, 2.0 * combined_tolerance));
+		uv.clear();
+		error.clear();
+		const bool rejected = !paracfd::core::detail::project_trim_valid_face_uv(
+			rejected_points, face, {boundary}, true, source_native_tolerance, uv, error)
+			&& uv.empty()
+			&& error.find("curve-residual-min=") != std::string::npos
+			&& error.find("trim-state IN/ON/OUT/UNKNOWN=") != std::string::npos
+			&& error.find("surface-residual-min=") != std::string::npos
+			&& error.find("curve-surface-residual-min=") != std::string::npos
+			&& error.find("sample-limit=") != std::string::npos;
+		const bool ok = accepted && rejected;
+		std::printf("[combined native boundary tolerance] %s; source=%g target=%g "
+			"combined=%g accepted-offset=%g\n", ok ? "PASS" : "FAIL",
+			source_native_tolerance, actual_target_tolerance, combined_tolerance,
+			accepted_offset);
+		if (!accepted)
+			std::printf("  acceptance diagnostic: %s\n", acceptance_error.c_str());
+		if (!rejected) std::printf("  rejection diagnostic: %s\n", error.c_str());
 		return ok;
 	}
 
@@ -184,8 +268,9 @@ namespace
 int main()
 {
 	const bool success = shifted_periodic_success_regression();
+	const bool native_tolerance = combined_native_boundary_tolerance_regression();
 	const bool failures = full_period_failure_regressions();
 	std::printf("step face UV projection probe: %s\n",
-		success && failures ? "PASS" : "FAIL");
-	return success && failures ? 0 : 1;
+		success && native_tolerance && failures ? "PASS" : "FAIL");
+	return success && native_tolerance && failures ? 0 : 1;
 }

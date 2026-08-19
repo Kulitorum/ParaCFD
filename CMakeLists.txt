@@ -137,6 +137,7 @@ add_library(paracfd_geometry STATIC
 	src/core/geometry/step_face_uv_projection.cpp
 	src/core/geometry/exact_cell_decomposition.cpp
 	src/core/geometry/uv_constraint_mesh.cpp
+	src/core/geometry/occt_trimmed_edge_face.cpp
 	src/core/geometry/occt_surface_normalization.cpp
 	src/core/geometry/naca_step.cpp)
 set_target_properties(paracfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -219,6 +220,22 @@ target_link_libraries(step_face_uv_projection_probe PRIVATE paracfd_geometry)
 paracfd_deploy_occ_dlls(step_face_uv_projection_probe)
 add_test(NAME step_face_uv_projection COMMAND step_face_uv_projection_probe)
 
+# Exact source-edge intervals covered by a trimmed face. The helper uses a
+# fail-closed Boolean Common followed by zero-fuzzy edge mapping and classifies
+# one-/two-sector spans from actual target-face boundary occurrences.
+add_executable(occt_trimmed_edge_face_probe
+	tools/occt_trimmed_edge_face_probe.cpp)
+target_compile_features(occt_trimmed_edge_face_probe PRIVATE cxx_std_20)
+target_include_directories(occt_trimmed_edge_face_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_trimmed_edge_face_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_trimmed_edge_face_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_trimmed_edge_face_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_trimmed_edge_face_probe)
+add_test(NAME occt_trimmed_edge_face COMMAND occt_trimmed_edge_face_probe)
+
 # These topology checks intentionally use local CAD exports that are not repository
 # fixtures. Keep the clean-checkout test graph independent of them while allowing the
 # corrected and known-bad A/B models to be checked explicitly during development.
@@ -248,7 +265,7 @@ if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
 		Test-Data/MiniripFixed.step --quality-only --expect-components 1
 		--expect-warnings 0 --expect-contacts 235 --expect-source-edges 412
 		--expect-shared-nodes-min 1 --expect-partial-overlaps 2
-		--expect-uv-failures 34)
+		--expect-uv-failures 32)
 	set_tests_properties(step_topology_fixed_full PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 

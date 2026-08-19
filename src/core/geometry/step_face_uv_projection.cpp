@@ -11,7 +11,9 @@
 #include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <TopAbs_State.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopoDS.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -39,6 +41,8 @@ namespace paracfd::core::detail
 			double u_tolerance = 0.0;
 			double v_tolerance = 0.0;
 			double uv_tolerance = 0.0;
+			double supplied_geometric_tolerance = 0.0;
+			double face_native_tolerance = 0.0;
 			double geometric_tolerance = 0.0;
 			bool u_periodic = false;
 			bool v_periodic = false;
@@ -93,9 +97,12 @@ namespace paracfd::core::detail
 				error = "face has an invalid location scale";
 				return false;
 			}
+			chart.supplied_geometric_tolerance = std::max(0.0,
+				geometric_tolerance_mm);
+			chart.face_native_tolerance = std::max(0.0,
+				BRep_Tool::Tolerance(face) * location_scale);
 			chart.geometric_tolerance = std::max({Precision::Confusion(),
-				std::max(0.0, geometric_tolerance_mm),
-				std::max(0.0, BRep_Tool::Tolerance(face) * location_scale)});
+				chart.supplied_geometric_tolerance, chart.face_native_tolerance});
 			const double u_scale = std::max({1.0, std::abs(chart.u_min), std::abs(chart.u_max)});
 			const double v_scale = std::max({1.0, std::abs(chart.v_min), std::abs(chart.v_max)});
 			const double epsilon_u = 128.0 * std::numeric_limits<double>::epsilon() * u_scale;
@@ -390,10 +397,81 @@ namespace paracfd::core::detail
 			failure
 		};
 
+		struct BoundaryPcurveAudit
+		{
+			std::size_t projected_parameters = 0;
+			std::size_t in_range_parameters = 0;
+			std::size_t trim_in = 0;
+			std::size_t trim_on = 0;
+			std::size_t trim_out = 0;
+			std::size_t trim_unknown = 0;
+			std::size_t accepted = 0;
+			double minimum_curve_residual = std::numeric_limits<double>::infinity();
+			double minimum_surface_residual = std::numeric_limits<double>::infinity();
+			double minimum_curve_surface_residual =
+				std::numeric_limits<double>::infinity();
+		};
+
+		bool is_oriented_face_edge_occurrence(const TopoDS_Face& face,
+			const TopoDS_Edge& edge)
+		{
+			for (TopExp_Explorer occurrence(face, TopAbs_EDGE); occurrence.More();
+				occurrence.Next())
+				if (TopoDS::Edge(occurrence.Current()).IsEqual(edge)) return true;
+			return false;
+		}
+
+		double native_edge_tolerance(const TopoDS_Edge& edge)
+		{
+			const double scale = std::abs(edge.Location().Transformation().ScaleFactor());
+			if (!std::isfinite(scale) || !(scale > std::numeric_limits<double>::min()))
+				return std::numeric_limits<double>::infinity();
+			return std::max(0.0, BRep_Tool::Tolerance(edge)) * scale;
+		}
+
+		void count_trim_state(BoundaryPcurveAudit& audit, TopAbs_State state)
+		{
+			switch (state)
+			{
+			case TopAbs_IN: ++audit.trim_in; break;
+			case TopAbs_ON: ++audit.trim_on; break;
+			case TopAbs_OUT: ++audit.trim_out; break;
+			default: ++audit.trim_unknown; break;
+			}
+		}
+
+		std::string boundary_audit_message(std::size_t sample,
+			const BoundaryPcurveAudit& audit, double sample_tolerance,
+			double curve_surface_tolerance)
+		{
+			std::ostringstream message;
+			message << "exact boundary pcurve rejected sample " << sample
+				<< " (parameters=" << audit.projected_parameters
+				<< ", in-range=" << audit.in_range_parameters
+				<< ", curve-residual-min=" << audit.minimum_curve_residual << " mm"
+				<< ", trim-state IN/ON/OUT/UNKNOWN=" << audit.trim_in << "/"
+				<< audit.trim_on << "/" << audit.trim_out << "/"
+				<< audit.trim_unknown
+				<< ", surface-residual-min=" << audit.minimum_surface_residual << " mm"
+				<< ", curve-surface-residual-min="
+				<< audit.minimum_curve_surface_residual << " mm"
+				<< ", sample-limit=" << sample_tolerance << " mm"
+				<< ", curve-surface-limit=" << curve_surface_tolerance << " mm)";
+			return message.str();
+		}
+
 		PcurveStatus project_exact_pcurve(const std::vector<gp_Pnt>& world_points,
 			const TopoDS_Face& face, const TopoDS_Edge& edge, const SurfaceChart& chart,
 			std::vector<std::array<double, 2>>& result, std::string& error)
 		{
+			// CurveOnSurface is authoritative only for the exact oriented occurrence
+			// supplied by the face wire. IsSame() would lose orientation and could select
+			// the wrong pcurve branch of a seam, so require IsEqual() membership first.
+			if (!is_oriented_face_edge_occurrence(face, edge))
+			{
+				error = "exact boundary edge is not an oriented occurrence of the face";
+				return PcurveStatus::failure;
+			}
 			double pcurve_first = 0.0, pcurve_last = 0.0;
 			const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(
 				edge, face, pcurve_first, pcurve_last);
@@ -433,9 +511,26 @@ namespace paracfd::core::detail
 			const double parameter_tolerance = std::max(Precision::PConfusion(),
 				128.0 * std::numeric_limits<double>::epsilon()
 					* std::max({1.0, std::abs(first), std::abs(last)}));
+			const double edge_tolerance = native_edge_tolerance(edge);
+			if (!std::isfinite(edge_tolerance))
+			{
+				error = "exact boundary edge has an invalid native tolerance";
+				return PcurveStatus::failure;
+			}
+			// The public chain was evaluated on the certified source curve. A distinct
+			// target trim occurrence may differ from it by the sum of their native CAD
+			// bounds. The caller-supplied bound is the source-chain side of that exact
+			// certificate; the target edge and face bounds are read here, where their
+			// actual OCCT occurrences are available.
+			const double sample_tolerance = std::max(Precision::Confusion(),
+				chart.supplied_geometric_tolerance + edge_tolerance
+					+ chart.face_native_tolerance);
+			const double curve_surface_tolerance = std::max(Precision::Confusion(),
+				edge_tolerance + chart.face_native_tolerance);
 			CandidateTable candidates(world_points.size());
 			for (std::size_t sample = 0; sample < world_points.size(); ++sample)
 			{
+				BoundaryPcurveAudit audit;
 				gp_Pnt local_point = world_points[sample];
 				local_point.Transform(curve_location.Transformation().Inverted());
 				GeomAPI_ProjectPointOnCurve projection(local_point, curve, first, last);
@@ -444,42 +539,65 @@ namespace paracfd::core::detail
 					parameters.push_back(projection.Parameter(candidate));
 				gp_Pnt first_world = curve->Value(first);
 				first_world.Transform(curve_location.Transformation());
-				if (first_world.Distance(world_points[sample]) <= chart.geometric_tolerance)
+				if (first_world.Distance(world_points[sample]) <= sample_tolerance)
 					parameters.push_back(first);
 				gp_Pnt last_world = curve->Value(last);
 				last_world.Transform(curve_location.Transformation());
-				if (last_world.Distance(world_points[sample]) <= chart.geometric_tolerance)
+				if (last_world.Distance(world_points[sample]) <= sample_tolerance)
 					parameters.push_back(last);
 				std::sort(parameters.begin(), parameters.end());
 				parameters.erase(std::unique(parameters.begin(), parameters.end(),
 					[&](double a, double b) { return std::abs(a - b) <= parameter_tolerance; }),
 					parameters.end());
+				audit.projected_parameters = parameters.size();
 				for (double parameter : parameters)
 				{
 					if (!std::isfinite(parameter) || parameter < first - parameter_tolerance
 						|| parameter > last + parameter_tolerance) continue;
+					++audit.in_range_parameters;
 					gp_Pnt curve_world = curve->Value(parameter);
 					curve_world.Transform(curve_location.Transformation());
 					const double curve_distance = curve_world.Distance(world_points[sample]);
-					if (!std::isfinite(curve_distance)
-						|| curve_distance > chart.geometric_tolerance) continue;
+					if (std::isfinite(curve_distance))
+						audit.minimum_curve_residual = std::min(
+							audit.minimum_curve_residual, curve_distance);
 					const gp_Pnt2d uv = pcurve->Value(parameter);
-					if (trim_state(face, uv.X(), uv.Y(), chart.uv_tolerance) != TopAbs_ON)
-						continue;
-					double surface_distance = 0.0;
-					if (!re_evaluates_to(chart, world_points[sample], uv.X(), uv.Y(),
-						surface_distance)) continue;
+					if (!std::isfinite(uv.X()) || !std::isfinite(uv.Y())) continue;
+					count_trim_state(audit,
+						trim_state(face, uv.X(), uv.Y(), chart.uv_tolerance));
+					gp_Pnt surface_world = chart.surface->Value(uv.X(), uv.Y());
+					surface_world.Transform(chart.location.Transformation());
+					const double surface_distance =
+						surface_world.Distance(world_points[sample]);
+					const double curve_surface_distance =
+						surface_world.Distance(curve_world);
+					if (std::isfinite(surface_distance))
+						audit.minimum_surface_residual = std::min(
+							audit.minimum_surface_residual, surface_distance);
+					if (std::isfinite(curve_surface_distance))
+						audit.minimum_curve_surface_residual = std::min(
+							audit.minimum_curve_surface_residual, curve_surface_distance);
+					if (!std::isfinite(curve_distance) || !std::isfinite(surface_distance)
+						|| !std::isfinite(curve_surface_distance)
+						|| curve_distance > sample_tolerance
+						|| surface_distance > sample_tolerance
+						|| curve_surface_distance > curve_surface_tolerance) continue;
+					// The pcurve is itself the face wire's oriented boundary definition.
+					// Requiring the generic classifier to rediscover TopAbs_ON is redundant
+					// and rejects valid endpoint/tolerance-near values. Membership, range,
+					// SameParameter/SameRange and both independent 3D checks above are the
+					// stronger proof; the classifier state remains in failure diagnostics.
+					++audit.accepted;
 					insert_candidate(candidates[sample], {uv.X(), uv.Y(),
-						std::max(curve_distance, surface_distance)}, chart.u_tolerance,
+						std::max({curve_distance, surface_distance,
+							curve_surface_distance})}, chart.u_tolerance,
 						chart.v_tolerance);
 				}
 				sort_candidates(candidates[sample]);
 				if (candidates[sample].empty())
 				{
-					std::ostringstream message;
-					message << "exact boundary pcurve has no trim-valid value for sample "
-						<< sample;
-					error = message.str();
+					error = boundary_audit_message(sample, audit, sample_tolerance,
+						curve_surface_tolerance);
 					return PcurveStatus::failure;
 				}
 			}
