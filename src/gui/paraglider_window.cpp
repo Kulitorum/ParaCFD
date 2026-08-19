@@ -731,7 +731,8 @@ namespace paracfd::gui
 		if(s.mean_force_ready)solver+=QString("\nmean-force drift/RMS %1 / %2 over adjacent windows").arg(s.mean_force_drift,0,'g',3).arg(s.mean_force_rms,0,'g',3);
 		if(paused_wall_ms_>=0&&!s.playing)solver+=QString("\n%1 after %2 s wall time from Build").arg(s.auto_paused?(pause_label.isEmpty()?"AUTO-PAUSED":QString("AUTO-PAUSED — %1").arg(pause_label)):"PAUSED").arg(paused_wall_ms_/1000.0,0,'f',2);
 		solver_readout_->setText(solver);
-		QString loads=half_wing_display_?"WHOLE-WING LOADS (mirrored from simulated +Y half)\n":"";if(!have_surface_results)loads+="AERODYNAMIC LOADS PENDING\nThe zero-time projection pressure is an initialization impulse.\nWaiting for the first evolved CFD step.";else if(s.viscous_loads_valid){loads+=QString("TOTAL LOADS (pressure + smooth-wall skin friction)\nD +X %1 N   S +Y %2 N   L +Z %3 N\npressure D/S/L %4 / %5 / %6 N\nskin D/S/L %7 / %8 / %9 N\nΔCp colour ±%10 (99% |value|)").arg(s.total_force.x,0,'f',3).arg(s.total_force.y,0,'f',3).arg(s.total_force.z,0,'f',3).arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.viscous_force.x,0,'f',3).arg(s.viscous_force.y,0,'f',3).arg(s.viscous_force.z,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd/Cs/Cl %1 / %2 / %3 (pressure %4 / %5 / %6)").arg(s.cd,0,'f',4).arg(s.cs,0,'f',4).arg(s.cl,0,'f',4).arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}else{loads+=QString("PRESSURE-ONLY LOADS (wall model has not stepped)\nD +X %1 N   S +Y %2 N   L +Z %3 N\nΔCp colour ±%4 (99% |value|)").arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd,p %1   Cs,p %2   Cl,p %3").arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}
+		constexpr double standard_gravity=9.80665;
+		QString loads=half_wing_display_?"WHOLE-WING LOADS (mirrored from simulated +Y half)\n":"";if(!have_surface_results)loads+="AERODYNAMIC LOADS PENDING\nThe zero-time projection pressure is an initialization impulse.\nWaiting for the first evolved CFD step.";else if(s.viscous_loads_valid){loads+=QString("TOTAL LOADS (pressure + smooth-wall skin friction)\nD +X %1 N   S +Y %2 N   L +Z %3 N\n1 g supported-mass equivalent %4 kg\npressure D/S/L %5 / %6 / %7 N\nskin D/S/L %8 / %9 / %10 N\nΔCp colour ±%11 (99% |value|)").arg(s.total_force.x,0,'f',3).arg(s.total_force.y,0,'f',3).arg(s.total_force.z,0,'f',3).arg(s.total_force.z/standard_gravity,0,'f',3).arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.viscous_force.x,0,'f',3).arg(s.viscous_force.y,0,'f',3).arg(s.viscous_force.z,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd/Cs/Cl %1 / %2 / %3 (pressure %4 / %5 / %6)").arg(s.cd,0,'f',4).arg(s.cs,0,'f',4).arg(s.cl,0,'f',4).arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}else{loads+=QString("PRESSURE-ONLY LOADS (wall model has not stepped)\nD +X %1 N   S +Y %2 N   L +Z %3 N\n1 g supported-mass equivalent %4 kg\nΔCp colour ±%5 (99% |value|)").arg(s.pressure_force.x,0,'f',3).arg(s.pressure_force.y,0,'f',3).arg(s.pressure_force.z,0,'f',3).arg(s.pressure_force.z/standard_gravity,0,'f',3).arg(s.cp_max,0,'f',3);if(s.coefficients_valid)loads+=QString("\nCd,p %1   Cs,p %2   Cl,p %3").arg(s.cd_pressure,0,'f',4).arg(s.cs_pressure,0,'f',4).arg(s.cl_pressure,0,'f',4);}
 		if(s.auto_paused&&have_surface_results)
 		{
 			Vec3d result_force=s.viscous_loads_valid?s.total_force:s.pressure_force;
@@ -749,9 +750,9 @@ namespace paracfd::gui
 					QString("PARTIAL FINAL-WINDOW MEAN (%1%) — NOT CONVERGED")
 						.arg(100.0*s.bounded_mean_force_coverage,0,'f',1);
 			}
-			loads+=QString("\n\nRUN RESULT: %1\n<D/S/L> %2 / %3 / %4 N")
+			loads+=QString("\n\nRUN RESULT: %1\n<D/S/L> %2 / %3 / %4 N\n<1 g supported-mass equivalent> %5 kg")
 				.arg(result_label).arg(result_force.x,0,'f',3).arg(result_force.y,0,'f',3)
-				.arg(result_force.z,0,'f',3);
+				.arg(result_force.z,0,'f',3).arg(result_force.z/standard_gravity,0,'f',3);
 			const double reference_area=reference_area_->value();
 			const double dynamic_pressure=0.5*rho_->value()*speed_->value()*speed_->value();
 			if(reference_area>0&&dynamic_pressure>0)
