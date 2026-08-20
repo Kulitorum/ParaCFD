@@ -254,6 +254,51 @@ namespace
 			"identical UV input and constraints did not produce bitwise-identical topology");
 	}
 
+	void exact_existing_vertex_provenance_test()
+	{
+		const auto make_mesh = []
+		{
+			return UvConstraintMesh({
+				{{0.0, 0.0}}, {{1.0, 0.0}}, {{1.0, 1.0}}, {{0.0, 1.0}}},
+				{{{0, 1, 2}}, {{0, 2, 3}}}, {1.1e-9});
+		};
+		// This coordinate is farther than the UV vertex tolerance from vertex zero,
+		// yet lies within that tolerance of both incident bottom/diagonal edges.  A
+		// coordinate-only insertion is therefore intentionally ambiguous.
+		const UvPoint p{2.0e-9, 1.0e-9};
+		std::string error;
+		UvConstraintMesh ambiguous = make_mesh();
+		const std::vector<UvConstraintSample> coordinate_only{
+			{p, 800}, {{1.0, 0.0}, 801}};
+		require(!ambiguous.insert_polyline(coordinate_only, 55, &error)
+			&& error.find("multiple distinct mesh edges") != std::string::npos,
+			"manufactured near-vertex sample did not exercise ambiguous UV classification");
+
+		UvConstraintMesh claimed = make_mesh();
+		const std::vector<UvConstraintSample> exact_claim{
+			{p, 800, 0}, {{1.0, 0.0}, 801, 1}};
+		require(claimed.insert_polyline(exact_claim, 55, &error),
+			"exact existing-vertex provenance was not honored: " + error);
+		const auto first = claimed.vertex_for_topology_id(800);
+		const auto second = claimed.vertex_for_topology_id(801);
+		require(first && second && *first == 0 && *second == 1
+			&& claimed.edge_has_constraint(0, 1, 55),
+			"exact provenance did not claim/tag the named original vertices");
+
+		UvConstraintMesh boundary = make_mesh();
+		const std::vector<UvConstraintSample> exact_boundary{
+			{p, 802, UvConstraintSample::no_existing_vertex, true},
+			{{1.0, 0.0}, 803, 1, true}};
+		require(boundary.insert_polyline(exact_boundary, 56, &error),
+			"exact trim-boundary provenance did not disambiguate boundary/interior edges: "
+			+ error);
+		const auto boundary_split = boundary.vertex_for_topology_id(802);
+		const auto boundary_end = boundary.vertex_for_topology_id(803);
+		require(boundary_split && boundary_end
+			&& boundary.edge_has_constraint(*boundary_split, *boundary_end, 56),
+			"trim-boundary provenance did not split/tag the unique boundary edge");
+	}
+
 	void parameter_tolerance_test()
 	{
 		std::string error;
@@ -414,6 +459,8 @@ int main()
 		std::puts("[uv-constraint] holes and trim boundaries: PASS");
 		deterministic_replay_test();
 		std::puts("[uv-constraint] deterministic replay: PASS");
+		exact_existing_vertex_provenance_test();
+		std::puts("[uv-constraint] exact existing-vertex provenance: PASS");
 		parameter_tolerance_test();
 		std::puts("[uv-constraint] scale-aware parameter tolerances: PASS");
 		geometric_validation_test();

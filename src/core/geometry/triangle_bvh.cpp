@@ -204,6 +204,10 @@ namespace paracfd::core
 		primitives_.clear(); nodes_.clear(); triangles_.clear(); triangles_by_id_.clear();
 		edge_certificate_by_triangle_.clear();edge_contact_tolerance_=0.0;edge_clearance_tolerance_=0.0;
 		validate_topology_vertex_coordinates(mesh);
+		if(mesh.has_malformed_cad_edge_atom_provenance())
+			throw std::invalid_argument("TriangleBvh CAD edge atom sidecar has "+
+				std::to_string(mesh.triangle_cad_edge_atom_ids.size())+" IDs for "+
+				std::to_string(mesh.indices.size())+" triangle half-edges");
 		leaf_size = std::max<std::uint32_t>(1, leaf_size);
 		primitives_.reserve(mesh.triangle_count());
 		triangles_by_id_.resize(mesh.triangle_count());
@@ -276,6 +280,7 @@ namespace paracfd::core
 		struct IndexedHalfEdge
 		{
 			std::uint64_t vertex_key=0;
+			std::uint64_t atom_id=TriMesh::kNoCadEdgeAtomId;
 			std::uint32_t triangle=0;
 			std::uint8_t local_edge=0;
 			std::size_t flat_index=0;
@@ -318,7 +323,9 @@ namespace paracfd::core
 				const std::uint32_t topology_b=mesh.topology_vertex_id(ib);
 				const std::uint32_t lo=std::min(topology_a,topology_b),hi=std::max(topology_a,topology_b);
 				const std::size_t flat=3*static_cast<std::size_t>(triangle_id)+edge;
-				half_edges.push_back({(static_cast<std::uint64_t>(lo)<<32)|hi,triangle_id,static_cast<std::uint8_t>(edge),flat});
+				half_edges.push_back({(static_cast<std::uint64_t>(lo)<<32)|hi,
+					mesh.cad_edge_atom_id(triangle_id,edge),triangle_id,
+					static_cast<std::uint8_t>(edge),flat});
 				hard_unknown[flat]=mesh.cad_edge_provenance_unknown(triangle_id,edge)?1u:0u;
 				if(hard_unknown[flat])certificate_for(flat).unknown_reason=
 					FabricEdgeUnknownReason::source_provenance;
@@ -332,13 +339,16 @@ namespace paracfd::core
 		std::sort(half_edges.begin(),half_edges.end(),[](const IndexedHalfEdge& a,const IndexedHalfEdge& b)
 		{
 			if(a.vertex_key!=b.vertex_key)return a.vertex_key<b.vertex_key;
+			if(a.atom_id!=b.atom_id)return a.atom_id<b.atom_id;
 			if(a.triangle!=b.triangle)return a.triangle<b.triangle;
 			return a.local_edge<b.local_edge;
 		});
 
 		for(std::size_t first=0;first<half_edges.size();)
 		{
-			std::size_t last=first+1;while(last<half_edges.size()&&half_edges[last].vertex_key==half_edges[first].vertex_key)++last;
+			std::size_t last=first+1;while(last<half_edges.size()
+				&&half_edges[last].vertex_key==half_edges[first].vertex_key
+				&&half_edges[last].atom_id==half_edges[first].atom_id)++last;
 			if(last-first>1)
 			{
 				const std::size_t incidence=last-first;
@@ -549,11 +559,12 @@ namespace paracfd::core
 			const std::uint32_t source_cad_incidence=std::max<std::uint32_t>(
 				reported_cad_incidence,periodic_cad_seam?2u:0u);
 			const double source_cad_tolerance=std::max(0.0,mesh.cad_edge_tolerance(edge.triangle,edge.local_edge));
-			// Independently modelled/sewn BRep faces need not share a TopoDS_Edge ID, and a
-			// rib edge may terminate in the interior of a skin face.  OCCT's tolerance on
-			// the source CAD edge is the certified positional uncertainty for both cases.
-			// Use it for the geometric contact predicate regardless of edge-ID equality;
-			// identity remains provenance, not a prerequisite for physical contact.
+			// A BRep edge tolerance certifies the representation of that edge; it does not
+			// certify contact with a different edge or with the interior of another face.
+			// Exact STEP preprocessing supplies explicit contact atoms for those cases.
+			// The legacy/preview path may recover differently tessellated segments of the
+			// *same* TopoDS_Edge, but must never turn proximity between distinct CAD
+			// entities into an attachment and thereby close a real opening.
 			const double source_contact_tolerance=std::max(edge_contact_tolerance_,source_cad_tolerance);
 			double query_tolerance=edge_clearance_tolerance_;if(source_cad_id!=TriMesh::kNoCadEdgeId)
 			{
@@ -571,7 +582,9 @@ namespace paracfd::core
 				if(candidate==edge.triangle||candidate>=valid_triangle.size()||!valid_triangle[candidate])continue;
 				const BvhTriangle& candidate_triangle=triangles_by_id_[candidate];
 				double interior_lo=0,interior_hi=0;
-				if(triangle_interior_interval(a,b,candidate_triangle,source_contact_tolerance,interior_lo,interior_hi))
+				if(source_cad_id==TriMesh::kNoCadEdgeId&&
+					triangle_interior_interval(a,b,candidate_triangle,source_contact_tolerance,
+						interior_lo,interior_hi))
 				{
 					interior_witnesses.push_back({interior_lo,interior_hi,candidate});cuts.push_back(interior_lo);cuts.push_back(interior_hi);
 				}
@@ -579,6 +592,8 @@ namespace paracfd::core
 				{
 					const std::size_t peer=3*static_cast<std::size_t>(candidate)+candidate_edge;
 					const auto peer_points=edge_points(peer);const std::uint32_t peer_cad_id=mesh.cad_edge_id(candidate,candidate_edge);
+					if(source_cad_id!=TriMesh::kNoCadEdgeId&&peer_cad_id!=source_cad_id)
+						continue;
 					double pair_tolerance=source_contact_tolerance;
 					if(peer_cad_id!=TriMesh::kNoCadEdgeId)
 						pair_tolerance=std::max(pair_tolerance,

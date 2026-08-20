@@ -38,8 +38,21 @@ namespace paracfd::core
 
 	struct UvConstraintSample
 	{
+		static constexpr std::uint32_t no_existing_vertex =
+			std::numeric_limits<std::uint32_t>::max();
+
 		UvPoint uv;
 		std::uint32_t topology_id = UvVertex::no_topology_id;
+		// Exact face-local provenance for an original triangulation vertex.  When
+		// present insertion claims this existing vertex directly; it is never used as
+		// a proximity hint.  Existing vertex indices remain stable because insertion
+		// only appends vertices.
+		std::uint32_t existing_vertex = no_existing_vertex;
+		// Exact caller provenance that this sample belongs to the trimmed face
+		// boundary. It is used only to disambiguate a tolerance classification which
+		// simultaneously hits one boundary edge and one or more interior edges; it
+		// never turns a point that hit no edge into a boundary point.
+		bool boundary_sample = false;
 	};
 
 	struct UvConstraintOptions

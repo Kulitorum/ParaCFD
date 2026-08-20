@@ -83,6 +83,12 @@ namespace paracfd::core
 		static constexpr std::uint64_t kNoCadContactId = std::numeric_limits<std::uint64_t>::max();
 		std::vector<std::uint64_t> triangle_cad_edge_contact_ids; // 3 * triangle_count
 		std::vector<std::uint32_t> triangle_cad_edge_certified_fan_degrees; // 3 * triangle_count
+		// Exact conformer-atom identity, including fan-one/open-boundary atoms.  This
+		// sidecar is deliberately separate from the public contact certificate above:
+		// fan-one atoms are not contacts, but two different exact CAD atoms must not be
+		// collapsed merely because they have the same endpoint topology IDs.
+		static constexpr std::uint64_t kNoCadEdgeAtomId = std::numeric_limits<std::uint64_t>::max();
+		std::vector<std::uint64_t> triangle_cad_edge_atom_ids; // optional 3 * triangle_count
 
 		std::array<float, 3> bbox_min{ { 0.0f, 0.0f, 0.0f } };
 		std::array<float, 3> bbox_max{ { 0.0f, 0.0f, 0.0f } };
@@ -114,6 +120,15 @@ namespace paracfd::core
 		{
 			return !indices.empty() && triangle_cad_edge_contact_ids.size() == indices.size()
 				&& triangle_cad_edge_certified_fan_degrees.size() == indices.size();
+		}
+		bool has_cad_edge_atom_provenance() const
+		{
+			return !indices.empty() && triangle_cad_edge_atom_ids.size() == indices.size();
+		}
+		bool has_malformed_cad_edge_atom_provenance() const
+		{
+			return !triangle_cad_edge_atom_ids.empty()
+				&& triangle_cad_edge_atom_ids.size() != indices.size();
 		}
 
 		CadEdgeProvenanceState cad_edge_provenance_state(std::size_t triangle,
@@ -193,6 +208,14 @@ namespace paracfd::core
 			return has_cad_edge_contact_provenance() && half_edge < 3
 				&& offset < triangle_cad_edge_certified_fan_degrees.size()
 				? triangle_cad_edge_certified_fan_degrees[offset] : 0u;
+		}
+
+		std::uint64_t cad_edge_atom_id(std::size_t triangle, unsigned half_edge) const
+		{
+			const std::size_t offset = 3 * triangle + half_edge;
+			return has_cad_edge_atom_provenance() && half_edge < 3
+				&& offset < triangle_cad_edge_atom_ids.size()
+				? triangle_cad_edge_atom_ids[offset] : kNoCadEdgeAtomId;
 		}
 
 		std::array<float, 3> bbox_size() const

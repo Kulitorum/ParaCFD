@@ -138,6 +138,11 @@ add_library(paracfd_geometry STATIC
 	src/core/geometry/exact_cell_decomposition.cpp
 	src/core/geometry/uv_constraint_mesh.cpp
 	src/core/geometry/occt_trimmed_edge_face.cpp
+	src/core/geometry/occt_contact_atomizer.cpp
+	src/core/geometry/occt_contact_topology_builder.cpp
+	src/core/geometry/occt_face_triangulation_conformer.cpp
+	src/core/geometry/occt_conforming_mesh_builder.cpp
+	src/core/geometry/occt_conforming_import_assembly.cpp
 	src/core/geometry/occt_surface_normalization.cpp
 	src/core/geometry/naca_step.cpp)
 set_target_properties(paracfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -236,6 +241,89 @@ target_link_libraries(occt_trimmed_edge_face_probe PRIVATE paracfd_geometry)
 paracfd_deploy_occ_dlls(occt_trimmed_edge_face_probe)
 add_test(NAME occt_trimmed_edge_face COMMAND occt_trimmed_edge_face_probe)
 
+# Atomize exact partial/shared CAD contacts into deterministic physical curve
+# intervals before any face is retriangulated.  This probe covers openings,
+# split edges, nonlinear reciprocal mappings, T/fan junctions and periodic seams.
+add_executable(occt_contact_atomizer_probe
+	tools/occt_contact_atomizer_probe.cpp)
+target_compile_features(occt_contact_atomizer_probe PRIVATE cxx_std_20)
+target_include_directories(occt_contact_atomizer_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_contact_atomizer_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_contact_atomizer_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_contact_atomizer_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_contact_atomizer_probe)
+add_test(NAME occt_contact_atomizer COMMAND occt_contact_atomizer_probe)
+
+# Translate the complete oriented BRep wire topology plus exact edge/face interval
+# certificates into deterministic contact atoms. This is the sole topology index
+# consumed by the conforming face-mesh stage.
+add_executable(occt_contact_topology_builder_probe
+	tools/occt_contact_topology_builder_probe.cpp)
+target_compile_features(occt_contact_topology_builder_probe PRIVATE cxx_std_20)
+target_include_directories(occt_contact_topology_builder_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_contact_topology_builder_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_contact_topology_builder_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_contact_topology_builder_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_contact_topology_builder_probe)
+add_test(NAME occt_contact_topology_builder
+	COMMAND occt_contact_topology_builder_probe)
+
+# Insert the atomized contact chains into each face's existing trimmed UV mesh,
+# re-evaluate every output node on the exact located surface, and preserve shared
+# physical topology IDs across independent face-local render vertices.
+add_executable(occt_face_triangulation_conformer_probe
+	tools/occt_face_triangulation_conformer_probe.cpp)
+target_compile_features(occt_face_triangulation_conformer_probe PRIVATE cxx_std_20)
+target_include_directories(occt_face_triangulation_conformer_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_face_triangulation_conformer_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_face_triangulation_conformer_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_face_triangulation_conformer_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_face_triangulation_conformer_probe)
+add_test(NAME occt_face_triangulation_conformer
+	COMMAND occt_face_triangulation_conformer_probe)
+
+# Assemble every atomized CAD boundary/interior contact as exact UV constraints,
+# conform all source-face meshes transactionally, and decode the resulting CAD and
+# contact provenance without leaking OCCT into the CFD core.
+add_executable(occt_conforming_mesh_builder_probe
+	tools/occt_conforming_mesh_builder_probe.cpp)
+target_compile_features(occt_conforming_mesh_builder_probe PRIVATE cxx_std_20)
+target_include_directories(occt_conforming_mesh_builder_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_conforming_mesh_builder_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_conforming_mesh_builder_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_conforming_mesh_builder_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_conforming_mesh_builder_probe)
+add_test(NAME occt_conforming_mesh_builder
+	COMMAND occt_conforming_mesh_builder_probe)
+
+# Convert the conformed face-local meshes into the OCCT-free TriMesh/contact
+# contracts, assigning global topology IDs and verifying exact contact incidence.
+add_executable(occt_conforming_import_assembly_probe
+	tools/occt_conforming_import_assembly_probe.cpp)
+target_compile_features(occt_conforming_import_assembly_probe PRIVATE cxx_std_20)
+target_include_directories(occt_conforming_import_assembly_probe PRIVATE ${OCC_INCLUDE_DIR})
+if(EXISTS "${OCC_DEPRECATED_DIR}")
+	target_include_directories(occt_conforming_import_assembly_probe PRIVATE ${OCC_DEPRECATED_DIR})
+endif()
+target_compile_definitions(occt_conforming_import_assembly_probe PRIVATE
+	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
+target_link_libraries(occt_conforming_import_assembly_probe PRIVATE paracfd_geometry)
+paracfd_deploy_occ_dlls(occt_conforming_import_assembly_probe)
+add_test(NAME occt_conforming_import_assembly
+	COMMAND occt_conforming_import_assembly_probe)
+
 # These topology checks intentionally use local CAD exports that are not repository
 # fixtures. Keep the clean-checkout test graph independent of them while allowing the
 # corrected and known-bad A/B models to be checked explicitly during development.
@@ -252,21 +340,44 @@ if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
 		endif()
 	endforeach()
 	add_test(NAME step_topology_known_bad COMMAND step_import_provenance_probe
-		Test-Data/Two-Cells.stp --quality-only --expect-components 3
-		--expect-warnings 2 --expect-contacts 47 --expect-source-edges 72
-		--expect-uv-failures 6)
+		Test-Data/Two-Cells.stp --quality-only --expect-components 5
+		--expect-warnings 4 --expect-contacts 41 --expect-source-edges 66
+		--expect-edge-face-spans 18 --expect-uv-failures 0)
 	set_tests_properties(step_topology_known_bad PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	# Until exact interval atomization lands, these are intentionally disconnected
+	# contact-graph counts caused by retained unresolved intervals. They are not CAD
+	# geometry warnings and must not be relaxed back into false whole-edge contacts.
 	add_test(NAME step_topology_fixed_small COMMAND step_import_provenance_probe
-		Test-Data/Two-Cells-fixed.stp --quality-only --expect-components 1
-		--expect-warnings 0 --expect-contacts 51 --expect-source-edges 76
-		--expect-shared-nodes-min 1 --expect-uv-failures 6)
+		Test-Data/Two-Cells-fixed.stp --quality-only --expect-components 3
+		--expect-warnings 2 --expect-contacts 45 --expect-source-edges 70
+		--expect-shared-nodes-min 1 --expect-edge-face-spans 18 --expect-uv-failures 0
+		--expect-edge-face-span 130 4 -316.19216104219998 -29.568793656477339 interior 2 partial
+		--expect-edge-face-span 130 4 -16.449786237252113 0 interior 2 partial)
 	set_tests_properties(step_topology_fixed_small PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 	add_test(NAME step_topology_fixed_full COMMAND step_import_provenance_probe
-		Test-Data/MiniripFixed.step --quality-only --expect-components 1
-		--expect-warnings 0 --expect-contacts 235 --expect-source-edges 412
+		Test-Data/MiniripFixed.step --quality-only --expect-components 18
+		--expect-warnings 17 --expect-contacts 195 --expect-source-edges 369
 		--expect-shared-nodes-min 1 --expect-partial-overlaps 2
-		--expect-uv-failures 32)
+		--expect-edge-face-spans 172 --expect-uv-failures 0
+		--expect-edge-face-span 1085 47 0 16.449786237154626 interior 2 partial
+		--expect-edge-face-span 1085 47 29.568793656626433 316.19216104219998 interior 2 partial)
 	set_tests_properties(step_topology_fixed_full PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	add_test(NAME step_trimmed_intervals_meshing_invariant COMMAND
+		occt_trimmed_edge_face_probe --compare-meshed-step
+		Test-Data/MiniripFixed.step 1085 47)
+	set_tests_properties(step_trimmed_intervals_meshing_invariant PROPERTIES
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+	# The normal GUI deliberately uses the explicitly labelled qualitative preview.
+	# These local fixtures guard its practical contract: preprocessing must remain
+	# usable without silently switching the detailed CAD checker into approximate mode.
+	add_test(NAME preview_eb_fixed_small COMMAND paraglider_case_probe
+		--step Test-Data/Two-Cells-fixed.stp --steps 0 --max-levels 1
+		--qualitative-preview-eb)
+	add_test(NAME preview_eb_fixed_full COMMAND paraglider_case_probe
+		--step Test-Data/MiniripFixed.step --steps 0 --max-levels 1
+		--qualitative-preview-eb)
+	set_tests_properties(preview_eb_fixed_small preview_eb_fixed_full PROPERTIES
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 add_executable(mesh_selection_probe

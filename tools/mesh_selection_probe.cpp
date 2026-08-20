@@ -35,6 +35,7 @@ int main()
 		source.triangle_cad_edge_is_periodic_seam.assign(6,0);
 		source.triangle_cad_edge_contact_ids = {10,20,30,40,50,60};
 		source.triangle_cad_edge_certified_fan_degrees.assign(6,2);
+		source.triangle_cad_edge_atom_ids = {110,120,130,140,150,160};
 		source.bbox_min = {0,0,0}; source.bbox_max = {101,1,0};
 
 		const std::vector<std::uint32_t> excluded{1};
@@ -51,6 +52,10 @@ int main()
 		require(selected.mesh.has_cad_edge_provenance(), "CAD edge provenance was not retained");
 		require(selected.mesh.has_cad_edge_contact_provenance(),
 			"CAD contact provenance was not retained");
+		require(selected.mesh.has_cad_edge_atom_provenance()
+			&& selected.mesh.triangle_cad_edge_atom_ids
+				== std::vector<std::uint64_t>({110,120,130}),
+			"exact CAD atom identity was not retained");
 		require(std::abs(selected.mesh.bbox_max[0] - 1.0f) < 1e-7f,
 			"excluded geometry still influenced bbox");
 		TriMesh legacy;

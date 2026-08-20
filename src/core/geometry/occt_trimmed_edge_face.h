@@ -7,8 +7,10 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,27 @@ namespace paracfd::core
 		// Adjacent boundary intervals are intentionally not coalesced across an occurrence
 		// transition, even when their counts and sector classifications are identical.
 		std::uint8_t boundary_occurrence_count = 0;
+		// Zero-based deterministic wire-edge occurrence IDs in the target face's
+		// traversal.  Unlike TopoDS_Edge::IsSame, these distinguish the two oriented
+		// pcurve branches of a periodic seam. Only the first
+		// boundary_occurrence_count entries are active.
+		std::array<std::uint32_t, 2> target_boundary_occurrence_ids{{
+			std::numeric_limits<std::uint32_t>::max(),
+			std::numeric_limits<std::uint32_t>::max() }};
+		std::array<std::int8_t, 2> target_boundary_orientations{{ 0, 0 }};
+		// Raw parameters on each oriented target edge occurrence corresponding to
+		// this source interval. Parameter order follows increasing source parameter;
+		// it may therefore be descending on a reversed target occurrence.
+		std::array<double, 2> target_parameter_begin{{ 0.0, 0.0 }};
+		std::array<double, 2> target_parameter_end{{ 0.0, 0.0 }};
+		std::array<double, 2> target_mapping_source_begin{{ 0.0, 0.0 }};
+		std::array<double, 2> target_mapping_source_end{{ 0.0, 0.0 }};
+		// Additional, local geometric bound certified by the exact CAD operation
+		// which produced this covered source subspan.  For BRepAlgoAPI_Common this
+		// is the maximum native tolerance of only the result edges overlapping this
+		// interval.  It is not a search/fuzzy tolerance and must never be used to
+		// create contacts outside this already-certified interval.
+		double exact_operation_tolerance = 0.0;
 	};
 
 	struct OcctTrimmedEdgeFaceCommonResult

@@ -259,10 +259,16 @@ namespace paracfd::core
 		// to reproduce a numerical failure independently of preprocessing. This is
 		// intentionally absent from product configuration and defaults fail-closed.
 		bool allow_unverified_same_fragment_patches_for_diagnostics = false;
-		// Optional OCC-free callback seam.  The function implementation lives in
+		// Optional OCC-free callback seam for the OCCT General Fuse development
+		// oracle.  Production preprocessing uses the deterministic finite-triangle
+		// LocalSurfaceArrangement for complex cells; merely supplying this callback
+		// must not divert those cells through General Fuse.  Tests and offline
+		// diagnostics that intentionally exercise the oracle must also enable the
+		// explicit flag below.  The function implementation lives in
 		// paracfd_geometry; libparacfd stores and consumes only value-type results,
 		// preserving the one-way CAD -> static-topology dependency.
 		ExactCellDecomposer exact_cell_decomposer = nullptr;
+		bool use_exact_cell_decomposer_as_development_oracle = false;
 	};
 
 	EmbeddedBoundary build_embedded_boundary(const TriMesh& mesh, const TriangleBvh& bvh,

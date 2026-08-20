@@ -272,6 +272,7 @@ namespace
 			{{0,0,0},{2,1,1}}, 1.0, 1, 1);
 		EmbeddedBoundaryBuildOptions options;
 		options.exact_cell_decomposer = decomposer;
+		options.use_exact_cell_decomposer_as_development_oracle = true;
 		options.min_volume_fraction = 0.05;
 		options.retain_signed_bracketed_small_roots_for_face_state = retain;
 		return build_amr_embedded_boundary_atlas(hierarchy, mesh, bvh, options);

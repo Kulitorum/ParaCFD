@@ -19,11 +19,14 @@
 // deliberately ignoring standalone STEP wires/edges.
 #include "core/geometry/step_import.h"
 #include "core/geometry/step_face_uv_projection.h"
+#include "core/geometry/occt_conforming_import_assembly.h"
+#include "core/geometry/occt_conforming_mesh_builder.h"
+#include "core/geometry/occt_contact_topology_builder.h"
+#include "core/geometry/occt_trimmed_edge_face.h"
 
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
-#include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
 #include <Bnd_Box.hxx>
@@ -33,7 +36,6 @@
 #include <IFSelect_ReturnStatus.hxx>
 #include <IntTools_CommonPrt.hxx>
 #include <IntTools_EdgeEdge.hxx>
-#include <IntTools_EdgeFace.hxx>
 #include <IntTools_Range.hxx>
 #include <NCollection_IndexedDataMap.hxx>
 #include <NCollection_IndexedMap.hxx>
@@ -49,7 +51,6 @@
 #include <StepRepr_RepresentationItem.hxx>
 #include <TCollection_HAsciiString.hxx>
 #include <TopAbs_Orientation.hxx>
-#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -69,11 +70,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -81,6 +84,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -183,72 +187,16 @@ namespace paracfd::core
 
 		struct ContactCertificationStats
 		{
-			std::uint64_t free_edges=0;
+			std::uint64_t audited_edges=0;
 			std::uint64_t candidate_pairs=0;
-			std::uint64_t inttools_calls=0;
-			std::uint64_t midpoint_classifications=0;
+			std::uint64_t exact_aabb_candidate_pairs=0;
+			std::uint64_t exact_trimmed_calls=0;
+			std::uint64_t unresolved_pairs=0;
 			std::uint64_t certified_pairs=0;
 			double index_seconds=0.0;
 			double query_seconds=0.0;
-			double inttools_seconds=0.0;
-			double accepted_inttools_seconds=0.0;
-			double classifier_seconds=0.0;
+			double exact_trimmed_seconds=0.0;
 		};
-
-		bool full_edge_common_with_face(const TopoDS_Edge& edge,const TopoDS_Face& face,
-			double fuzzy_tolerance,std::uint32_t& added_sectors,ContactCertificationStats* stats)
-		{
-			BRepAdaptor_Curve curve(edge);
-			const double first=curve.FirstParameter(),last=curve.LastParameter();
-			if(!std::isfinite(first)||!std::isfinite(last)||!(last>first))return false;
-
-			IntTools_EdgeFace intersection;
-			intersection.SetEdge(edge);intersection.SetFace(face);intersection.SetRange(first,last);
-			intersection.SetFuzzyValue(fuzzy_tolerance);
-			const auto inttools_begin=std::chrono::steady_clock::now();intersection.Perform();
-			const double inttools_elapsed=std::chrono::duration<double>(
-				std::chrono::steady_clock::now()-inttools_begin).count();
-			if(stats)
-			{
-				++stats->inttools_calls;
-				stats->inttools_seconds+=inttools_elapsed;
-			}
-			if(!intersection.IsDone())return false;
-			std::vector<std::pair<double,double>> ranges;
-			for(NCollection_Sequence<IntTools_CommonPrt>::Iterator common(
-				intersection.CommonParts());common.More();common.Next())
-			{
-				if(common.Value().Type()!=TopAbs_EDGE)continue;
-				double lo=0.0,hi=0.0;common.Value().Range1(lo,hi);if(hi<lo)std::swap(lo,hi);
-				lo=std::max(lo,first);hi=std::min(hi,last);if(hi>lo)ranges.emplace_back(lo,hi);
-			}
-			if(ranges.empty())return false;
-			std::sort(ranges.begin(),ranges.end());
-			const double parameter_tolerance=std::max(Precision::PConfusion(),
-				64.0*std::numeric_limits<double>::epsilon()*std::max({1.0,std::abs(first),std::abs(last)}));
-			double covered=first;
-			for(const auto& range:ranges)
-			{
-				if(range.first>covered+parameter_tolerance)return false;
-				covered=std::max(covered,range.second);
-			}
-			if(covered<last-parameter_tolerance)return false;
-
-			const gp_Pnt midpoint=curve.Value(0.5*(first+last));
-			const auto classifier_begin=std::chrono::steady_clock::now();
-			const BRepClass_FaceClassifier classifier(face,midpoint,fuzzy_tolerance,true);
-			if(stats)
-			{
-				++stats->midpoint_classifications;
-				stats->classifier_seconds+=std::chrono::duration<double>(
-					std::chrono::steady_clock::now()-classifier_begin).count();
-			}
-			if(classifier.State()==TopAbs_IN)added_sectors=2;
-			else if(classifier.State()==TopAbs_ON)added_sectors=1;
-			else return false;
-			if(stats)stats->accepted_inttools_seconds+=inttools_elapsed;
-			return true;
-		}
 
 		struct NumericAabb
 		{
@@ -280,13 +228,13 @@ namespace paracfd::core
 			}
 		}
 
-		struct FaceTriangleAabb
+		struct FaceAabb
 		{
 			NumericAabb bounds;
 			std::uint32_t face_id=0;
 		};
 
-		struct FaceTriangleAabbNode
+		struct FaceAabbNode
 		{
 			NumericAabb bounds;
 			std::uint32_t begin=0;
@@ -295,112 +243,55 @@ namespace paracfd::core
 			int right=-1;
 		};
 
-		// A face's single whole-shape AABB is extremely loose for a curved canopy and
-		// admitted thousands of unrelated edge/face pairs.  The already-created OCCT
-		// tessellation supplies a much tighter spatial broad phase.  Each triangle box
-		// is enlarged by its recorded meshing deflection plus the CAD face tolerance;
-		// therefore an exact point on the represented face remains a candidate.  This
-		// BVH never certifies contact: IntTools_EdgeFace below remains the sole exact
-		// decision, so nearby fabric is not joined.
-		class FaceTriangleAabbIndex
+		// Contact discovery must be independent of the display/CFD tessellation.  One
+		// exact OCCT geometry box per trimmed face is looser than triangle boxes, but it
+		// cannot silently lose a CAD contact when the meshing deflection changes.  The
+		// BVH is only a broad phase: zero-fuzzy trimmed-face Common remains the sole
+		// contact decision. AddOptimal(..., useTriangulation=false,
+		// useShapeTolerance=true) includes native CAD tolerances without consulting an
+		// existing Poly_Triangulation.
+		class FaceAabbIndex
 		{
 		public:
-			explicit FaceTriangleAabbIndex(const std::vector<TopoDS_Face>& faces)
+			explicit FaceAabbIndex(const std::vector<TopoDS_Face>& faces)
 			{
 				for(std::size_t face_id=0;face_id<faces.size();++face_id)
 				{
-					const TopoDS_Face& face=faces[face_id];
-					TopLoc_Location location;
-					const Handle(Poly_Triangulation) triangulation=BRep_Tool::Triangulation(face,location);
-					if(triangulation.IsNull()||triangulation->NbTriangles()<=0)
-					{
-						Bnd_Box bounds;BRepBndLib::AddOptimal(face,bounds,false,true);
-						NumericAabb numeric;
-						if(numeric_aabb(bounds,numeric))fallback_.push_back({numeric,
-							static_cast<std::uint32_t>(face_id)});
-						else unconditional_faces_.push_back(static_cast<std::uint32_t>(face_id));
-						continue;
-					}
-					const gp_Trsf transform=location.Transformation();
-					const double scale=std::abs(transform.ScaleFactor());
-					const double deflection=std::isfinite(triangulation->Deflection())
-						?std::max(0.0,triangulation->Deflection())*scale:0.0;
-					const double padding=deflection+std::max(0.0,BRep_Tool::Tolerance(face))*scale
-						+Precision::Confusion();
-					for(Standard_Integer triangle_id=1;triangle_id<=triangulation->NbTriangles();++triangle_id)
-					{
-						Standard_Integer node[3];triangulation->Triangle(triangle_id).Get(node[0],node[1],node[2]);
-						FaceTriangleAabb primitive;primitive.face_id=static_cast<std::uint32_t>(face_id);
-						for(int corner=0;corner<3;++corner)
-						{
-							gp_Pnt point=triangulation->Node(node[corner]);point.Transform(transform);
-							const double coordinate[3]={point.X(),point.Y(),point.Z()};
-							for(int axis=0;axis<3;++axis)
-							{
-								primitive.bounds.lo[axis]=std::min(primitive.bounds.lo[axis],coordinate[axis]-padding);
-								primitive.bounds.hi[axis]=std::max(primitive.bounds.hi[axis],coordinate[axis]+padding);
-							}
-						}
-						triangles_.push_back(std::move(primitive));
-					}
+					Bnd_Box bounds;BRepBndLib::AddOptimal(faces[face_id],bounds,false,true);
+					bounds.Enlarge(Precision::Confusion());
+					NumericAabb numeric;
+					if(numeric_aabb(bounds,numeric))faces_.push_back({numeric,
+						static_cast<std::uint32_t>(face_id)});
+					else unconditional_faces_.push_back(static_cast<std::uint32_t>(face_id));
 				}
-				nodes_.reserve(triangles_.empty()?0:2*triangles_.size());
-				if(!triangles_.empty())root_=build(0,static_cast<std::uint32_t>(triangles_.size()));
+				nodes_.reserve(faces_.empty()?0:2*faces_.size());
+				if(!faces_.empty())root_=build(0,static_cast<std::uint32_t>(faces_.size()));
 			}
 
 			std::vector<std::uint32_t> query(const Bnd_Box& edge_bounds)const
 			{
 				NumericAabb edge;
-				if(numeric_aabb(edge_bounds,edge))return query(std::vector<NumericAabb>{edge});
 				std::vector<std::uint32_t> result=unconditional_faces_;
-				for(const auto& triangle:triangles_)result.push_back(triangle.face_id);
-				for(const auto& fallback:fallback_)result.push_back(fallback.face_id);
+				const bool bounded=numeric_aabb(edge_bounds,edge);
+				if(bounded&&root_>=0)query_node(root_,edge,result);
+				else if(!bounded)
+					for(const FaceAabb& face:faces_)result.push_back(face.face_id);
 				std::sort(result.begin(),result.end());
 				result.erase(std::unique(result.begin(),result.end()),result.end());
-				return result;
-			}
-
-			std::vector<std::uint32_t> query(const std::vector<NumericAabb>& edge_segments)const
-			{
-				std::vector<std::uint32_t> result;
-				bool first_segment=true;
-				for(const NumericAabb& edge:edge_segments)
-				{
-					std::vector<std::uint32_t> segment_faces=unconditional_faces_;
-					if(root_>=0)query_node(root_,edge,segment_faces);
-					for(const auto& fallback:fallback_)if(aabb_overlaps(edge,fallback.bounds))
-						segment_faces.push_back(fallback.face_id);
-					std::sort(segment_faces.begin(),segment_faces.end());
-					segment_faces.erase(std::unique(segment_faces.begin(),segment_faces.end()),
-						segment_faces.end());
-					if(first_segment)
-					{
-						result=std::move(segment_faces);first_segment=false;
-					}
-					else
-					{
-						std::vector<std::uint32_t> common;
-						common.reserve(std::min(result.size(),segment_faces.size()));
-						std::set_intersection(result.begin(),result.end(),segment_faces.begin(),
-							segment_faces.end(),std::back_inserter(common));
-						result=std::move(common);
-						if(result.empty())break;
-					}
-				}
 				return result;
 			}
 
 		private:
 			int build(std::uint32_t begin,std::uint32_t end)
 			{
-				FaceTriangleAabbNode node;node.begin=begin;node.count=end-begin;
+				FaceAabbNode node;node.begin=begin;node.count=end-begin;
 				NumericAabb centres;
 				for(std::uint32_t index=begin;index<end;++index)
 				{
-					add_aabb(node.bounds,triangles_[index].bounds);
+					add_aabb(node.bounds,faces_[index].bounds);
 					for(int axis=0;axis<3;++axis)
 					{
-						const double centre=0.5*(triangles_[index].bounds.lo[axis]+triangles_[index].bounds.hi[axis]);
+						const double centre=0.5*(faces_[index].bounds.lo[axis]+faces_[index].bounds.hi[axis]);
 						centres.lo[axis]=std::min(centres.lo[axis],centre);
 						centres.hi[axis]=std::max(centres.hi[axis],centre);
 					}
@@ -410,8 +301,8 @@ namespace paracfd::core
 				int axis=0;for(int candidate=1;candidate<3;++candidate)
 					if(centres.hi[candidate]-centres.lo[candidate]>centres.hi[axis]-centres.lo[axis])axis=candidate;
 				const std::uint32_t middle=begin+(end-begin)/2;
-				std::nth_element(triangles_.begin()+begin,triangles_.begin()+middle,triangles_.begin()+end,
-					[axis](const FaceTriangleAabb& a,const FaceTriangleAabb& b)
+				std::nth_element(faces_.begin()+begin,faces_.begin()+middle,faces_.begin()+end,
+					[axis](const FaceAabb& a,const FaceAabb& b)
 					{return a.bounds.lo[axis]+a.bounds.hi[axis]<b.bounds.lo[axis]+b.bounds.hi[axis];});
 				nodes_[node_id].left=build(begin,middle);nodes_[node_id].right=build(middle,end);
 				nodes_[node_id].count=0;return node_id;
@@ -419,14 +310,14 @@ namespace paracfd::core
 
 			void query_node(int node_id,const NumericAabb& edge,std::vector<std::uint32_t>& result)const
 			{
-				const FaceTriangleAabbNode& node=nodes_[node_id];
+				const FaceAabbNode& node=nodes_[node_id];
 				if(!aabb_overlaps(edge,node.bounds))return;
 				if(node.count>0)
 				{
 					for(std::uint32_t offset=0;offset<node.count;++offset)
 					{
-						const FaceTriangleAabb& triangle=triangles_[node.begin+offset];
-						if(aabb_overlaps(edge,triangle.bounds))result.push_back(triangle.face_id);
+						const FaceAabb& face=faces_[node.begin+offset];
+						if(aabb_overlaps(edge,face.bounds))result.push_back(face.face_id);
 					}
 					return;
 				}
@@ -434,49 +325,10 @@ namespace paracfd::core
 			}
 
 			int root_=-1;
-			std::vector<FaceTriangleAabb> triangles_;
-			std::vector<FaceTriangleAabbNode> nodes_;
-			std::vector<FaceTriangleAabb> fallback_;
+			std::vector<FaceAabb> faces_;
+			std::vector<FaceAabbNode> nodes_;
 			std::vector<std::uint32_t> unconditional_faces_;
 		};
-
-		std::vector<NumericAabb> edge_polyline_aabbs(const TopoDS_Edge& edge,
-			const TopoDS_Face& owner_face)
-		{
-			TopLoc_Location location;
-			const Handle(Poly_Triangulation) triangulation=BRep_Tool::Triangulation(owner_face,location);
-			if(triangulation.IsNull())return {};
-			Handle(Poly_PolygonOnTriangulation) polygon=
-				BRep_Tool::PolygonOnTriangulation(edge,triangulation,location);
-			if(polygon.IsNull()||polygon->NbNodes()<2)return {};
-			const gp_Trsf transform=location.Transformation();
-			const double scale=std::abs(transform.ScaleFactor());
-			const double polygon_deflection=std::isfinite(polygon->Deflection())
-				?std::max(0.0,polygon->Deflection())*scale:0.0;
-			const double mesh_deflection=std::isfinite(triangulation->Deflection())
-				?std::max(0.0,triangulation->Deflection())*scale:0.0;
-			const double padding=std::max(polygon_deflection,mesh_deflection)
-				+std::max({0.0,BRep_Tool::Tolerance(edge),BRep_Tool::Tolerance(owner_face)})*scale
-				+Precision::Confusion();
-			std::vector<NumericAabb> result;
-			result.reserve(static_cast<std::size_t>(polygon->NbNodes()-1));
-			for(Standard_Integer segment=1;segment<polygon->NbNodes();++segment)
-			{
-				NumericAabb bounds;
-				for(const Standard_Integer polygon_node:{polygon->Node(segment),polygon->Node(segment+1)})
-				{
-					gp_Pnt point=triangulation->Node(polygon_node);point.Transform(transform);
-					const double coordinate[3]={point.X(),point.Y(),point.Z()};
-					for(int axis=0;axis<3;++axis)
-					{
-						bounds.lo[axis]=std::min(bounds.lo[axis],coordinate[axis]-padding);
-						bounds.hi[axis]=std::max(bounds.hi[axis],coordinate[axis]+padding);
-					}
-				}
-				result.push_back(bounds);
-			}
-			return result;
-		}
 
 		struct EdgeFaceCandidate
 		{
@@ -484,16 +336,130 @@ namespace paracfd::core
 			TopoDS_Face face;
 			std::uint32_t edge_id=0;
 			std::uint32_t face_id=0;
-			double fuzzy=0.0;
+			double source_parameter_first=0.0;
+			double source_parameter_last=0.0;
+			std::array<double,3> source_endpoint_first_m{};
+			std::array<double,3> source_endpoint_last_m{};
 		};
 
 		struct EdgeFaceCandidateResult
 		{
+			struct ExactInterval
+			{
+				std::uint32_t source_edge_id=TriMesh::kNoCadEdgeId;
+				std::uint32_t target_face_id=0;
+				double source_parameter_first=0.0;
+				double source_parameter_last=0.0;
+				OcctTrimmedEdgeFaceInterval interval;
+			};
 			bool common=false;
 			std::uint32_t added_sectors=0;
+			std::vector<StepCadContactGraph::UnresolvedEdgeFaceSpan> unresolved_spans;
+			std::vector<ExactInterval> exact_intervals;
 			ContactCertificationStats stats;
-			std::exception_ptr error;
 		};
+
+		StepEdgeFaceSpanKind public_span_kind(OcctFaceIntervalLocation location)
+		{
+			return location==OcctFaceIntervalLocation::boundary
+				?StepEdgeFaceSpanKind::trim_boundary:StepEdgeFaceSpanKind::face_interior;
+		}
+
+		StepCadContactGraph::UnresolvedEdgeFaceSpan make_unresolved_edge_face_span(
+			const EdgeFaceCandidate& candidate,double begin,double end,
+			double parameter_tolerance,
+			StepEdgeFaceSpanKind kind,std::uint8_t sectors,StepEdgeFaceSpanIssue issue,
+			std::string reason)
+		{
+			if(end<begin)std::swap(begin,end);
+			const double first=candidate.source_parameter_first;
+			const double last=candidate.source_parameter_last;
+			begin=std::clamp(begin,first,last);end=std::clamp(end,first,last);
+			auto endpoint=[&](double parameter,const std::array<double,3>& exact_endpoint)
+			{
+				if(parameter==first||parameter==last)return exact_endpoint;
+				const gp_Pnt point=BRepAdaptor_Curve(candidate.edge).Value(parameter);
+				return std::array<double,3>{{point.X()*kMmToM,point.Y()*kMmToM,
+					point.Z()*kMmToM}};
+			};
+			StepCadContactGraph::UnresolvedEdgeFaceSpan result;
+			result.source_edge_id=candidate.edge_id;
+			result.target_face_id=candidate.face_id;
+			result.source_parameter_begin=begin;
+			result.source_parameter_end=end;
+			result.source_parameter_tolerance=parameter_tolerance;
+			result.endpoint_begin_m=endpoint(begin,begin==first
+				?candidate.source_endpoint_first_m:candidate.source_endpoint_last_m);
+			result.endpoint_end_m=endpoint(end,end==first
+				?candidate.source_endpoint_first_m:candidate.source_endpoint_last_m);
+			result.kind=kind;result.target_sector_count=sectors;result.issue=issue;
+			result.reason=std::move(reason);
+			return result;
+		}
+
+		std::string joined_errors(const std::vector<std::string>& errors)
+		{
+			std::ostringstream result;
+			for(std::size_t error=0;error<errors.size();++error)
+			{
+				if(error)result<<"; ";
+				result<<errors[error];
+			}
+			return result.str();
+		}
+
+		bool normalized_intervals_cover_full_source(
+			const OcctTrimmedEdgeFaceCommonResult& result)
+		{
+			if(result.intervals.empty())return false;
+			const double tolerance=std::max(result.normalized_parameter_tolerance,
+				128.0*std::numeric_limits<double>::epsilon());
+			double covered=0.0;
+			for(const OcctTrimmedEdgeFaceInterval& interval:result.intervals)
+			{
+				if(!std::isfinite(interval.begin)||!std::isfinite(interval.end)
+					||interval.begin>interval.end||interval.begin>covered+tolerance)return false;
+				covered=std::max(covered,interval.end);
+			}
+			return result.intervals.front().begin<=tolerance&&covered>=1.0-tolerance;
+		}
+
+		void append_exact_interval_diagnostics(const EdgeFaceCandidate& candidate,
+			const OcctTrimmedEdgeFaceCommonResult& exact,StepEdgeFaceSpanIssue issue,
+			const std::string& reason,EdgeFaceCandidateResult& result)
+		{
+			double source_first=exact.source_parameter_first;
+			double source_last=exact.source_parameter_last;
+			if(!std::isfinite(source_first)||!std::isfinite(source_last)
+				||!(source_last>source_first))
+			{
+				source_first=candidate.source_parameter_first;
+				source_last=candidate.source_parameter_last;
+			}
+			const double range=source_last-source_first;
+			double parameter_tolerance=exact.normalized_parameter_tolerance*range;
+			if(!std::isfinite(parameter_tolerance)||parameter_tolerance<0.0)
+				parameter_tolerance=0.0;
+			for(const OcctTrimmedEdgeFaceInterval& interval:exact.intervals)
+			{
+				const double begin=source_first+range*interval.begin;
+				const double end=source_first+range*interval.end;
+				auto span=make_unresolved_edge_face_span(candidate,
+					begin,end,parameter_tolerance,public_span_kind(interval.location),interval.target_sector_count,
+					issue,reason);
+				span.target_boundary_occurrence_count=interval.boundary_occurrence_count;
+				span.target_boundary_occurrence_ids=interval.target_boundary_occurrence_ids;
+				span.target_boundary_orientations=interval.target_boundary_orientations;
+				span.target_parameter_begin=interval.target_parameter_begin;
+				span.target_parameter_end=interval.target_parameter_end;
+				result.unresolved_spans.push_back(std::move(span));
+			}
+			if(result.unresolved_spans.empty())
+				result.unresolved_spans.push_back(make_unresolved_edge_face_span(candidate,
+					source_first,source_last,
+					parameter_tolerance,
+					StepEdgeFaceSpanKind::unclassified,0,issue,reason));
+		}
 
 		unsigned contact_worker_count(std::size_t jobs)
 		{
@@ -512,15 +478,27 @@ namespace paracfd::core
 		void add_contact_stats(ContactCertificationStats& destination,
 			const ContactCertificationStats& source)
 		{
-			destination.inttools_calls+=source.inttools_calls;
-			destination.midpoint_classifications+=source.midpoint_classifications;
-			destination.inttools_seconds+=source.inttools_seconds;
-			destination.accepted_inttools_seconds+=source.accepted_inttools_seconds;
-			destination.classifier_seconds+=source.classifier_seconds;
+			destination.exact_trimmed_calls+=source.exact_trimmed_calls;
+			destination.unresolved_pairs+=source.unresolved_pairs;
+			destination.exact_trimmed_seconds+=source.exact_trimmed_seconds;
+		}
+
+		auto unresolved_span_key(const StepCadContactGraph::UnresolvedEdgeFaceSpan& span)
+		{
+			return std::tuple{span.source_edge_id,span.target_face_id,
+				span.source_parameter_begin,span.source_parameter_end,
+				span.source_parameter_tolerance,span.endpoint_begin_m,span.endpoint_end_m,
+				static_cast<unsigned>(span.kind),
+				static_cast<unsigned>(span.target_sector_count),
+				static_cast<unsigned>(span.target_boundary_occurrence_count),
+				span.target_boundary_occurrence_ids,span.target_boundary_orientations,
+				span.target_parameter_begin,span.target_parameter_end,
+				static_cast<unsigned>(span.issue),span.reason};
 		}
 
 		std::uint64_t contact_certificate_hash(
-			const std::vector<CadEdgeContactCertificate>& certificates)
+			const std::vector<CadEdgeContactCertificate>& certificates,
+			const std::vector<StepCadContactGraph::UnresolvedEdgeFaceSpan>& unresolved_spans)
 		{
 			std::uint64_t hash=1469598103934665603ull;
 			auto append=[&](std::uint64_t value)
@@ -536,24 +514,55 @@ namespace paracfd::core
 				const CadEdgeContactCertificate& certificate=certificates[edge];
 				append(edge);append(certificate.contact_id);append(certificate.fan_degree);
 				append(certificate.target_face_ids.size());
-				for(const std::uint32_t face:certificate.target_face_ids)append(face);
+				for(std::size_t target=0;target<certificate.target_face_ids.size();++target)
+				{
+					append(certificate.target_face_ids[target]);
+					append(target<certificate.target_sector_counts.size()
+						?certificate.target_sector_counts[target]:0u);
+				}
+			}
+			append(unresolved_spans.size());
+			for(const auto& span:unresolved_spans)
+			{
+				append(span.source_edge_id);append(span.target_face_id);
+				append(std::bit_cast<std::uint64_t>(span.source_parameter_begin));
+				append(std::bit_cast<std::uint64_t>(span.source_parameter_end));
+				append(std::bit_cast<std::uint64_t>(span.source_parameter_tolerance));
+				for(double value:span.endpoint_begin_m)append(std::bit_cast<std::uint64_t>(value));
+				for(double value:span.endpoint_end_m)append(std::bit_cast<std::uint64_t>(value));
+				append(static_cast<unsigned>(span.kind));append(span.target_sector_count);
+				append(span.target_boundary_occurrence_count);
+				for(std::uint32_t value:span.target_boundary_occurrence_ids)append(value);
+				for(std::int8_t value:span.target_boundary_orientations)
+					append(static_cast<std::uint8_t>(value));
+				for(double value:span.target_parameter_begin)
+					append(std::bit_cast<std::uint64_t>(value));
+				for(double value:span.target_parameter_end)
+					append(std::bit_cast<std::uint64_t>(value));
+				append(static_cast<unsigned>(span.issue));
+				append(span.reason.size());for(unsigned char byte:span.reason)append(byte);
 			}
 			return hash;
 		}
 
-		std::vector<CadEdgeContactCertificate> certify_edge_face_contacts(
+		struct EdgeFaceContactCertification
+		{
+			std::vector<CadEdgeContactCertificate> certificates;
+			std::vector<StepCadContactGraph::UnresolvedEdgeFaceSpan> unresolved_spans;
+			std::vector<EdgeFaceCandidateResult::ExactInterval> exact_intervals;
+		};
+
+		EdgeFaceContactCertification certify_edge_face_contacts(
 			const ShapeIndexedMap& shape_edges,const ShapeAncestorMap& edge_faces,
 			const std::vector<TopoDS_Face>& faces)
 		{
-			std::vector<CadEdgeContactCertificate> result(
-				static_cast<std::size_t>(shape_edges.Extent()));
+			EdgeFaceContactCertification output;
+			auto& result=output.certificates;
+			result.resize(static_cast<std::size_t>(shape_edges.Extent()));
 			ContactCertificationStats measured_stats;
 			ContactCertificationStats* stats=std::getenv("PARACFD_STEP_CONTACT_STATS")?&measured_stats:nullptr;
 			const auto index_begin=std::chrono::steady_clock::now();
-			const FaceTriangleAabbIndex face_index(faces);
-			std::vector<Bnd_Box> exact_face_bounds(faces.size());
-			for(std::size_t face=0;face<faces.size();++face)
-				BRepBndLib::AddOptimal(faces[face],exact_face_bounds[face],false,true);
+			const FaceAabbIndex face_index(faces);
 			if(stats)stats->index_seconds=std::chrono::duration<double>(
 				std::chrono::steady_clock::now()-index_begin).count();
 			std::vector<EdgeFaceCandidate> candidates;
@@ -563,19 +572,30 @@ namespace paracfd::core
 				const TopoDS_Edge edge=TopoDS::Edge(shape_edges(edge_index));
 				const std::uint32_t owner_sectors=edge_faces.Contains(edge)
 					?static_cast<std::uint32_t>(edge_faces.FindFromKey(edge).Size()):0u;
-				// Shared/manifold and periodic edges already carry exact TopoDS incidence.
-				// The missing information is a nominally free edge terminating on a face
-				// that does not own the same topological edge.
-				if(owner_sectors!=1)continue;
+				// Native owner incidence is only the starting fan. A shared edge can also
+				// terminate on a third face interior (for example two skin patches plus a
+				// rib), so every nondegenerate owned edge must audit non-owner faces.
+				if(owner_sectors==0||BRep_Tool::Degenerated(edge))continue;
 				const std::uint32_t edge_id=static_cast<std::uint32_t>(edge_index-1);
+				BRepAdaptor_Curve source_curve(edge);
+				const double source_first=source_curve.FirstParameter();
+				const double source_last=source_curve.LastParameter();
+				if(!std::isfinite(source_first)||!std::isfinite(source_last)
+					||!(source_last>source_first))continue;
+				const gp_Pnt source_point_first=source_curve.Value(source_first);
+				const gp_Pnt source_point_last=source_curve.Value(source_last);
+				const std::array<double,3> source_endpoint_first_m{{
+					source_point_first.X()*kMmToM,source_point_first.Y()*kMmToM,
+					source_point_first.Z()*kMmToM}};
+				const std::array<double,3> source_endpoint_last_m{{
+					source_point_last.X()*kMmToM,source_point_last.Y()*kMmToM,
+					source_point_last.Z()*kMmToM}};
 				fan_degree[edge_id]=owner_sectors;
-				if(stats)++stats->free_edges;
+				if(stats)++stats->audited_edges;
 				Bnd_Box edge_bounds;BRepBndLib::AddOptimal(edge,edge_bounds,false,true);
-				const TopoDS_Face owner_face=TopoDS::Face(edge_faces.FindFromKey(edge).First());
-				const std::vector<NumericAabb> segment_bounds=edge_polyline_aabbs(edge,owner_face);
+				edge_bounds.Enlarge(Precision::Confusion());
 				const auto query_begin=std::chrono::steady_clock::now();
-				const std::vector<std::uint32_t> candidate_faces=segment_bounds.empty()
-					?face_index.query(edge_bounds):face_index.query(segment_bounds);
+				const std::vector<std::uint32_t> candidate_faces=face_index.query(edge_bounds);
 				if(stats)
 				{
 					stats->query_seconds+=std::chrono::duration<double>(
@@ -585,11 +605,10 @@ namespace paracfd::core
 				for(const std::uint32_t face_id:candidate_faces)
 				{
 					const TopoDS_Face& face=faces[face_id];
-					if(is_owner_face(edge_faces,edge,face)
-						||edge_bounds.IsOut(exact_face_bounds[face_id]))continue;
-					const double fuzzy=std::max({Precision::Confusion(),BRep_Tool::Tolerance(edge),
-						BRep_Tool::Tolerance(face)});
-					candidates.push_back({edge,face,edge_id,face_id,fuzzy});
+					if(is_owner_face(edge_faces,edge,face))continue;
+					if(stats)++stats->exact_aabb_candidate_pairs;
+					candidates.push_back({edge,face,edge_id,face_id,source_first,
+						source_last,source_endpoint_first_m,source_endpoint_last_m});
 				}
 			}
 
@@ -607,11 +626,99 @@ namespace paracfd::core
 					EdgeFaceCandidateResult& candidate_result=candidate_results[candidate_id];
 					try
 					{
-						candidate_result.common=full_edge_common_with_face(candidate.edge,candidate.face,
-							candidate.fuzzy,candidate_result.added_sectors,
-							stats?&candidate_result.stats:nullptr);
+						const auto trimmed_begin=std::chrono::steady_clock::now();
+						const OcctTrimmedEdgeFaceCommonResult exact=
+							exact_trimmed_edge_face_common(candidate.edge,candidate.face);
+						++candidate_result.stats.exact_trimmed_calls;
+						candidate_result.stats.exact_trimmed_seconds+=std::chrono::duration<double>(
+							std::chrono::steady_clock::now()-trimmed_begin).count();
+						if(!exact.valid())
+						{
+							++candidate_result.stats.unresolved_pairs;
+							append_exact_interval_diagnostics(candidate,exact,
+								StepEdgeFaceSpanIssue::certification_failure,
+								"exact trimmed edge/face certification failed: "+joined_errors(exact.errors),
+								candidate_result);
+							continue;
+						}
+						if(exact.coverage==OcctTrimmedEdgeCoverage::none)continue;
+						for(const OcctTrimmedEdgeFaceInterval& interval:exact.intervals)
+							candidate_result.exact_intervals.push_back({candidate.edge_id,
+								candidate.face_id,exact.source_parameter_first,
+								exact.source_parameter_last,interval});
+						if(exact.coverage==OcctTrimmedEdgeCoverage::partial)
+						{
+							++candidate_result.stats.unresolved_pairs;
+							append_exact_interval_diagnostics(candidate,exact,
+								StepEdgeFaceSpanIssue::partial_coverage,
+								"exact trimmed face covers only part of the source edge",
+								candidate_result);
+							continue;
+						}
+						if(!normalized_intervals_cover_full_source(exact))
+						{
+							++candidate_result.stats.unresolved_pairs;
+							append_exact_interval_diagnostics(candidate,exact,
+								StepEdgeFaceSpanIssue::certification_failure,
+								"exact helper reported full coverage without a gap-free full interval chain",
+								candidate_result);
+							continue;
+						}
+						const std::uint8_t sectors=exact.intervals.front().target_sector_count;
+						const bool consistent=sectors>=1&&sectors<=2&&std::all_of(
+							exact.intervals.begin(),exact.intervals.end(),[&](const auto& interval)
+							{return interval.target_sector_count==sectors;});
+						if(!consistent)
+						{
+							++candidate_result.stats.unresolved_pairs;
+							append_exact_interval_diagnostics(candidate,exact,
+								StepEdgeFaceSpanIssue::mixed_sector_count,
+								"target face sector count changes along the fully covered source edge",
+								candidate_result);
+							continue;
+						}
+						if(exact.intervals.size()!=1)
+						{
+							++candidate_result.stats.unresolved_pairs;
+							append_exact_interval_diagnostics(candidate,exact,
+								StepEdgeFaceSpanIssue::boundary_occurrence_handoff,
+								"full coverage crosses target boundary occurrences and requires an exact pcurve handoff atom",
+								candidate_result);
+							continue;
+						}
+						candidate_result.common=true;
+						candidate_result.added_sectors=sectors;
 					}
-					catch(...){candidate_result.error=std::current_exception();}
+					catch(const Standard_Failure& failure)
+					{
+						++candidate_result.stats.unresolved_pairs;
+						candidate_result.unresolved_spans.push_back(make_unresolved_edge_face_span(
+							candidate,candidate.source_parameter_first,candidate.source_parameter_last,
+							0.0,
+							StepEdgeFaceSpanKind::unclassified,0,
+							StepEdgeFaceSpanIssue::certification_failure,
+							std::string("OpenCascade edge/face certification exception: ")
+							+failure.GetMessageString()));
+					}
+					catch(const std::exception& exception)
+					{
+						++candidate_result.stats.unresolved_pairs;
+						candidate_result.unresolved_spans.push_back(make_unresolved_edge_face_span(
+							candidate,candidate.source_parameter_first,candidate.source_parameter_last,
+							0.0,
+							StepEdgeFaceSpanKind::unclassified,0,
+							StepEdgeFaceSpanIssue::certification_failure,
+							std::string("edge/face certification exception: ")+exception.what()));
+					}
+					catch(...)
+					{
+						++candidate_result.stats.unresolved_pairs;
+						candidate_result.unresolved_spans.push_back(make_unresolved_edge_face_span(
+							candidate,candidate.source_parameter_first,candidate.source_parameter_last,
+							0.0,StepEdgeFaceSpanKind::unclassified,0,
+							StepEdgeFaceSpanIssue::certification_failure,
+							"unknown edge/face certification exception"));
+					}
 				}
 			};
 			std::vector<std::thread> workers;workers.reserve(worker_count);
@@ -626,8 +733,11 @@ namespace paracfd::core
 			{
 				const EdgeFaceCandidate& candidate=candidates[candidate_id];
 				const EdgeFaceCandidateResult& candidate_result=candidate_results[candidate_id];
-				if(candidate_result.error)std::rethrow_exception(candidate_result.error);
 				if(stats)add_contact_stats(*stats,candidate_result.stats);
+				output.unresolved_spans.insert(output.unresolved_spans.end(),
+					candidate_result.unresolved_spans.begin(),candidate_result.unresolved_spans.end());
+				output.exact_intervals.insert(output.exact_intervals.end(),
+					candidate_result.exact_intervals.begin(),candidate_result.exact_intervals.end());
 				if(!candidate_result.common)continue;
 				if(stats)++stats->certified_pairs;
 				fan_degree[candidate.edge_id]+=candidate_result.added_sectors;
@@ -636,7 +746,7 @@ namespace paracfd::core
 					candidate_result.added_sectors));
 			}
 			for(std::size_t edge_id=0;edge_id<fan_degree.size();++edge_id)
-				if(fan_degree[edge_id]>1)
+				if(!result[edge_id].target_face_ids.empty()&&fan_degree[edge_id]>1)
 				{
 					auto& certificate=result[edge_id];certificate.contact_id=edge_id;
 					certificate.fan_degree=fan_degree[edge_id];
@@ -660,21 +770,48 @@ namespace paracfd::core
 						certificate.target_sector_counts.push_back(target.second);
 					}
 				}
-			if(stats)std::fprintf(stderr,"[STEP contact] free-edges=%llu candidates=%llu "
-				"exact-calls=%llu midpoint-tests=%llu certified=%llu workers=%u; index=%.3fs query=%.3fs "
-				"IntTools=%.3fs (accepted %.3fs) classifier=%.3fs\n",
-				static_cast<unsigned long long>(stats->free_edges),
+			std::sort(output.unresolved_spans.begin(),output.unresolved_spans.end(),
+				[](const auto& a,const auto& b){return unresolved_span_key(a)<unresolved_span_key(b);});
+			output.unresolved_spans.erase(std::unique(output.unresolved_spans.begin(),
+				output.unresolved_spans.end(),[](const auto& a,const auto& b)
+				{return unresolved_span_key(a)==unresolved_span_key(b);}),output.unresolved_spans.end());
+			auto exact_interval_key=[](const EdgeFaceCandidateResult::ExactInterval& exact)
+			{
+				const auto& interval=exact.interval;
+				return std::tuple{exact.source_edge_id,exact.target_face_id,
+					exact.source_parameter_first,exact.source_parameter_last,
+					interval.begin,interval.end,static_cast<unsigned>(interval.location),
+					static_cast<unsigned>(interval.target_sector_count),
+					static_cast<unsigned>(interval.boundary_occurrence_count),
+					interval.target_boundary_occurrence_ids,interval.target_boundary_orientations,
+					interval.target_parameter_begin,interval.target_parameter_end,
+					interval.target_mapping_source_begin,interval.target_mapping_source_end,
+					interval.exact_operation_tolerance};
+			};
+			std::sort(output.exact_intervals.begin(),output.exact_intervals.end(),
+				[&](const auto& a,const auto& b){return exact_interval_key(a)<exact_interval_key(b);});
+			output.exact_intervals.erase(std::unique(output.exact_intervals.begin(),
+				output.exact_intervals.end(),[&](const auto& a,const auto& b)
+				{return exact_interval_key(a)==exact_interval_key(b);}),output.exact_intervals.end());
+			if(stats)std::fprintf(stderr,"[STEP contact] audited-edges=%llu exact-AABB-candidates=%llu "
+				"non-owner-candidates=%llu "
+				"trimmed-audits=%llu certified=%llu "
+				"unresolved=%llu workers=%u; "
+				"index=%.3fs query=%.3fs trimmed-common=%.3fs\n",
+				static_cast<unsigned long long>(stats->audited_edges),
 				static_cast<unsigned long long>(stats->candidate_pairs),
-				static_cast<unsigned long long>(stats->inttools_calls),
-				static_cast<unsigned long long>(stats->midpoint_classifications),
-				static_cast<unsigned long long>(stats->certified_pairs),worker_count,stats->index_seconds,
-				stats->query_seconds,stats->inttools_seconds,stats->accepted_inttools_seconds,
-				stats->classifier_seconds);
-			if(stats)std::fprintf(stderr,"[STEP contact] exact wall %.3fs; aggregate exact CPU %.3fs; "
-				"certificate hash=%016llx\n",exact_wall_seconds,
-				stats->inttools_seconds+stats->classifier_seconds,
-				static_cast<unsigned long long>(contact_certificate_hash(result)));
-			return result;
+				static_cast<unsigned long long>(stats->exact_aabb_candidate_pairs),
+				static_cast<unsigned long long>(stats->exact_trimmed_calls),
+				static_cast<unsigned long long>(stats->certified_pairs),
+				static_cast<unsigned long long>(stats->unresolved_pairs),worker_count,
+				stats->index_seconds,stats->query_seconds,
+				stats->exact_trimmed_seconds);
+			if(stats)std::fprintf(stderr,"[STEP contact] audit wall %.3fs; aggregate trimmed-audit "
+				"CPU %.3fs; certificate hash=%016llx\n",exact_wall_seconds,
+				stats->exact_trimmed_seconds,
+				static_cast<unsigned long long>(contact_certificate_hash(result,
+					output.unresolved_spans)));
+			return output;
 		}
 
 		int face_index_of(const std::vector<TopoDS_Face>& faces,const TopoDS_Shape& candidate)
@@ -684,16 +821,25 @@ namespace paracfd::core
 			return -1;
 		}
 
+		double arithmetic_parameter_tolerance(double first,double last)
+		{
+			auto ulp=[](double value)
+			{return std::abs(std::nextafter(value,
+				std::numeric_limits<double>::infinity())-value);};
+			const double span=std::abs(last-first);
+			return std::max({8.0*ulp(first),8.0*ulp(last),
+				128.0*std::numeric_limits<double>::epsilon()*span});
+		}
+
 		bool parameter_ranges_cover(std::vector<std::pair<double,double>> ranges,
-			double first,double last)
+			double first,double last,double tolerance)
 		{
 			if(last<first)std::swap(first,last);
 			if(ranges.empty())return false;
 			for(auto& range:ranges)if(range.second<range.first)std::swap(range.first,range.second);
 			std::sort(ranges.begin(),ranges.end());
-			const double tolerance=std::max(Precision::PConfusion(),
-				64.0*std::numeric_limits<double>::epsilon()
-				*std::max({1.0,std::abs(first),std::abs(last)}));
+			if(!std::isfinite(tolerance)||tolerance<0.0
+				||tolerance>=1.0e-3*(last-first))return false;
 			double covered=first;
 			for(const auto& range:ranges)
 			{
@@ -738,8 +884,18 @@ namespace paracfd::core
 					common.Value().Ranges2());range.More();range.Next())
 					ranges_b.emplace_back(range.Value().First(),range.Value().Last());
 			}
-			result.covers_a=parameter_ranges_cover(std::move(ranges_a),first_a,last_a);
-			result.covers_b=parameter_ranges_cover(std::move(ranges_b),first_b,last_b);
+			const double native_tolerance_a=std::max(0.0,BRep_Tool::Tolerance(a))
+				*std::abs(a.Location().Transformation().ScaleFactor());
+			const double native_tolerance_b=std::max(0.0,BRep_Tool::Tolerance(b))
+				*std::abs(b.Location().Transformation().ScaleFactor());
+			const double linear_tolerance=std::max(Precision::Confusion(),
+				native_tolerance_a+native_tolerance_b);
+			const double tolerance_a=std::max(arithmetic_parameter_tolerance(first_a,last_a),
+				std::abs(curve_a.Resolution(linear_tolerance)));
+			const double tolerance_b=std::max(arithmetic_parameter_tolerance(first_b,last_b),
+				std::abs(curve_b.Resolution(linear_tolerance)));
+			result.covers_a=parameter_ranges_cover(std::move(ranges_a),first_a,last_a,tolerance_a);
+			result.covers_b=parameter_ranges_cover(std::move(ranges_b),first_b,last_b,tolerance_b);
 			return result;
 		}
 
@@ -759,6 +915,7 @@ namespace paracfd::core
 		{
 			std::uint32_t edge_id=TriMesh::kNoCadEdgeId;
 			std::uint32_t owner_face_id=0;
+			std::vector<std::uint32_t> owner_face_ids;
 			TopoDS_Edge edge;
 			std::array<gp_Pnt,2> endpoints;
 			std::array<double,2> endpoint_tolerance_mm{{0.0,0.0}};
@@ -924,7 +1081,9 @@ namespace paracfd::core
 			if(face_id>=faces.size())return result;
 			bool has_owned_member=false;
 			for(const std::size_t member_id:members)
-				if(contact_edges[member_id].owner_face_id==face_id)
+				if(std::find(contact_edges[member_id].owner_face_ids.begin(),
+					contact_edges[member_id].owner_face_ids.end(),face_id)
+					!=contact_edges[member_id].owner_face_ids.end())
 					has_owned_member=true;
 			for(TopExp_Explorer occurrence(faces[face_id],TopAbs_EDGE);
 				occurrence.More();occurrence.Next())
@@ -933,7 +1092,9 @@ namespace paracfd::core
 				if(has_owned_member)
 				{
 					for(const std::size_t member_id:members)
-						if(contact_edges[member_id].owner_face_id==face_id
+						if(std::find(contact_edges[member_id].owner_face_ids.begin(),
+							contact_edges[member_id].owner_face_ids.end(),face_id)
+							!=contact_edges[member_id].owner_face_ids.end()
 							&&oriented.IsSame(contact_edges[member_id].edge))
 						{
 							result.push_back(oriented);
@@ -954,8 +1115,14 @@ namespace paracfd::core
 		bool make_contact_graph(const ShapeIndexedMap& shape_edges,
 			const ShapeAncestorMap& edge_faces,const std::vector<TopoDS_Face>& faces,
 			std::vector<CadEdgeContactCertificate>& certificates,
+			const std::vector<StepCadContactGraph::UnresolvedEdgeFaceSpan>& unresolved_edge_face_spans,
+			const std::vector<EdgeFaceCandidateResult::ExactInterval>& exact_edge_face_intervals,
 			StepCadContactGraph& output,std::string& error)
 		{
+			// Retained as the authoritative atomizer input. The legacy whole-edge graph
+			// below does not consume partial atoms yet, but it must not rerun Common or
+			// reconstruct boundary occurrence identity when that step lands.
+			(void)exact_edge_face_intervals;
 			error.clear();
 			std::vector<CanonicalContactEdge> contact_edges;
 			for(std::size_t edge_id=0;edge_id<certificates.size();++edge_id)
@@ -964,15 +1131,24 @@ namespace paracfd::core
 				if(certificate.contact_id==TriMesh::kNoCadContactId||certificate.fan_degree<=1
 					||edge_id>=static_cast<std::size_t>(shape_edges.Extent()))continue;
 				const TopoDS_Edge edge=TopoDS::Edge(shape_edges(static_cast<Standard_Integer>(edge_id+1)));
-				if(!edge_faces.Contains(edge)||edge_faces.FindFromKey(edge).Size()!=1)continue;
-				const TopoDS_Face owner=TopoDS::Face(edge_faces.FindFromKey(edge).First());
-				const int owner_id=face_index_of(faces,owner);if(owner_id<0)continue;
+				if(!edge_faces.Contains(edge)||edge_faces.FindFromKey(edge).IsEmpty())continue;
+				std::vector<std::uint32_t> owner_ids;
+				for(NCollection_List<TopoDS_Shape>::Iterator owner(
+					edge_faces.FindFromKey(edge));owner.More();owner.Next())
+				{
+					const int owner_id=face_index_of(faces,TopoDS::Face(owner.Value()));
+					if(owner_id>=0)owner_ids.push_back(static_cast<std::uint32_t>(owner_id));
+				}
+				std::sort(owner_ids.begin(),owner_ids.end());
+				owner_ids.erase(std::unique(owner_ids.begin(),owner_ids.end()),owner_ids.end());
+				if(owner_ids.empty())continue;
 				BRepAdaptor_Curve curve(edge);
 				const double first=curve.FirstParameter(),last=curve.LastParameter();
 				if(!std::isfinite(first)||!std::isfinite(last)||!(last>first))continue;
 				CanonicalContactEdge record;
 				record.edge_id=static_cast<std::uint32_t>(edge_id);
-				record.owner_face_id=static_cast<std::uint32_t>(owner_id);
+				record.owner_face_id=owner_ids.front();
+				record.owner_face_ids=std::move(owner_ids);
 				record.edge=edge;record.endpoints={{curve.Value(first),curve.Value(last)}};
 				record.edge_tolerance_mm=edge_native_tolerance_mm(edge);
 				TopoDS_Vertex first_vertex,last_vertex;TopExp::Vertices(edge,first_vertex,last_vertex,true);
@@ -1041,6 +1217,7 @@ namespace paracfd::core
 				}
 
 			StepCadContactGraph graph;
+			graph.unresolved_edge_face_spans=unresolved_edge_face_spans;
 			graph.unresolved_partial_overlaps=std::move(unresolved_partial_overlaps);
 			// Kept parallel to graph.curves/curve.uses until shared junction coordinates
 			// have been canonicalized. UVs must round-trip to the final public 3D chain,
@@ -1062,7 +1239,8 @@ namespace paracfd::core
 					curve.tolerance_m=std::max(curve.tolerance_m,
 						std::max({member.edge_tolerance_mm,member.endpoint_tolerance_mm[0],
 							member.endpoint_tolerance_mm[1]})*kMmToM);
-					use_sectors.emplace(member.owner_face_id,1u);
+					for(const std::uint32_t owner_face_id:member.owner_face_ids)
+						use_sectors.emplace(owner_face_id,1u);
 					const CadEdgeContactCertificate& certificate=certificates[member.edge_id];
 					for(std::size_t target=0;target<certificate.target_face_ids.size();++target)
 					{
@@ -1105,29 +1283,34 @@ namespace paracfd::core
 				for(const std::size_t member_id:members)
 				{
 					const CanonicalContactEdge& member=contact_edges[member_id];
-					const TopoDS_Face& owner=faces[member.owner_face_id];
-					TopLoc_Location location;
-					const Handle(Poly_Triangulation) triangulation=BRep_Tool::Triangulation(owner,location);
-					if(triangulation.IsNull())continue;
-					Handle(Poly_PolygonOnTriangulation) polygon=
-						BRep_Tool::PolygonOnTriangulation(member.edge,triangulation,location);
-					if(polygon.IsNull())
+					for(const std::uint32_t owner_face_id:member.owner_face_ids)
 					{
-						TopoDS_Edge reversed=member.edge;reversed.Reverse();
-						polygon=BRep_Tool::PolygonOnTriangulation(reversed,triangulation,location);
-					}
-					if(polygon.IsNull())continue;
-					for(Standard_Integer node=1;node<=polygon->NbNodes();++node)
-					{
-						gp_Pnt point=triangulation->Node(polygon->Node(node));
-						point.Transform(location.Transformation());
-						double tolerance_mm=member.edge_tolerance_mm;
-						if(node==1)tolerance_mm=std::max(tolerance_mm,
-							member.endpoint_tolerance_mm[0]);
-						if(node==polygon->NbNodes())tolerance_mm=std::max(tolerance_mm,
-							member.endpoint_tolerance_mm[1]);
-						append_projected(point,tolerance_mm,member.edge_id,
-							static_cast<std::uint32_t>(node));
+						if(owner_face_id>=faces.size())continue;
+						const TopoDS_Face& owner=faces[owner_face_id];
+						TopLoc_Location location;
+						const Handle(Poly_Triangulation) triangulation=
+							BRep_Tool::Triangulation(owner,location);
+						if(triangulation.IsNull())continue;
+						Handle(Poly_PolygonOnTriangulation) polygon=
+							BRep_Tool::PolygonOnTriangulation(member.edge,triangulation,location);
+						if(polygon.IsNull())
+						{
+							TopoDS_Edge reversed=member.edge;reversed.Reverse();
+							polygon=BRep_Tool::PolygonOnTriangulation(reversed,triangulation,location);
+						}
+						if(polygon.IsNull())continue;
+						for(Standard_Integer node=1;node<=polygon->NbNodes();++node)
+						{
+							gp_Pnt point=triangulation->Node(polygon->Node(node));
+							point.Transform(location.Transformation());
+							double tolerance_mm=member.edge_tolerance_mm;
+							if(node==1)tolerance_mm=std::max(tolerance_mm,
+								member.endpoint_tolerance_mm[0]);
+							if(node==polygon->NbNodes())tolerance_mm=std::max(tolerance_mm,
+								member.endpoint_tolerance_mm[1]);
+							append_projected(point,tolerance_mm,member.edge_id,
+								static_cast<std::uint32_t>(node));
+						}
 					}
 				}
 				for(const std::size_t junction_id:junctions_by_group[group_id])
@@ -1518,22 +1701,21 @@ namespace paracfd::core
 			return result;
 		}
 
-		std::vector<std::size_t> exact_face_components(const ShapeIndexedMap& shape_edges,
-			const ShapeAncestorMap& edge_faces, const std::vector<TopoDS_Face>& source_faces,
-			const std::vector<CadEdgeContactCertificate>& edge_contacts)
+		std::vector<std::size_t> conforming_face_components(const OcctContactTopology& topology,
+			const std::vector<TopoDS_Face>& source_faces)
 		{
 			FaceDisjointSet components(source_faces.size());
-			for (Standard_Integer edge_index = 1; edge_index <= shape_edges.Extent(); ++edge_index)
+			for (const OcctContactAtom& atom : topology.atomization.atoms)
 			{
-				const TopoDS_Edge edge = TopoDS::Edge(shape_edges(edge_index));
-				const std::vector<std::uint32_t> owners = edge_owner_face_ids(edge_faces, edge,
-					source_faces);
-				for (std::size_t owner = 1; owner < owners.size(); ++owner)
-					components.join(owners.front(), owners[owner]);
-				const std::size_t contact_index = static_cast<std::size_t>(edge_index - 1);
-				if (owners.empty() || contact_index >= edge_contacts.size()) continue;
-				for (std::uint32_t target : edge_contacts[contact_index].target_face_ids)
-					if (target < source_faces.size()) components.join(owners.front(), target);
+				if (atom.fan_degree < 2) continue;
+				std::vector<std::uint32_t> faces;
+				faces.reserve(atom.face_uses.size());
+				for (const OcctContactAtomFaceUse& use : atom.face_uses)
+					if (use.source_face_id < source_faces.size()) faces.push_back(use.source_face_id);
+				std::sort(faces.begin(), faces.end());
+				faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+				for (std::size_t face = 1; face < faces.size(); ++face)
+					components.join(faces.front(), faces[face]);
 			}
 
 			std::vector<std::size_t> result(source_faces.size());
@@ -1605,14 +1787,14 @@ namespace paracfd::core
 			return result;
 		}
 
-		GeometryQualityReport disconnected_component_report(const ShapeIndexedMap& shape_edges,
+		GeometryQualityReport conforming_disconnected_component_report(const ShapeIndexedMap& shape_edges,
 			const ShapeAncestorMap& edge_faces, const std::vector<TopoDS_Face>& source_faces,
-			const std::vector<CadEdgeContactCertificate>& edge_contacts, const TriMesh& mesh)
+			const OcctContactTopology& topology, const TriMesh& mesh)
 		{
 			GeometryQualityReport report;
 			if (source_faces.empty() || mesh.empty() || !mesh.has_face_provenance()) return report;
-			const std::vector<std::size_t> face_component = exact_face_components(shape_edges,
-				edge_faces, source_faces, edge_contacts);
+			const std::vector<std::size_t> face_component = conforming_face_components(topology,
+				source_faces);
 
 			struct Component
 			{
@@ -1685,20 +1867,24 @@ namespace paracfd::core
 			// periodic seams, and exact full edge-on-face contacts are internal connectivity and
 			// are deliberately not painted as gaps. Openings within the main component do not
 			// create an issue at all.
+			std::set<std::uint32_t> attached_source_edges;
+			for (const OcctContactAtom& atom : topology.atomization.atoms)
+				if (atom.fan_degree >= 2)
+					for (const OcctContactAtomSourceSpan& span : atom.source_spans)
+						attached_source_edges.insert(span.source_edge_id);
 			for (Standard_Integer edge_index = 1; edge_index <= shape_edges.Extent(); ++edge_index)
 			{
 				const TopoDS_Edge edge = TopoDS::Edge(shape_edges(edge_index));
 				if (!edge_faces.Contains(edge) || edge_faces.FindFromKey(edge).Size() != 1) continue;
-				const std::size_t contact_index = static_cast<std::size_t>(edge_index - 1);
-				if (contact_index < edge_contacts.size()
-					&& !edge_contacts[contact_index].target_face_ids.empty()) continue;
+				const std::uint32_t source_edge_id = static_cast<std::uint32_t>(edge_index - 1);
+				if (attached_source_edges.contains(source_edge_id)) continue;
 				const std::vector<std::uint32_t> owners = edge_owner_face_ids(edge_faces, edge,
 					source_faces);
 				if (owners.size() != 1 || owners.front() >= face_component.size()) continue;
 				const auto found = issue_by_root.find(face_component[owners.front()]);
 				if (found == issue_by_root.end()) continue;
 				GeometryIssuePolyline polyline = tessellated_edge_polyline(edge,
-					source_faces[owners.front()], static_cast<std::uint32_t>(edge_index - 1));
+					source_faces[owners.front()], source_edge_id);
 				if (polyline.points.size() < 2) continue;
 				GeometryIssue& issue = report.issues[found->second];
 				for (std::size_t point = 1; point < polyline.points.size(); ++point)
@@ -1761,13 +1947,95 @@ namespace paracfd::core
 			return transfer_and_mesh(reader, deflection_mm, out, error);
 		}
 
-		// Accumulate every triangulated FACE of `shape` into one TriMesh (metres, face-local winding,
-		// area-weighted per-vertex normals, bbox). `shape` must ALREADY be meshed (BRepMesh run on
-		// it or an ancestor). Returns empty() if the shape contributes no triangles.
-		TriMesh mesh_from_faces(const TopoDS_Shape& shape,
+		TriMesh conforming_mesh_from_faces(const TopoDS_Shape& shape,
 			const std::vector<TopoDS_Face>& source_faces,
 			GeometryQualityReport* quality, StepCadContactGraph* contact_graph,
 			std::string* error)
+		{
+			ShapeIndexedMap shape_edges;
+			ShapeAncestorMap edge_faces;
+			TopExp::MapShapes(shape, TopAbs_EDGE, shape_edges);
+			TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+
+			const EdgeFaceContactCertification certification =
+				certify_edge_face_contacts(shape_edges, edge_faces, source_faces);
+			auto publish_failed_audit = [&](const std::string& reason)
+			{
+				if (!contact_graph) return;
+				*contact_graph = {};
+				contact_graph->audit_status = StepCadContactAuditStatus::failed;
+				contact_graph->audit_failure_reason = reason;
+				// Partial coverage, sector transitions and boundary handoffs are inputs to the
+				// atomizer, not CAD faults.  A later tessellation failure must not resurrect
+				// those pre-atomization intervals as red "gaps".  Only contact operations whose
+				// exact certification itself failed remain valid focused evidence here.
+				for (const auto& span : certification.unresolved_spans)
+					if (span.issue == StepEdgeFaceSpanIssue::certification_failure)
+						contact_graph->unresolved_edge_face_spans.push_back(span);
+			};
+			std::vector<OcctContactTopologyEdgeFaceInterval> exact_intervals;
+			exact_intervals.reserve(certification.exact_intervals.size());
+			for (const EdgeFaceCandidateResult::ExactInterval& exact :
+				certification.exact_intervals)
+				exact_intervals.push_back({exact.source_edge_id, exact.target_face_id,
+					exact.source_parameter_first, exact.source_parameter_last, exact.interval});
+
+			OcctContactTopology topology;
+			std::string stage_error;
+			if (!build_occt_contact_topology(shape, source_faces, exact_intervals,
+				topology, stage_error))
+			{
+				const std::string reason = "exact CAD contact topology failed: " + stage_error;
+				publish_failed_audit(reason);
+				set_error(error, reason);
+				return {};
+			}
+
+			OcctConformingMesh conformed;
+			if (!build_occt_conforming_mesh(topology, conformed, stage_error))
+			{
+				const std::string reason = "exact CAD-conforming triangulation failed: " + stage_error;
+				publish_failed_audit(reason);
+				set_error(error, reason);
+				return {};
+			}
+
+			OcctConformingImportAssembly assembly;
+			if (!assemble_occt_conforming_import(topology, conformed, assembly, stage_error))
+			{
+				const std::string reason = "conforming STEP hand-off failed: " + stage_error;
+				publish_failed_audit(reason);
+				set_error(error, reason);
+				return {};
+			}
+			// An empty default graph is not a certificate.  Only this completed,
+			// transactionally assembled hand-off may mark the audit complete.
+			assembly.contacts.audit_status = StepCadContactAuditStatus::complete;
+
+			// Partial coverage, sector changes and occurrence handoffs are now represented
+			// by exact contact atoms. Only a genuinely uncertified CAD operation remains a
+			// blocker in the public graph; do not preserve the old pre-atomization warnings.
+			for (const auto& span : certification.unresolved_spans)
+				if (span.issue == StepEdgeFaceSpanIssue::certification_failure)
+					assembly.contacts.unresolved_edge_face_spans.push_back(span);
+			if (quality)
+			{
+				*quality = conforming_disconnected_component_report(shape_edges, edge_faces,
+					source_faces, topology, assembly.mesh);
+				quality->connectivity_status = assembly.contacts.conforming_ready()
+					? GeometryConnectivityStatus::verified : GeometryConnectivityStatus::unknown;
+			}
+			if (contact_graph) *contact_graph = std::move(assembly.contacts);
+			return std::move(assembly.mesh);
+		}
+
+		// Accumulate every triangulated FACE of `shape` into one TriMesh (metres, face-local winding,
+		// area-weighted per-vertex normals, bbox). `shape` must ALREADY be meshed (BRepMesh run on
+		// it or an ancestor). Returns empty() if the shape contributes no triangles.
+		TriMesh legacy_mesh_from_faces(const TopoDS_Shape& shape,
+			const std::vector<TopoDS_Face>& source_faces,
+			GeometryQualityReport* quality, StepCadContactGraph* contact_graph,
+			std::string* error, bool certify_contacts)
 		{
 			TriMesh mesh;
 			// IDs are topology traversal IDs, deliberately independent of tessellation density.
@@ -1779,13 +2047,19 @@ namespace paracfd::core
 			// Deliberately retain face-use multiplicity: a periodic seam is the same
 			// TopoDS_Edge used twice by one face and therefore bounds two sheet sectors.
 			TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
-			std::vector<CadEdgeContactCertificate> edge_contacts=
-				certify_edge_face_contacts(shape_edges,edge_faces,source_faces);
+			EdgeFaceContactCertification certification;
+			if (certify_contacts)
+				certification=certify_edge_face_contacts(shape_edges,edge_faces,source_faces);
+			else
+				certification.certificates.resize(static_cast<std::size_t>(shape_edges.Extent()));
+			std::vector<CadEdgeContactCertificate>& edge_contacts=certification.certificates;
 			if(contact_graph)
 			{
 				StepCadContactGraph staged_graph;
 				std::string graph_error;
 				if(!make_contact_graph(shape_edges,edge_faces,source_faces,edge_contacts,
+					certification.unresolved_spans,
+					certification.exact_intervals,
 					staged_graph,graph_error))
 				{
 					set_error(error,graph_error);
@@ -1954,8 +2228,10 @@ namespace paracfd::core
 			mesh.bbox_max = { { static_cast<float>(hi[0]), static_cast<float>(hi[1]), static_cast<float>(hi[2]) } };
 			if (quality)
 			{
-				*quality = disconnected_component_report(shape_edges, edge_faces, source_faces,
-					edge_contacts, mesh);
+				// The legacy independently triangulated path is retained temporarily only as
+				// a reference implementation while the conforming path is validated.
+				*quality = {};
+				quality->connectivity_status = GeometryConnectivityStatus::unknown;
 				// Representation names describe the producer's intent; they are not a geometric
 				// validity test. In particular, a correctly attached mini-rib is real fabric.
 				// Disconnected artifacts are already reported above from exact CAD connectivity.
@@ -1980,12 +2256,57 @@ namespace paracfd::core
 
 			StepGeometry result;
 			result.source_faces = source_face_representation_metadata(reader, source_faces);
-			result.mesh = mesh_from_faces(shape, source_faces, &result.quality,
-				&result.contacts, error);
+			std::string conformance_error;
+			try
+			{
+				result.mesh = conforming_mesh_from_faces(shape, source_faces, &result.quality,
+					&result.contacts, &conformance_error);
+			}
+			catch (const Standard_Failure& failure)
+			{
+				conformance_error = std::string("exact CAD-contact preprocessing raised an "
+					"OpenCascade exception: ") + failure.GetMessageString();
+				result.contacts = {};
+				result.contacts.audit_status = StepCadContactAuditStatus::failed;
+				result.contacts.audit_failure_reason = conformance_error;
+			}
+			catch (const std::exception& failure)
+			{
+				conformance_error = std::string("exact CAD-contact preprocessing failed: ")
+					+ failure.what();
+				result.contacts = {};
+				result.contacts.audit_status = StepCadContactAuditStatus::failed;
+				result.contacts.audit_failure_reason = conformance_error;
+			}
 			if (result.mesh.empty())
 			{
-				if (!error || error->empty()) set_error(error, "shape produced no triangulable faces");
-				return {};
+				// The interactive application deliberately remains able to display and run a
+				// clearly-labelled approximate surface when exact contact conformation fails.
+				// This fallback does not repeat or weaken the failed audit, and it never claims
+				// contact provenance that was not certified.
+				if (result.contacts.audit_status == StepCadContactAuditStatus::not_performed)
+				{
+					result.contacts.audit_status = StepCadContactAuditStatus::failed;
+					result.contacts.audit_failure_reason = conformance_error.empty()
+						? "exact CAD-contact preprocessing produced no conforming mesh"
+						: conformance_error;
+				}
+				std::string fallback_error;
+				result.mesh = legacy_mesh_from_faces(shape, source_faces, &result.quality,
+					nullptr, &fallback_error, false);
+				result.quality.connectivity_status = GeometryConnectivityStatus::unknown;
+				if (result.mesh.empty())
+				{
+					std::string combined = conformance_error;
+					if (!fallback_error.empty())
+					{
+						if (!combined.empty()) combined += "; approximate tessellation also failed: ";
+						combined += fallback_error;
+					}
+					if (combined.empty()) combined = "shape produced no triangulable faces";
+					set_error(error, combined);
+					return {};
+				}
 			}
 			if (error) error->clear();
 			return result;
@@ -1997,9 +2318,77 @@ namespace paracfd::core
 		}
 	}
 
+	StepGeometry load_step_geometry_preview(const std::string& path,double deflection_mm,
+		std::string* error)
+	{
+		try
+		{
+			STEPControl_Reader reader;
+			TopoDS_Shape shape;
+			if(!read_step_shape(path,deflection_mm,reader,shape,error))return {};
+			std::vector<TopoDS_Face> source_faces;
+			for(TopExp_Explorer face(shape,TopAbs_FACE);face.More();face.Next())
+				source_faces.push_back(TopoDS::Face(face.Current()));
+
+			StepGeometry result;
+			result.source_faces=source_face_representation_metadata(reader,source_faces);
+			// This path is intentionally independent of the strict contact/conforming
+			// pipeline. A preview must remain available quickly even while that pipeline is
+			// under development, and its default contact graph explicitly means not audited.
+			result.mesh=legacy_mesh_from_faces(shape,source_faces,&result.quality,nullptr,
+				error,false);
+			result.contacts={};
+			result.quality.connectivity_status=GeometryConnectivityStatus::unknown;
+			if(result.mesh.empty())
+			{
+				if(error&&error->empty())*error="shape produced no triangulable faces";
+				return {};
+			}
+			if(error)error->clear();
+			return result;
+		}
+		catch(const Standard_Failure& failure)
+		{
+			set_error(error,std::string("OpenCascade exception: ")+failure.GetMessageString());
+			return {};
+		}
+		catch(const std::exception& failure)
+		{
+			set_error(error,std::string("STEP preview import failed: ")+failure.what());
+			return {};
+		}
+	}
+
 	TriMesh load_step_mesh(const std::string& path, double deflection_mm, std::string* error)
 	{
-		return load_step_geometry(path, deflection_mm, error).mesh;
+		StepGeometry geometry = load_step_geometry(path, deflection_mm, error);
+		if (geometry.mesh.empty()) return {};
+		if (!geometry.contacts.conforming_ready())
+		{
+			std::ostringstream detail;
+			detail << "STEP contact mesh is not certified for strict CFD";
+			if (!geometry.contacts.audit_failure_reason.empty())
+				detail << ": " << geometry.contacts.audit_failure_reason;
+			else if (geometry.contacts.audit_status == StepCadContactAuditStatus::not_performed)
+				detail << ": exact CAD-contact audit was not performed";
+			else
+				detail << ": " << geometry.contacts.unresolved_edge_face_spans.size()
+					<< " unresolved edge/face span(s), "
+					<< geometry.contacts.unresolved_partial_overlaps.size()
+					<< " unresolved overlap(s), and "
+					<< geometry.contacts.unresolved_uv_projections.size()
+					<< " unresolved UV projection(s)";
+			set_error(error, detail.str());
+			return {};
+		}
+		if (error) error->clear();
+		return std::move(geometry.mesh);
+	}
+
+	TriMesh load_step_mesh_approximate(const std::string& path, double deflection_mm,
+		std::string* error)
+	{
+		return load_step_geometry_preview(path,deflection_mm,error).mesh;
 	}
 
 }

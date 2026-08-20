@@ -666,6 +666,7 @@ EmbeddedBoundary build_exact_eb(const ExactCellInput &input,
   TriangleBvh bvh(mesh);
   EmbeddedBoundaryBuildOptions options;
   options.exact_cell_decomposer = &paracfd::core::decompose_exact_cell;
+  options.use_exact_cell_decomposer_as_development_oracle = true;
   return paracfd::core::build_embedded_boundary(mesh, bvh, grid, options);
 }
 
@@ -682,6 +683,44 @@ ExactCellDecomposition disagreeing_shared_face_decomposer(const ExactCellInput &
   return result;
 }
 
+int production_oracle_calls = 0;
+ExactCellDecomposition reject_if_production_calls_oracle(const ExactCellInput &)
+{
+  ++production_oracle_calls;
+  ExactCellDecomposition result;
+  result.errors.push_back("development oracle was called from the production arrangement path");
+  return result;
+}
+
+bool check_production_prefers_local_arrangement()
+{
+  TriMesh mesh = mesh_from_input(cross_junction());
+  TriangleBvh bvh(mesh);
+  EmbeddedBoundaryBuildOptions options;
+  options.complex_subdivisions = 8;
+  options.exact_cell_decomposer = &reject_if_production_calls_oracle;
+  production_oracle_calls = 0;
+  const EmbeddedBoundary boundary = paracfd::core::build_embedded_boundary(mesh, bvh,
+      { { 0.0, 0.0, 0.0 }, 1, 1, 1, 1.0 }, options);
+  const double volume = std::accumulate(boundary.fragments.begin(), boundary.fragments.end(),
+      0.0, [](double sum, const auto &fragment) { return sum + fragment.volume; });
+  const double patch_area = std::accumulate(boundary.patches.begin(), boundary.patches.end(),
+      0.0, [](double sum, const auto &patch) { return sum + patch.area; });
+  const bool pass = production_oracle_calls == 0 && boundary.ready_for_flow()
+      && boundary.exact_decomposition_cells == 0 && boundary.exact_locators.empty()
+      && boundary.arrangements.size() == 1 && boundary.fragments.size() == 4
+      && close(volume, 1.0) && close(patch_area, 2.0);
+  std::cout << "[production-local-arrangement] oracle-calls=" << production_oracle_calls
+            << " fragments=" << boundary.fragments.size()
+            << " arrangements=" << boundary.arrangements.size() << " status="
+            << (pass ? "PASS" : "FAIL") << '\n';
+  if (!pass)
+    for (const auto &unresolved : boundary.unresolved)
+      std::cout << "  unresolved cell " << unresolved.parent_cell << ": "
+                << unresolved.reason << '\n';
+  return pass;
+}
+
 bool check_shared_face_fragment_disagreement()
 {
   InputBuilder builder;
@@ -691,6 +730,7 @@ bool check_shared_face_fragment_disagreement()
   TriangleBvh bvh(mesh);
   EmbeddedBoundaryBuildOptions options;
   options.exact_cell_decomposer = &disagreeing_shared_face_decomposer;
+  options.use_exact_cell_decomposer_as_development_oracle = true;
   const EmbeddedBoundary boundary = paracfd::core::build_embedded_boundary(mesh, bvh,
       { { 0.0, 0.0, 0.0 }, 2, 1, 1, 1.0 }, options);
   bool named_disagreement = false;
@@ -782,6 +822,7 @@ bool check_certified_mismatched_tee_adapter()
   TriangleBvh bvh(mesh);
   EmbeddedBoundaryBuildOptions options;
   options.exact_cell_decomposer = &paracfd::core::decompose_exact_cell;
+  options.use_exact_cell_decomposer_as_development_oracle = true;
   const EmbeddedBoundary boundary = paracfd::core::build_embedded_boundary(mesh, bvh,
       { { 0.0, 0.0, 0.0 }, 1, 1, 1, 1.0 }, options);
   bool rib_reconnects = false;
@@ -813,6 +854,7 @@ bool check_certified_conforming_tee_adapter()
   TriangleBvh bvh(mesh);
   EmbeddedBoundaryBuildOptions options;
   options.exact_cell_decomposer = &paracfd::core::decompose_exact_cell;
+  options.use_exact_cell_decomposer_as_development_oracle = true;
   const EmbeddedBoundary boundary = paracfd::core::build_embedded_boundary(mesh, bvh,
       { { 0.0, 0.0, 0.0 }, 1, 1, 1, 1.0 }, options);
   const bool pass = boundary.ready_for_flow() && boundary.fragments.size() == 3;
@@ -833,6 +875,7 @@ bool check_certified_cell_face_mismatched_tee_adapter()
   TriangleBvh bvh(mesh);
   EmbeddedBoundaryBuildOptions options;
   options.exact_cell_decomposer = &paracfd::core::decompose_exact_cell;
+  options.use_exact_cell_decomposer_as_development_oracle = true;
   const EmbeddedBoundary boundary = paracfd::core::build_embedded_boundary(mesh, bvh,
       { { 0.0, 0.0, 0.0 }, 2, 1, 1, 1.0 }, options);
   bool names_contact = false;
@@ -969,6 +1012,7 @@ int main()
   pass = check_triangle_permutation() && pass;
   pass = check_neighbour_partition_match() && pass;
   pass = check_embedded_boundary_integration() && pass;
+  pass = check_production_prefers_local_arrangement() && pass;
   std::cout << "[occt-cell-split-summary] status=" << (pass ? "PASS" : "FAIL") << '\n';
   return pass ? 0 : 1;
 }

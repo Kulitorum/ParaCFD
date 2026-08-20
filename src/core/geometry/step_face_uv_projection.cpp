@@ -34,20 +34,27 @@ namespace paracfd::core::detail
 			Handle(Geom_Surface) surface;
 			TopLoc_Location location;
 			gp_Trsf inverse_location;
+			double location_scale = 1.0;
 			double u_min = 0.0;
 			double u_max = 0.0;
 			double v_min = 0.0;
 			double v_max = 0.0;
-			double u_tolerance = 0.0;
-			double v_tolerance = 0.0;
-			double uv_tolerance = 0.0;
-			double supplied_geometric_tolerance = 0.0;
+			double numeric_u_tolerance = 0.0;
+			double numeric_v_tolerance = 0.0;
+			double numeric_uv_tolerance = 0.0;
 			double face_native_tolerance = 0.0;
-			double geometric_tolerance = 0.0;
 			bool u_periodic = false;
 			bool v_periodic = false;
 			double u_period = 0.0;
 			double v_period = 0.0;
+		};
+
+		struct SampleProjectionTolerance
+		{
+			double geometric_tolerance = 0.0;
+			double u_tolerance = 0.0;
+			double v_tolerance = 0.0;
+			double uv_tolerance = 0.0;
 		};
 
 		struct UvCandidate
@@ -74,8 +81,20 @@ namespace paracfd::core::detail
 			return std::isfinite(lo) && std::isfinite(hi) && hi >= lo;
 		}
 
-		bool initialize_chart(const TopoDS_Face& face, double geometric_tolerance_mm,
-			SurfaceChart& chart, std::string& error)
+		double representable_spacing(double value)
+		{
+			const double up = std::nextafter(value,
+				std::numeric_limits<double>::infinity());
+			const double down = std::nextafter(value,
+				-std::numeric_limits<double>::infinity());
+			double spacing = 0.0;
+			if (std::isfinite(up)) spacing = std::max(spacing, std::abs(up - value));
+			if (std::isfinite(down)) spacing = std::max(spacing, std::abs(value - down));
+			return spacing;
+		}
+
+		bool initialize_chart(const TopoDS_Face& face, SurfaceChart& chart,
+			std::string& error)
 		{
 			chart.surface = BRep_Tool::Surface(face, chart.location);
 			if (chart.surface.IsNull())
@@ -90,41 +109,50 @@ namespace paracfd::core::detail
 				error = "face has non-finite or reversed UV bounds";
 				return false;
 			}
-			const double location_scale = std::abs(chart.location.Transformation().ScaleFactor());
-			if (!std::isfinite(location_scale)
-				|| !(location_scale > std::numeric_limits<double>::min()))
+			chart.location_scale = std::abs(
+				chart.location.Transformation().ScaleFactor());
+			if (!std::isfinite(chart.location_scale)
+				|| !(chart.location_scale > std::numeric_limits<double>::min()))
 			{
 				error = "face has an invalid location scale";
 				return false;
 			}
-			chart.supplied_geometric_tolerance = std::max(0.0,
-				geometric_tolerance_mm);
-			chart.face_native_tolerance = std::max(0.0,
-				BRep_Tool::Tolerance(face) * location_scale);
-			chart.geometric_tolerance = std::max({Precision::Confusion(),
-				chart.supplied_geometric_tolerance, chart.face_native_tolerance});
-			const double u_scale = std::max({1.0, std::abs(chart.u_min), std::abs(chart.u_max)});
-			const double v_scale = std::max({1.0, std::abs(chart.v_min), std::abs(chart.v_max)});
-			const double epsilon_u = 128.0 * std::numeric_limits<double>::epsilon() * u_scale;
-			const double epsilon_v = 128.0 * std::numeric_limits<double>::epsilon() * v_scale;
-			BRepAdaptor_Surface adaptor(face, true);
-			const double local_linear_tolerance = chart.geometric_tolerance / location_scale;
-			const double resolved_u = adaptor.UResolution(local_linear_tolerance);
-			const double resolved_v = adaptor.VResolution(local_linear_tolerance);
-			chart.u_tolerance = std::max(Precision::PConfusion(), epsilon_u);
-			chart.v_tolerance = std::max(Precision::PConfusion(), epsilon_v);
-			if (std::isfinite(resolved_u) && resolved_u > 0.0)
-				chart.u_tolerance = std::max(chart.u_tolerance, resolved_u);
-			if (std::isfinite(resolved_v) && resolved_v > 0.0)
-				chart.v_tolerance = std::max(chart.v_tolerance, resolved_v);
-			chart.uv_tolerance = std::max(chart.u_tolerance, chart.v_tolerance);
+			chart.face_native_tolerance = BRep_Tool::Tolerance(face)
+				* chart.location_scale;
+			if (!std::isfinite(chart.face_native_tolerance)
+				|| chart.face_native_tolerance < 0.0)
+			{
+				error = "face has an invalid native tolerance";
+				return false;
+			}
+			const double u_span = chart.u_max - chart.u_min;
+			const double v_span = chart.v_max - chart.v_min;
+			// Surface parameters are arbitrarily scaled and translated. A fixed
+			// Precision::PConfusion() floor is dimensionally invalid here and can consume
+			// an entire small chart. Bound only representable endpoint spacing and
+			// span-relative arithmetic, matching the face conformer's policy.
+			chart.numeric_u_tolerance = 8.0 * std::max(
+				representable_spacing(chart.u_min), representable_spacing(chart.u_max))
+				+ 32.0 * std::numeric_limits<double>::epsilon() * u_span;
+			chart.numeric_v_tolerance = 8.0 * std::max(
+				representable_spacing(chart.v_min), representable_spacing(chart.v_max))
+				+ 32.0 * std::numeric_limits<double>::epsilon() * v_span;
+			chart.numeric_uv_tolerance = std::max(chart.numeric_u_tolerance,
+				chart.numeric_v_tolerance);
+			if (!(chart.numeric_u_tolerance > 0.0)
+				|| !(chart.numeric_v_tolerance > 0.0))
+			{
+				error = "face UV chart has no representable coordinate resolution";
+				return false;
+			}
 			chart.inverse_location = chart.location.Transformation().Inverted();
 			chart.u_periodic = chart.surface->IsUPeriodic();
 			chart.v_periodic = chart.surface->IsVPeriodic();
 			if (chart.u_periodic)
 			{
 				chart.u_period = chart.surface->UPeriod();
-				if (!std::isfinite(chart.u_period) || !(chart.u_period > chart.uv_tolerance))
+				if (!std::isfinite(chart.u_period)
+					|| !(chart.u_period > chart.numeric_uv_tolerance))
 				{
 					error = "face reports an invalid U period";
 					return false;
@@ -133,11 +161,83 @@ namespace paracfd::core::detail
 			if (chart.v_periodic)
 			{
 				chart.v_period = chart.surface->VPeriod();
-				if (!std::isfinite(chart.v_period) || !(chart.v_period > chart.uv_tolerance))
+				if (!std::isfinite(chart.v_period)
+					|| !(chart.v_period > chart.numeric_uv_tolerance))
 				{
 					error = "face reports an invalid V period";
 					return false;
 				}
+			}
+			return true;
+		}
+
+		bool initialize_sample_tolerances(const TopoDS_Face& face,
+			const SurfaceChart& chart,
+			const std::vector<double>& source_geometric_tolerances_mm,
+			double additional_target_native_tolerance,
+			std::vector<SampleProjectionTolerance>& tolerances, std::string& error)
+		{
+			tolerances.clear();
+			tolerances.reserve(source_geometric_tolerances_mm.size());
+			if (!std::isfinite(additional_target_native_tolerance)
+				|| additional_target_native_tolerance < 0.0)
+			{
+				error = "target has an invalid additional native tolerance";
+				return false;
+			}
+			BRepAdaptor_Surface adaptor(face, true);
+			for (std::size_t sample = 0;
+				sample < source_geometric_tolerances_mm.size(); ++sample)
+			{
+				const double source_tolerance = source_geometric_tolerances_mm[sample];
+				if (!std::isfinite(source_tolerance) || source_tolerance < 0.0)
+				{
+					error = "sample " + std::to_string(sample)
+						+ " has an invalid geometric tolerance";
+					return false;
+				}
+				SampleProjectionTolerance tolerance;
+				const double certified_tolerance = source_tolerance
+					+ additional_target_native_tolerance
+					+ chart.face_native_tolerance;
+				if (!std::isfinite(certified_tolerance))
+				{
+					error = "sample " + std::to_string(sample)
+						+ " geometric tolerance overflows";
+					return false;
+				}
+				tolerance.geometric_tolerance = std::max(Precision::Confusion(),
+					certified_tolerance);
+				const double local_linear_tolerance = tolerance.geometric_tolerance
+					/ chart.location_scale;
+				const double resolved_u = adaptor.UResolution(local_linear_tolerance);
+				const double resolved_v = adaptor.VResolution(local_linear_tolerance);
+				tolerance.u_tolerance = chart.numeric_u_tolerance;
+				tolerance.v_tolerance = chart.numeric_v_tolerance;
+				if (std::isfinite(resolved_u) && resolved_u > 0.0)
+					tolerance.u_tolerance = std::max(tolerance.u_tolerance, resolved_u);
+				if (std::isfinite(resolved_v) && resolved_v > 0.0)
+					tolerance.v_tolerance = std::max(tolerance.v_tolerance, resolved_v);
+				tolerance.uv_tolerance = std::max(tolerance.u_tolerance,
+					tolerance.v_tolerance);
+				constexpr double maximum_tolerance_fraction = 1.0 / 64.0;
+				if (!(tolerance.u_tolerance < maximum_tolerance_fraction
+						* (chart.u_max - chart.u_min))
+					|| !(tolerance.v_tolerance < maximum_tolerance_fraction
+						* (chart.v_max - chart.v_min)))
+				{
+					error = "sample " + std::to_string(sample)
+						+ " tolerance consumes a material fraction of the UV chart";
+					return false;
+				}
+				if ((chart.u_periodic && !(chart.u_period > tolerance.uv_tolerance))
+					|| (chart.v_periodic && !(chart.v_period > tolerance.uv_tolerance)))
+				{
+					error = "sample " + std::to_string(sample)
+						+ " tolerance is too large for the periodic UV chart";
+					return false;
+				}
+				tolerances.push_back(tolerance);
 			}
 			return true;
 		}
@@ -149,13 +249,13 @@ namespace paracfd::core::detail
 		}
 
 		bool re_evaluates_to(const SurfaceChart& chart, const gp_Pnt& world_point,
-			double u, double v, double& distance)
+			double u, double v, double geometric_tolerance, double& distance)
 		{
 			if (!std::isfinite(u) || !std::isfinite(v)) return false;
 			gp_Pnt evaluated = chart.surface->Value(u, v);
 			evaluated.Transform(chart.location.Transformation());
 			distance = evaluated.Distance(world_point);
-			return std::isfinite(distance) && distance <= chart.geometric_tolerance;
+			return std::isfinite(distance) && distance <= geometric_tolerance;
 		}
 
 		bool regular_parameterization(const SurfaceChart& chart, double u, double v)
@@ -239,25 +339,28 @@ namespace paracfd::core::detail
 		}
 
 		bool append_surface_aliases(const TopoDS_Face& face, const SurfaceChart& chart,
+			const SampleProjectionTolerance& tolerance,
 			const gp_Pnt& world_point, double base_u, double base_v,
 			bool require_on, CandidateRow& row, bool& rejected_singular,
 			CandidateAudit& audit, std::string& error)
 		{
 			std::vector<double> u_values, v_values;
 			if (!periodic_aliases(base_u, chart.u_min, chart.u_max, chart.u_periodic,
-				chart.u_period, chart.uv_tolerance, u_values, error)
+				chart.u_period, tolerance.uv_tolerance, u_values, error)
 				|| !periodic_aliases(base_v, chart.v_min, chart.v_max, chart.v_periodic,
-					chart.v_period, chart.uv_tolerance, v_values, error)) return false;
+					chart.v_period, tolerance.uv_tolerance, v_values, error)) return false;
 			for (double u : u_values)
 				for (double v : v_values)
 				{
 					++audit.aliases;
-					const TopAbs_State state = trim_state(face, u, v, chart.uv_tolerance);
+					const TopAbs_State state = trim_state(face, u, v,
+						tolerance.uv_tolerance);
 					if (require_on ? state != TopAbs_ON
 						: state != TopAbs_IN && state != TopAbs_ON) continue;
 					++audit.trim_valid;
 					double distance = 0.0;
-					const bool residual_valid = re_evaluates_to(chart, world_point, u, v, distance);
+					const bool residual_valid = re_evaluates_to(chart, world_point, u, v,
+						tolerance.geometric_tolerance, distance);
 					if (std::isfinite(distance)) audit.minimum_residual = std::min(
 						audit.minimum_residual, distance);
 					if (!residual_valid) continue;
@@ -268,26 +371,28 @@ namespace paracfd::core::detail
 						continue;
 					}
 					++audit.regular;
-					insert_candidate(row, {u, v, distance}, chart.u_tolerance,
-						chart.v_tolerance);
+					insert_candidate(row, {u, v, distance}, tolerance.u_tolerance,
+						tolerance.v_tolerance);
 				}
 			return true;
 		}
 
 		bool collect_surface_candidates(const std::vector<gp_Pnt>& world_points,
-			const TopoDS_Face& face, const SurfaceChart& chart, bool require_on,
+			const TopoDS_Face& face, const SurfaceChart& chart,
+			const std::vector<SampleProjectionTolerance>& tolerances, bool require_on,
 			CandidateTable& candidates, std::string& error)
 		{
 			candidates.clear();
 			candidates.resize(world_points.size());
 			BRepAdaptor_Surface adaptor(face, true);
-			Extrema_ExtPS projection;
-			projection.Initialize(adaptor, chart.u_min, chart.u_max, chart.v_min,
-				chart.v_max, chart.u_tolerance, chart.v_tolerance);
-			projection.SetFlag(Extrema_ExtFlag_MIN);
-			projection.SetAlgo(Extrema_ExtAlgo_Grad);
 			for (std::size_t sample = 0; sample < world_points.size(); ++sample)
 			{
+				const SampleProjectionTolerance& tolerance = tolerances[sample];
+				Extrema_ExtPS projection;
+				projection.Initialize(adaptor, chart.u_min, chart.u_max, chart.v_min,
+					chart.v_max, tolerance.u_tolerance, tolerance.v_tolerance);
+				projection.SetFlag(Extrema_ExtFlag_MIN);
+				projection.SetAlgo(Extrema_ExtAlgo_Grad);
 				projection.Perform(world_points[sample]);
 				bool rejected_singular = false;
 				CandidateAudit audit;
@@ -297,7 +402,8 @@ namespace paracfd::core::detail
 					++audit.extrema;
 					double u = 0.0, v = 0.0;
 					projection.Point(candidate).Parameter(u, v);
-					if (!append_surface_aliases(face, chart, world_points[sample], u, v,
+					if (!append_surface_aliases(face, chart, tolerance,
+						world_points[sample], u, v,
 						require_on, candidates[sample], rejected_singular, audit, error)) return false;
 				}
 				sort_candidates(candidates[sample]);
@@ -311,7 +417,7 @@ namespace paracfd::core::detail
 						<< ", trim-valid=" << audit.trim_valid << ", residual-valid="
 						<< audit.residual_valid << ", regular=" << audit.regular
 						<< ", min-residual=" << audit.minimum_residual
-						<< " mm, tolerance=" << chart.geometric_tolerance << " mm)";
+						<< " mm, tolerance=" << tolerance.geometric_tolerance << " mm)";
 					error = message.str();
 					return false;
 				}
@@ -320,19 +426,27 @@ namespace paracfd::core::detail
 		}
 
 		bool transition_allowed(const SurfaceChart& chart,
+			const SampleProjectionTolerance& from_tolerance,
+			const SampleProjectionTolerance& to_tolerance,
 			const UvCandidate& from, const UvCandidate& to)
 		{
+			const double u_tolerance = std::min(from_tolerance.u_tolerance,
+				to_tolerance.u_tolerance);
+			const double v_tolerance = std::min(from_tolerance.v_tolerance,
+				to_tolerance.v_tolerance);
 			if (chart.u_periodic
-				&& std::abs(to.u - from.u) >= 0.5 * chart.u_period - chart.u_tolerance)
+				&& std::abs(to.u - from.u) >= 0.5 * chart.u_period - u_tolerance)
 				return false;
 			if (chart.v_periodic
-				&& std::abs(to.v - from.v) >= 0.5 * chart.v_period - chart.v_tolerance)
+				&& std::abs(to.v - from.v) >= 0.5 * chart.v_period - v_tolerance)
 				return false;
 			return true;
 		}
 
 		bool select_consistent_branch(const CandidateTable& candidates,
-			const SurfaceChart& chart, std::vector<std::array<double, 2>>& result,
+			const SurfaceChart& chart,
+			const std::vector<SampleProjectionTolerance>& tolerances,
+			std::vector<std::array<double, 2>>& result,
 			std::string& error)
 		{
 			result.clear();
@@ -348,7 +462,8 @@ namespace paracfd::core::detail
 					for (std::size_t from = 0; from < candidates[sample - 1].size(); ++from)
 					{
 						if (previous_paths[from] == 0u
-							|| !transition_allowed(chart, candidates[sample - 1][from],
+							|| !transition_allowed(chart, tolerances[sample - 1],
+							tolerances[sample], candidates[sample - 1][from],
 								candidates[sample][to])) continue;
 						if (next_paths[to] == 0u)
 							predecessors[sample][to] = from;
@@ -462,6 +577,7 @@ namespace paracfd::core::detail
 
 		PcurveStatus project_exact_pcurve(const std::vector<gp_Pnt>& world_points,
 			const TopoDS_Face& face, const TopoDS_Edge& edge, const SurfaceChart& chart,
+			const std::vector<double>& source_geometric_tolerances_mm,
 			std::vector<std::array<double, 2>>& result, std::string& error)
 		{
 			// CurveOnSurface is authoritative only for the exact oriented occurrence
@@ -517,19 +633,22 @@ namespace paracfd::core::detail
 				error = "exact boundary edge has an invalid native tolerance";
 				return PcurveStatus::failure;
 			}
+			std::vector<SampleProjectionTolerance> tolerances;
+			if (!initialize_sample_tolerances(face, chart,
+				source_geometric_tolerances_mm, edge_tolerance, tolerances, error))
+				return PcurveStatus::failure;
 			// The public chain was evaluated on the certified source curve. A distinct
 			// target trim occurrence may differ from it by the sum of their native CAD
 			// bounds. The caller-supplied bound is the source-chain side of that exact
 			// certificate; the target edge and face bounds are read here, where their
 			// actual OCCT occurrences are available.
-			const double sample_tolerance = std::max(Precision::Confusion(),
-				chart.supplied_geometric_tolerance + edge_tolerance
-					+ chart.face_native_tolerance);
 			const double curve_surface_tolerance = std::max(Precision::Confusion(),
 				edge_tolerance + chart.face_native_tolerance);
 			CandidateTable candidates(world_points.size());
 			for (std::size_t sample = 0; sample < world_points.size(); ++sample)
 			{
+				const SampleProjectionTolerance& tolerance = tolerances[sample];
+				const double sample_tolerance = tolerance.geometric_tolerance;
 				BoundaryPcurveAudit audit;
 				gp_Pnt local_point = world_points[sample];
 				local_point.Transform(curve_location.Transformation().Inverted());
@@ -564,7 +683,7 @@ namespace paracfd::core::detail
 					const gp_Pnt2d uv = pcurve->Value(parameter);
 					if (!std::isfinite(uv.X()) || !std::isfinite(uv.Y())) continue;
 					count_trim_state(audit,
-						trim_state(face, uv.X(), uv.Y(), chart.uv_tolerance));
+						trim_state(face, uv.X(), uv.Y(), tolerance.uv_tolerance));
 					gp_Pnt surface_world = chart.surface->Value(uv.X(), uv.Y());
 					surface_world.Transform(chart.location.Transformation());
 					const double surface_distance =
@@ -590,8 +709,8 @@ namespace paracfd::core::detail
 					++audit.accepted;
 					insert_candidate(candidates[sample], {uv.X(), uv.Y(),
 						std::max({curve_distance, surface_distance,
-							curve_surface_distance})}, chart.u_tolerance,
-						chart.v_tolerance);
+							curve_surface_distance})}, tolerance.u_tolerance,
+							tolerance.v_tolerance);
 				}
 				sort_candidates(candidates[sample]);
 				if (candidates[sample].empty())
@@ -601,7 +720,7 @@ namespace paracfd::core::detail
 					return PcurveStatus::failure;
 				}
 			}
-			if (!select_consistent_branch(candidates, chart, result, error))
+			if (!select_consistent_branch(candidates, chart, tolerances, result, error))
 			{
 				error = "exact boundary pcurve: " + error;
 				return PcurveStatus::failure;
@@ -611,19 +730,22 @@ namespace paracfd::core::detail
 
 		bool same_chart(const std::vector<std::array<double, 2>>& a,
 			const std::vector<std::array<double, 2>>& b,
-			double u_tolerance, double v_tolerance)
+			const std::vector<SampleProjectionTolerance>& tolerances)
 		{
-			if (a.size() != b.size()) return false;
+			if (a.size() != b.size() || a.size() != tolerances.size()) return false;
 			for (std::size_t sample = 0; sample < a.size(); ++sample)
-				if (std::abs(a[sample][0] - b[sample][0]) > u_tolerance
-					|| std::abs(a[sample][1] - b[sample][1]) > v_tolerance) return false;
+				if (std::abs(a[sample][0] - b[sample][0])
+						> tolerances[sample].u_tolerance
+					|| std::abs(a[sample][1] - b[sample][1])
+						> tolerances[sample].v_tolerance) return false;
 			return true;
 		}
 	}
 
 	bool project_trim_valid_face_uv(const std::vector<gp_Pnt>& world_points,
 		const TopoDS_Face& face, const std::vector<TopoDS_Edge>& exact_boundary_edges,
-		bool boundary_use, double geometric_tolerance_mm,
+		bool boundary_use,
+		const std::vector<double>& sample_geometric_tolerances_mm,
 		std::vector<std::array<double, 2>>& sample_uv, std::string& error,
 		bool* used_exact_boundary_pcurve)
 	{
@@ -635,8 +757,16 @@ namespace paracfd::core::detail
 			error = "cannot project onto a null face";
 			return false;
 		}
+		if (sample_geometric_tolerances_mm.size() != world_points.size())
+		{
+			error = "sample geometric tolerance count does not match point count";
+			return false;
+		}
 		SurfaceChart chart;
-		if (!initialize_chart(face, geometric_tolerance_mm, chart, error)) return false;
+		if (!initialize_chart(face, chart, error)) return false;
+		std::vector<SampleProjectionTolerance> tolerances;
+		if (!initialize_sample_tolerances(face, chart,
+			sample_geometric_tolerances_mm, 0.0, tolerances, error)) return false;
 		if (world_points.empty()) return true;
 
 		if (boundary_use)
@@ -648,7 +778,8 @@ namespace paracfd::core::detail
 				std::vector<std::array<double, 2>> candidate_result;
 				std::string candidate_error;
 				const PcurveStatus status = project_exact_pcurve(world_points, face,
-					exact_boundary_edges[edge], chart, candidate_result, candidate_error);
+					exact_boundary_edges[edge], chart,
+					sample_geometric_tolerances_mm, candidate_result, candidate_error);
 				if (status == PcurveStatus::unavailable) continue;
 				found_pcurve = true;
 				if (status == PcurveStatus::failure)
@@ -658,8 +789,7 @@ namespace paracfd::core::detail
 					return false;
 				}
 				if (exact_result.empty()) exact_result = std::move(candidate_result);
-				else if (!same_chart(exact_result, candidate_result, chart.u_tolerance,
-					chart.v_tolerance))
+				else if (!same_chart(exact_result, candidate_result, tolerances))
 				{
 					error = "exact boundary pcurves select different UV branches";
 					return false;
@@ -674,9 +804,22 @@ namespace paracfd::core::detail
 		}
 
 		CandidateTable candidates;
-		if (!collect_surface_candidates(world_points, face, chart, boundary_use,
+		if (!collect_surface_candidates(world_points, face, chart, tolerances,
+			boundary_use,
 			candidates, error))
 			return false;
-		return select_consistent_branch(candidates, chart, sample_uv, error);
+		return select_consistent_branch(candidates, chart, tolerances, sample_uv, error);
+	}
+
+	bool project_trim_valid_face_uv(const std::vector<gp_Pnt>& world_points,
+		const TopoDS_Face& face, const std::vector<TopoDS_Edge>& exact_boundary_edges,
+		bool boundary_use, double geometric_tolerance_mm,
+		std::vector<std::array<double, 2>>& sample_uv, std::string& error,
+		bool* used_exact_boundary_pcurve)
+	{
+		const double tolerance = std::max(0.0, geometric_tolerance_mm);
+		return project_trim_valid_face_uv(world_points, face, exact_boundary_edges,
+			boundary_use, std::vector<double>(world_points.size(), tolerance), sample_uv,
+			error, used_exact_boundary_pcurve);
 	}
 }

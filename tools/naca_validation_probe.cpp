@@ -549,6 +549,7 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
       config.freestream.nu, h, width, phase_fraction);
   ExternalAeroExecutionOptions execution;
   execution.exact_cell_decomposer = &decompose_exact_cell;
+  execution.use_exact_cell_decomposer_as_development_oracle = true;
   execution.smooth_fabric_wall = smooth_wall;
   execution.conservative_cell_momentum = conservative_momentum;
   ExternalAeroCore core(wing, bvh, config, execution);

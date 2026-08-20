@@ -2119,9 +2119,9 @@ void main()
 			|| geometry_issue_polyline_counts_[issue_kind_index(GeometryIssueKind::UnclassifiedOpening)] > 0;
 		const bool informational_status = !geometry_quality_status_.isEmpty()
 			&& !geometry_quality_warning_;
-		const bool approximate_status = informational_status &&
-			geometry_quality_status_.compare(QStringLiteral("Detailed geometry check not performed."),
-				Qt::CaseInsensitive) == 0;
+		const bool approximate_status = !geometry_quality_status_.isEmpty()
+			&& geometry_quality_status_.startsWith(QStringLiteral("APPROXIMATE"),
+				Qt::CaseInsensitive);
 		const QColor border = (has_gap || geometry_quality_warning_) ? QColor(255, 65, 45)
 			: (has_warning || informational_status) ? QColor(255, 174, 42) : QColor(30, 210, 235);
 		QFont font = painter.font();
@@ -2129,9 +2129,14 @@ void main()
 		font.setPointSizeF(8.5);
 		QFont title_font = font; title_font.setBold(true);
 		const int row_height = 19;
-		const int box_width = 370;
-		const int status_rows = geometry_quality_status_.isEmpty() ? 0 : 1;
-		const int box_height = 30 + row_height * (static_cast<int>(visible_kinds.size()) + status_rows) + 8;
+		const int box_width = std::min(520,std::max(180,width()-32));
+		const int content_width=box_width-22;
+		const QFontMetrics metrics(font);
+		const int status_height=geometry_quality_status_.isEmpty()?0:std::max(row_height,
+			metrics.boundingRect(QRect(0,0,content_width,1000),Qt::TextWordWrap,
+				geometry_quality_status_).height()+4);
+		const int box_height = 30 + row_height * static_cast<int>(visible_kinds.size())
+			+ status_height + 8;
 		const QRect box(std::max(8, width() - box_width - 16),
 			std::max(8, height() - box_height - 16), box_width, box_height);
 
@@ -2150,8 +2155,9 @@ void main()
 		int y = box.y() + 31;
 		if(!geometry_quality_status_.isEmpty())
 		{
-			painter.setPen(border);painter.drawText(QRect(box.x()+11,y,box.width()-22,row_height),
-				Qt::AlignLeft|Qt::AlignVCenter,geometry_quality_status_);y+=row_height;
+			painter.setPen(border);painter.drawText(QRect(box.x()+11,y,content_width,status_height),
+				Qt::AlignLeft|Qt::AlignVCenter|Qt::TextWordWrap,geometry_quality_status_);
+			y+=status_height;
 		}
 		for (const std::size_t kind_index : visible_kinds)
 		{

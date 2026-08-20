@@ -334,7 +334,16 @@ namespace paracfd::core
 			error = "constraint sample has no canonical topology ID";
 			return false;
 		}
-
+		if (sample.existing_vertex != UvConstraintSample::no_existing_vertex)
+		{
+			if (sample.existing_vertex >= vertices_.size())
+			{
+				error = "constraint sample names an out-of-range exact existing UV vertex";
+				return false;
+			}
+			vertex = sample.existing_vertex;
+			return claim_topology_id(vertex, sample.topology_id, error);
+		}
 		const double tolerance2 = options_.coordinate_tolerance * options_.coordinate_tolerance;
 		std::optional<std::size_t> matching_vertex;
 		for (std::size_t candidate = 0; candidate < vertices_.size(); ++candidate)
@@ -360,20 +369,56 @@ namespace paracfd::core
 		for (const UvTriangle& triangle : triangles_)
 			for (unsigned i = 0; i < 3; ++i)
 				++incidence[edge_key(triangle.vertices[i], triangle.vertices[(i + 1) % 3])];
-		std::optional<Edge> containing_edge;
+		std::vector<std::pair<Edge, unsigned>> containing_edges;
 		for (const auto& [edge, count] : incidence)
 		{
-			(void)count;
 			if (!point_on_segment(sample.uv, vertices_[edge[0]].uv, vertices_[edge[1]].uv,
 				options_.coordinate_tolerance, false)) continue;
-			if (containing_edge)
+			containing_edges.emplace_back(edge, count);
+		}
+		const bool boundary_ambiguity = containing_edges.size() > 1
+			&& sample.boundary_sample;
+		if (boundary_ambiguity)
+		{
+			// A certified trim-boundary sample can sit inside the coordinate band of
+			// an incident interior edge near a tessellation vertex. Incidence one is
+			// exact mesh topology, so it resolves that classification without choosing
+			// the geometrically nearest edge or widening the coordinate tolerance.
+			std::erase_if(containing_edges,
+				[](const auto& candidate) { return candidate.second != 1u; });
+		}
+		if (containing_edges.size() > 1)
+		{
+			const auto& first = containing_edges[0];
+			const auto& second = containing_edges[1];
+			std::ostringstream report;
+			report.precision(17);
+			report << "sample lies on multiple distinct mesh edges; input is not a planar "
+				"triangulation; sample-uv=[" << sample.uv.u << ',' << sample.uv.v
+				<< "] topology=" << sample.topology_id
+				<< " boundary-provenance=" << (sample.boundary_sample ? "yes" : "no")
+				<< " tolerance=" << options_.coordinate_tolerance
+				<< " first=" << edge_text(first.first)
+				<< " incidence=" << first.second
+				<< " first-uv=[[" << vertices_[first.first[0]].uv.u << ','
+				<< vertices_[first.first[0]].uv.v << "],["
+				<< vertices_[first.first[1]].uv.u << ','
+				<< vertices_[first.first[1]].uv.v << "]] second="
+				<< edge_text(second.first) << " second-uv=[["
+				<< vertices_[second.first[0]].uv.u << ','
+				<< vertices_[second.first[0]].uv.v << "],["
+				<< vertices_[second.first[1]].uv.u << ','
+				<< vertices_[second.first[1]].uv.v << "]] incidence=" << second.second;
+			error = report.str();
+			return false;
+		}
+		if (containing_edges.size() == 1)
+			return split_edge(containing_edges.front().first, sample, vertex, error);
+		if (boundary_ambiguity && containing_edges.empty())
 			{
-				error = "sample lies on multiple distinct mesh edges; input is not a planar triangulation";
+				error = "trim-boundary sample did not resolve to a face-boundary edge";
 				return false;
 			}
-			containing_edge = edge;
-		}
-		if (containing_edge) return split_edge(*containing_edge, sample, vertex, error);
 
 		for (std::size_t triangle = 0; triangle < triangles_.size(); ++triangle)
 		{
@@ -382,7 +427,42 @@ namespace paracfd::core
 				vertices_[indices[2]].uv, options_.coordinate_tolerance, true))
 				return split_triangle(triangle, sample, vertex, error);
 		}
-		error = "constraint sample is outside the triangulated face or inside one of its holes";
+		{
+			double nearest_boundary_distance = std::numeric_limits<double>::infinity();
+			std::optional<Edge> nearest_boundary;
+			double nearest_parameter = 0.0;
+			for (const auto& [edge, count] : incidence)
+			{
+				if (count != 1u) continue;
+				const UvPoint& a = vertices_[edge[0]].uv;
+				const UvPoint& b = vertices_[edge[1]].uv;
+				const double du = b.u - a.u, dv = b.v - a.v;
+				const double length2 = du * du + dv * dv;
+				if (!(length2 > 0.0)) continue;
+				const double parameter = std::clamp(((sample.uv.u - a.u) * du
+					+ (sample.uv.v - a.v) * dv) / length2, 0.0, 1.0);
+				const UvPoint closest{a.u + parameter * du, a.v + parameter * dv};
+				const double distance = std::sqrt(squared_distance(sample.uv, closest));
+				if (distance < nearest_boundary_distance)
+				{
+					nearest_boundary_distance = distance;
+					nearest_boundary = edge;
+					nearest_parameter = parameter;
+				}
+			}
+			std::ostringstream report;
+			report.precision(17);
+			report << "constraint sample is outside the triangulated face or inside one of"
+				" its holes; sample-uv=[" << sample.uv.u << ',' << sample.uv.v
+				<< "] topology=" << sample.topology_id << " boundary-provenance="
+				<< (sample.boundary_sample ? "yes" : "no")
+				<< " tolerance=" << options_.coordinate_tolerance;
+			if (nearest_boundary)
+				report << " nearest-boundary=" << edge_text(*nearest_boundary)
+					<< " distance=" << nearest_boundary_distance
+					<< " parameter=" << nearest_parameter;
+			error = report.str();
+		}
 		return false;
 	}
 
@@ -482,8 +562,15 @@ namespace paracfd::core
 				&& vertex != static_cast<std::size_t>(b) && point_on_segment(vertices_[vertex].uv,
 				start, finish, options_.coordinate_tolerance, false))
 			{
-				error = "constraint segment passes through unsampled UV vertex "
-					+ std::to_string(vertex) + "; include it in the canonical sample chain";
+				std::ostringstream report;
+				report.precision(17);
+				report << "constraint segment passes through unsampled UV vertex " << vertex
+					<< " at [" << vertices_[vertex].uv.u << ',' << vertices_[vertex].uv.v
+					<< "] topology=" << vertices_[vertex].topology_id
+					<< "; segment " << a << " [" << start.u << ',' << start.v << "] -> "
+					<< b << " [" << finish.u << ',' << finish.v
+					<< "]; include it in the canonical sample chain";
+				error = report.str();
 				return false;
 			}
 
@@ -679,10 +766,12 @@ namespace paracfd::core
 		UvConstraintMesh working = *this;
 		std::vector<std::uint32_t> sample_vertices;
 		sample_vertices.reserve(samples.size());
-		for (const UvConstraintSample& sample : samples)
+		for (std::size_t sample_index = 0; sample_index < samples.size(); ++sample_index)
 		{
+			const UvConstraintSample& sample = samples[sample_index];
 			std::uint32_t vertex = 0;
-			if (!working.insert_sample(sample, vertex, validation_error)) return fail(validation_error);
+			if (!working.insert_sample(sample, vertex, validation_error))
+				return fail("sample " + std::to_string(sample_index) + ": " + validation_error);
 			sample_vertices.push_back(vertex);
 		}
 		for (std::size_t i = 1; i < sample_vertices.size(); ++i)

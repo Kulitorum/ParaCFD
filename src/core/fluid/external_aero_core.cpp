@@ -34,6 +34,8 @@ namespace paracfd::core
 		eb_options.allow_unverified_same_fragment_patches_for_diagnostics=
 			options.allow_unsafe_same_fragment_patches;
 		eb_options.exact_cell_decomposer=options.exact_cell_decomposer;
+		eb_options.use_exact_cell_decomposer_as_development_oracle=
+			options.use_exact_cell_decomposer_as_development_oracle;
 		embedded_boundary_=build_amr_embedded_boundary_atlas(hierarchy_,wing,bvh,eb_options);
 
 		if(!embedded_boundary_.ready_for_flow())

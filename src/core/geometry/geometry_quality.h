@@ -66,6 +66,16 @@ namespace paracfd::core
 		blocked = 2
 	};
 
+	// Disconnected-component findings are actionable only after every exact CAD contact
+	// relevant to connectivity has been audited.  In particular, a failed edge/face
+	// certificate can be the missing bridge between two apparently disconnected sets.
+	enum class GeometryConnectivityStatus : std::uint8_t
+	{
+		not_checked = 0,
+		verified = 1,
+		unknown = 2
+	};
+
 	struct GeometryIssuePolyline
 	{
 		std::uint32_t source_edge_id = ~std::uint32_t{0};
@@ -96,6 +106,7 @@ namespace paracfd::core
 
 	struct GeometryQualityReport
 	{
+		GeometryConnectivityStatus connectivity_status = GeometryConnectivityStatus::not_checked;
 		// Number of face components found using only exact shared TopoDS edges and exact
 		// full edge-on-face contact certificates. Free boundaries/openings never split a face
 		// component and proximity alone never joins two components.
@@ -105,7 +116,10 @@ namespace paracfd::core
 
 		GeometryFlowEligibility flow_eligibility() const
 		{
-			bool warning = false;
+			// A default/unperformed connectivity report is not evidence that geometry is
+			// clean.  It remains usable as an explicitly warned preview, but only a
+			// completed exact audit may return the clean state.
+			bool warning = connectivity_status != GeometryConnectivityStatus::verified;
 			for (const GeometryIssue& issue : issues)
 			{
 				if (issue.severity == GeometryIssueSeverity::blocker)
@@ -114,6 +128,11 @@ namespace paracfd::core
 			}
 			return warning ? GeometryFlowEligibility::ready_with_warnings
 				: GeometryFlowEligibility::clean;
+		}
+
+		bool exact_connectivity_verified() const
+		{
+			return connectivity_status == GeometryConnectivityStatus::verified;
 		}
 
 		std::size_t warning_count() const
@@ -144,6 +163,9 @@ namespace paracfd::core
 		const GeometryQualityReport& report)
 	{
 		std::vector<std::uint32_t> result;
+		// Never turn a failed contact certificate into a deletion.  Until connectivity is
+		// complete, an apparent island may simply be joined by the uncertified span.
+		if (!report.exact_connectivity_verified()) return result;
 		for (const GeometryIssue& issue : report.issues)
 			if (geometry_issue_is_default_exclusion(issue))
 				result.insert(result.end(), issue.source_triangle_ids.begin(),

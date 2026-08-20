@@ -25,6 +25,22 @@ Missing triangles are openings. There is no separate interior-air material: ram-
 - Runtime geometry is placed before BVH construction. Normals use the affine inverse transpose.
 - CAD preprocessing is static. CUDA timesteps do not traverse CAD, rebuild topology, or intersect triangles.
 
+The GUI has two deliberately different STEP preprocessing modes. Ordinary loading uses a fast
+OpenCascade face tessellation so the wing can be inspected and an explicitly labelled approximate
+CFD result can be tried immediately. That preview does not claim that independently tessellated
+faces share a watertight/contact-conforming mesh. Its BVH may reconcile different tessellation
+segments only when they carry the same known CAD-edge identity; proximity to another CAD edge or
+to a face interior is never treated as proof of attachment, because doing so could close a real
+vent.
+
+`Perform detailed geometry check (slower)` instead audits exact BRep edge/face contact intervals,
+atomizes partial overlaps and junctions, and builds a single contact-conforming triangle mesh with
+shared topology IDs. The checked mesh then goes through the same production finite-triangle EB
+builder as the preview. OpenCascade General Fuse cell decomposition is retained only as an offline
+development oracle for manufactured diagnostics; the GUI does not substitute it for the runtime EB
+algorithm. A failed detailed check stops before CFD and reports the exact source span when one is
+available. It never heals, welds, closes, or deletes geometry implicitly.
+
 The OpenCascade linear deflection is exposed in the paraglider configuration. The current default is 2 mm, which is still substantially finer than the initial 62.5 mm CFD surface cells and avoids unnecessary million-triangle previews. It should eventually be derived from finest CFD spacing.
 
 `naca_step_generator` creates deterministic finite-span, closed four-digit NACA validation wings through OpenCascade. It accepts the profile code, chord, span, and section sampling on the command line and writes an ordinary millimetre-based STEP file that returns through the same importer, placement, tessellation, BVH, AMR, and EB path as external CAD. `--xfoil-dat` additionally writes the exact analytical closed section in XFOIL/Selig order, so an independent reference code can analyse the same geometry rather than XFOIL's finite-gap built-in profile. This is a separate analytical test-geometry source; ParaCFD never extrudes an imported paraglider surface or substitutes this geometry for the supplied canopy.

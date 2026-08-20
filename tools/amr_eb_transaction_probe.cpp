@@ -195,6 +195,7 @@ namespace
 		const TriangleBvh topology_bvh(topology_mesh);
 		EmbeddedBoundaryBuildOptions options;
 		options.exact_cell_decomposer = &reject_exact_halo_cell;
+		options.use_exact_cell_decomposer_as_development_oracle = true;
 		options.complex_subdivisions = 8;
 		options.min_volume_fraction = 1e-12;
 		AmrEbLevelAtlas level;
@@ -232,6 +233,7 @@ namespace
 		const TriangleBvh bvh(mesh);
 		EmbeddedBoundaryBuildOptions options;
 		options.exact_cell_decomposer = &reject_third_cell_lower_face;
+		options.use_exact_cell_decomposer_as_development_oracle = true;
 		options.min_volume_fraction = 1e-12;
 		const EmbeddedBoundary eb = build_embedded_boundary(mesh, bvh,
 			{{0, 0, 0}, 3, 1, 1, 1.0}, options);

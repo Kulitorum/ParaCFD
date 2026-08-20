@@ -108,6 +108,10 @@ namespace paracfd::core
 		// Static geometry callback supplied by front ends that link
 		// paracfd_geometry. The solver library itself remains OpenCascade-free.
 		ExactCellDecomposer exact_cell_decomposer = nullptr;
+		// Explicitly opt into the slower OpenCascade cell decomposition as a
+		// development/diagnostic oracle. Merely linking the callback must not divert
+		// the production finite-triangle path through General Fuse.
+		bool use_exact_cell_decomposer_as_development_oracle = false;
 	};
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
 	// the constructor. initialize() and step() retain all fields and pressure topology on

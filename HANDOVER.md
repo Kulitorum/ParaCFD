@@ -4,6 +4,15 @@
 
 ParaCFD is a purpose-built static-geometry paraglider solver. The former building/channel product path has been removed. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.
 
+STEP import now has an explicit fast/checked split. Normal GUI loading uses OCCT's ordinary
+per-face tessellation, marks contact connectivity as not checked, and permits only a prominently
+labelled approximate CFD run. The preview BVH may reconcile differently tessellated pieces of the
+same known CAD edge; it never welds distinct CAD entities by distance. `Perform detailed geometry
+check (slower)` runs the exact BRep contact audit, atomizes partial contacts/junctions, creates a
+contact-conforming triangle mesh with shared topology IDs, and then invokes the same production
+finite-triangle EB builder. A detailed failure is fail-closed and diagnostic. The per-cell OCCT
+General Fuse decomposer is an offline development oracle only and is not a second GUI solver.
+
 The validated/default momentum solver is the face-centred staggered MAC path.
 The collocated conservative-control-volume path described in the historical section
 below is explicitly experimental because it becomes unstable on high-incidence

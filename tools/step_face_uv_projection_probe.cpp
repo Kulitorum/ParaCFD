@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <numbers>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -233,6 +234,81 @@ namespace
 		return ok;
 	}
 
+	bool per_sample_tolerance_isolation_regression()
+	{
+		const double u_min = 1.5 * std::numbers::pi;
+		const double u_max = 2.5 * std::numbers::pi;
+		const TopoDS_Face face = cylindrical_face(u_min, u_max);
+		const TopoDS_Edge boundary = top_boundary_occurrence(face);
+		if (face.IsNull() || boundary.IsNull())
+		{
+			std::printf("[per-sample tolerance isolation] FAIL: construction\n");
+			return false;
+		}
+		constexpr double loose_tolerance = 1.0e-4;
+		constexpr double tight_tolerance = 1.0e-8;
+		constexpr double offset = 4.0e-5;
+		const std::vector<double> parameters = {1.8 * std::numbers::pi,
+			2.2 * std::numbers::pi};
+
+		auto path_is_isolated = [&](const char* label, std::vector<gp_Pnt> points,
+			bool boundary_use, const std::vector<TopoDS_Edge>& boundary_edges)
+		{
+			std::vector<std::array<double, 2>> uv, scalar_uv;
+			std::string error, scalar_error;
+			bool scalar_used_exact = false;
+			const bool all_loose =
+				paracfd::core::detail::project_trim_valid_face_uv(points, face,
+					boundary_edges, boundary_use, loose_tolerance, scalar_uv,
+					scalar_error, &scalar_used_exact);
+			const bool loose_then_tight =
+				paracfd::core::detail::project_trim_valid_face_uv(points, face,
+					boundary_edges, boundary_use,
+					std::vector<double>{loose_tolerance, tight_tolerance}, uv, error);
+			const bool rejected_second = !loose_then_tight && uv.empty()
+				&& error.find("sample 1") != std::string::npos;
+			const std::string second_error = error;
+
+			uv.clear();
+			error.clear();
+			const bool tight_then_loose =
+				paracfd::core::detail::project_trim_valid_face_uv(points, face,
+					boundary_edges, boundary_use,
+					std::vector<double>{tight_tolerance, loose_tolerance}, uv, error);
+			const bool rejected_first = !tight_then_loose && uv.empty()
+				&& error.find("sample 0") != std::string::npos;
+			const bool exact_path = !boundary_use || scalar_used_exact;
+			const bool ok = all_loose && scalar_error.empty()
+				&& scalar_uv.size() == points.size() && exact_path
+				&& rejected_second && rejected_first;
+			std::printf("[%s per-sample tolerance isolation] %s\n", label,
+				ok ? "PASS" : "FAIL");
+			if (!all_loose)
+				std::printf("  all-loose diagnostic: %s\n", scalar_error.c_str());
+			if (!rejected_second)
+				std::printf("  loose/tight diagnostic: %s\n", second_error.c_str());
+			if (!rejected_first)
+				std::printf("  tight/loose diagnostic: %s\n", error.c_str());
+			return ok;
+		};
+
+		std::vector<gp_Pnt> interior_points = points_at(face, parameters,
+			0.5 * kHeight);
+		for (gp_Pnt& point : interior_points)
+		{
+			gp_Vec radial(point.X(), point.Y(), 0.0);
+			radial.Normalize();
+			point.Translate(radial.Multiplied(offset));
+		}
+		std::vector<gp_Pnt> boundary_points = points_at(face, parameters, kHeight);
+		for (gp_Pnt& point : boundary_points)
+			point.Translate(gp_Vec(0.0, 0.0, offset));
+
+		return path_is_isolated("interior", std::move(interior_points), false, {})
+			&& path_is_isolated("exact boundary", std::move(boundary_points), true,
+				{boundary});
+	}
+
 	bool full_period_failure_regressions()
 	{
 		const TopoDS_Face face = cylindrical_face(0.0, 2.0 * std::numbers::pi);
@@ -269,8 +345,9 @@ int main()
 {
 	const bool success = shifted_periodic_success_regression();
 	const bool native_tolerance = combined_native_boundary_tolerance_regression();
+	const bool sample_isolation = per_sample_tolerance_isolation_regression();
 	const bool failures = full_period_failure_regressions();
 	std::printf("step face UV projection probe: %s\n",
-		success && native_tolerance && failures ? "PASS" : "FAIL");
-	return success && native_tolerance && failures ? 0 : 1;
+		success && native_tolerance && sample_isolation && failures ? "PASS" : "FAIL");
+	return success && native_tolerance && sample_isolation && failures ? 0 : 1;
 }

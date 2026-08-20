@@ -46,6 +46,7 @@ namespace
 		mesh.triangle_cad_edge_is_periodic_seam.assign(half_edges,0u);
 		mesh.triangle_cad_edge_contact_ids.assign(half_edges,TriMesh::kNoCadContactId);
 		mesh.triangle_cad_edge_certified_fan_degrees.assign(half_edges,0u);
+		mesh.triangle_cad_edge_atom_ids.assign(half_edges,TriMesh::kNoCadEdgeAtomId);
 	}
 
 	TriMesh three_sector_junction(double edge_length)
@@ -104,6 +105,7 @@ namespace
 		EmbeddedBoundaryBuildOptions options;
 		options.complex_subdivisions = 2;
 		options.exact_cell_decomposer = capture_exact_input;
+		options.use_exact_cell_decomposer_as_development_oracle = true;
 		const EmbeddedBoundary boundary = build_embedded_boundary(mesh, bvh,
 			{{0, 0, 0}, 1, 1, 1, 1.0}, options);
 		require(!boundary.ready_for_flow(),
@@ -167,6 +169,66 @@ int main()
 			&&distinct_bvh.edge_certificate(1,0).kind==FabricEdgeKind::confirmed_free,
 			"distinct explicit topology IDs were proximity-welded at identical coordinates");
 
+		TriMesh legacy_distinct_cad_edges=coincident_but_distinct;
+		legacy_distinct_cad_edges.topology_vertex_ids.clear();
+		initialize_cad_sidecars(legacy_distinct_cad_edges);
+		for(const std::size_t half_edge:{std::size_t{0},std::size_t{3}})
+		{
+			legacy_distinct_cad_edges.triangle_cad_edge_provenance_states[half_edge]=
+				static_cast<std::uint8_t>(CadEdgeProvenanceState::known);
+			legacy_distinct_cad_edges.triangle_cad_edge_ids[half_edge]=
+				half_edge==0?100u:200u;
+			legacy_distinct_cad_edges.triangle_cad_edge_incident_face_counts[half_edge]=1;
+			legacy_distinct_cad_edges.triangle_cad_edge_tolerances[half_edge]=1.0e-4;
+		}
+		TriangleBvh legacy_distinct_cad_bvh(legacy_distinct_cad_edges);
+		for(std::uint32_t triangle=0;triangle<2;++triangle)
+		{
+			const FabricEdgeCertificate certificate=
+				legacy_distinct_cad_bvh.edge_certificate(triangle,0);
+			require(certificate.kind!=FabricEdgeKind::attached
+				&&certificate.attachment_id==FabricEdgeCertificate::no_attachment,
+				"distinct CAD edge identities were attached by the legacy proximity path");
+		}
+
+		TriMesh distinct_atoms;
+		append_triangle(distinct_atoms,{edge_a,edge_b,{0.5,0.8,0.5}},
+			{250,251,252},0);
+		append_triangle(distinct_atoms,{edge_a,edge_b,{0.5,0.1,0.9}},
+			{250,251,253},1);
+		initialize_cad_sidecars(distinct_atoms);
+		distinct_atoms.triangle_cad_edge_atom_ids[0]=1001;
+		distinct_atoms.triangle_cad_edge_atom_ids[3]=1002;
+		TriangleBvh distinct_atom_bvh(distinct_atoms);
+		require(distinct_atom_bvh.edge_certificate(0,0).kind==FabricEdgeKind::confirmed_free
+			&&distinct_atom_bvh.edge_certificate(1,0).kind==FabricEdgeKind::confirmed_free,
+			"distinct exact fan-one atoms sharing endpoint IDs were collapsed");
+		require(distinct_atom_bvh.edge_certificate(0,0).attachment_id
+				==FabricEdgeCertificate::no_attachment
+			&&distinct_atom_bvh.edge_certificate(1,0).attachment_id
+				==FabricEdgeCertificate::no_attachment,
+			"distinct exact fan-one atoms acquired a shared attachment token");
+
+		TriMesh exact_junction=three_sector_junction(0.6);
+		initialize_cad_sidecars(exact_junction);
+		for(const std::size_t half_edge:{std::size_t{0},std::size_t{3},std::size_t{6}})
+		{
+			exact_junction.triangle_cad_edge_atom_ids[half_edge]=2001;
+			exact_junction.triangle_cad_edge_contact_ids[half_edge]=2001;
+			exact_junction.triangle_cad_edge_certified_fan_degrees[half_edge]=3;
+		}
+		TriangleBvh exact_junction_bvh(exact_junction);
+		for(std::uint32_t triangle=0;triangle<3;++triangle)
+		{
+			const FabricEdgeCertificate certificate=
+				exact_junction_bvh.edge_certificate(triangle,0);
+			require(certificate.kind==FabricEdgeKind::attached
+				&&certificate.role==FabricEdgeRole::junction
+				&&certificate.incident_fan_degree==3
+				&&certificate.cad_contact_id==2001,
+				"shared fan-three atom changed its public BVH certificate");
+		}
+
 		TriMesh incomplete_fan;
 		append_triangle(incomplete_fan,{edge_a,edge_b,{0.5,0.8,0.5}},
 			{300,301,302},0);
@@ -227,6 +289,7 @@ int main()
 		contact_clip_source.triangle_cad_edge_tolerances[0]=2.0e-6;
 		contact_clip_source.triangle_cad_edge_contact_ids[0]=91;
 		contact_clip_source.triangle_cad_edge_certified_fan_degrees[0]=3;
+		contact_clip_source.triangle_cad_edge_atom_ids[0]=901;
 		const TriMesh contact_clipped=clip_mesh_to_axis_slab(contact_clip_source,0,0.25,1.0);
 		bool retained_interior_contact=false;
 		for(std::size_t triangle=0;triangle<contact_clipped.triangle_count();++triangle)
@@ -235,9 +298,10 @@ int main()
 					contact_clipped.cad_edge_id(triangle,half_edge)==TriMesh::kNoCadEdgeId
 					&&contact_clipped.cad_edge_contact_id(triangle,half_edge)==91
 					&&contact_clipped.cad_edge_certified_fan_degree(triangle,half_edge)==3
+					&&contact_clipped.cad_edge_atom_id(triangle,half_edge)==901
 					&&contact_clipped.cad_edge_tolerance(triangle,half_edge)==2.0e-6);
 		require(retained_interior_contact,
-			"axis-slab clipping dropped a face-interior CAD contact certificate");
+			"axis-slab clipping dropped a face-interior CAD contact/atom certificate");
 
 		TriMesh inconsistent=three_sector_junction(0.6);
 		inconsistent.positions_fp64[3*3]+=1e-6;

@@ -21,6 +21,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,27 @@ namespace paracfd::core
 		face_interior = 1
 	};
 
+	// Exact edge/trim certification can discover that only an interval of a nominally
+	// free source edge lies on another face, or that the face-side sector count changes
+	// along the edge.  These states cannot be represented by the current whole-edge
+	// contact graph without first atomizing the edge at the interval endpoints.  They
+	// are therefore retained explicitly instead of being promoted to a false whole-edge
+	// contact or discarded as if the surfaces were unrelated.
+	enum class StepEdgeFaceSpanKind : std::uint8_t
+	{
+		unclassified = 0,
+		trim_boundary = 1,
+		face_interior = 2
+	};
+
+	enum class StepEdgeFaceSpanIssue : std::uint8_t
+	{
+		partial_coverage = 0,
+		mixed_sector_count = 1,
+		boundary_occurrence_handoff = 2,
+		certification_failure = 3
+	};
+
 	struct StepContactFaceUse
 	{
 		std::uint32_t source_face_id = 0;
@@ -60,13 +82,14 @@ namespace paracfd::core
 
 	struct StepContactCurve
 	{
-		// Deterministic physical-curve ID. This is the smallest deterministic TopoDS edge
-		// traversal ID among the exact reciprocal source edges below.
+		// Deterministic physical-atom ID. Public curves omit fan-one opening atoms, so IDs
+		// remain sorted/unique but can contain gaps. One source CAD edge may contribute
+		// several curves after partial contacts, T-junctions, or occurrence handoffs split it.
 		std::uint64_t id = 0;
-		// Canonical source edge retained for compatibility and concise diagnostics.
+		// Smallest source CAD edge ID spanning this atom, retained for concise diagnostics.
 		std::uint32_t source_edge_id = TriMesh::kNoCadEdgeId;
-		// All exact full-extent source-edge copies represented by this physical curve,
-		// sorted by their deterministic TopoDS traversal IDs.
+		// All exact source-edge spans represented by this atom, sorted and de-duplicated.
+		// The same source edge can legitimately appear in more than one StepContactCurve.
 		std::vector<std::uint32_t> source_edge_ids;
 		double tolerance_m = 0.0;
 		std::uint32_t fan_degree = 0;
@@ -83,9 +106,51 @@ namespace paracfd::core
 		std::vector<StepContactFaceUse> uses;
 	};
 
+	// This is deliberately separate from the unresolved-record lists.  An empty,
+	// default-constructed graph means "not audited", not "certified clean".  A failed
+	// audit can still carry exact span diagnostics and an approximate display mesh.
+	enum class StepCadContactAuditStatus : std::uint8_t
+	{
+		not_performed = 0,
+		complete = 1,
+		failed = 2
+	};
+
 	struct StepCadContactGraph
 	{
+		StepCadContactAuditStatus audit_status = StepCadContactAuditStatus::not_performed;
+		// Populated only when preprocessing itself could not finish.  A completed audit
+		// with unresolved records uses those records' more local reasons instead.
+		std::string audit_failure_reason;
 		std::vector<StepContactCurve> curves;
+		struct UnresolvedEdgeFaceSpan
+		{
+			std::uint32_t source_edge_id = TriMesh::kNoCadEdgeId;
+			std::uint32_t target_face_id = 0;
+			// Raw parameters on source_edge_id's finite OCCT curve, not normalized
+			// fractions.  A certification failure uses the entire source range.
+			double source_parameter_begin = 0.0;
+			double source_parameter_end = 0.0;
+			double source_parameter_tolerance = 0.0;
+			// Canonical source-curve endpoints in SI metres.  They let OCC-free GUI
+			// diagnostics draw the exact unresolved span rather than a broad cell box.
+			std::array<double, 3> endpoint_begin_m{};
+			std::array<double, 3> endpoint_end_m{};
+			StepEdgeFaceSpanKind kind = StepEdgeFaceSpanKind::unclassified;
+			// 1 for a physical trim boundary, 2 for a face-interior/seam span, and
+			// 0 only when exact classification itself failed.
+			std::uint8_t target_sector_count = 0;
+			std::uint8_t target_boundary_occurrence_count = 0;
+			std::array<std::uint32_t, 2> target_boundary_occurrence_ids{{
+				std::numeric_limits<std::uint32_t>::max(),
+				std::numeric_limits<std::uint32_t>::max() }};
+			std::array<std::int8_t, 2> target_boundary_orientations{{ 0, 0 }};
+			std::array<double, 2> target_parameter_begin{{ 0.0, 0.0 }};
+			std::array<double, 2> target_parameter_end{{ 0.0, 0.0 }};
+			StepEdgeFaceSpanIssue issue = StepEdgeFaceSpanIssue::certification_failure;
+			std::string reason;
+		};
+		std::vector<UnresolvedEdgeFaceSpan> unresolved_edge_face_spans;
 		// A face use whose canonical 3D contact samples could not be represented by
 		// one unique, trim-valid UV chain.  The source geometry and the other contact
 		// records remain useful for viewing and diagnostics, but a conforming face
@@ -120,7 +185,10 @@ namespace paracfd::core
 
 		bool conforming_ready() const
 		{
-			return unresolved_partial_overlaps.empty()
+			return audit_status == StepCadContactAuditStatus::complete
+				&& audit_failure_reason.empty()
+				&& unresolved_edge_face_spans.empty()
+				&& unresolved_partial_overlaps.empty()
 				&& unresolved_uv_projections.empty();
 		}
 	};
@@ -142,7 +210,21 @@ namespace paracfd::core
 	StepGeometry load_step_geometry(const std::string& path, double deflection_mm = 2.0,
 		std::string* error = nullptr);
 
-	// Read + triangulate a STEP file into a TriMesh (metres, face-local normals). Triangles
+	// Fast interactive/display import. This deliberately skips the exact CAD-contact audit
+	// and returns OCCT's ordinary per-face tessellation with contacts=not_performed and
+	// connectivity=unknown. It is suitable for the explicitly approximate GUI workflow;
+	// callers requesting a detailed geometry check must reload through load_step_geometry().
+	StepGeometry load_step_geometry_preview(const std::string& path,
+		double deflection_mm = 2.0,std::string* error = nullptr);
+
+	// Strict read + triangulation for consumers which do not retain StepGeometry::contacts.
+	// It returns an empty mesh with a precise error if the exact CAD-contact audit or
+	// conforming tessellation was not certified. Interactive clients which intentionally
+	// accept an explicitly labelled approximate mesh should call load_step_geometry_preview()
+	// so the not-performed audit state remains visible. The mesh-only
+	// load_step_mesh_approximate() wrapper is for callers that cannot retain that state.
+	//
+	// Triangles
 	// retain source-face IDs and per-half-edge CAD boundary provenance without exposing OCC
 	// types. A face-boundary segment whose OCCT polygon mapping is unavailable or ambiguous is
 	// explicitly marked `unknown_boundary`; it is never collapsed into the same sentinel as an
@@ -153,5 +235,11 @@ namespace paracfd::core
 	// On any failure (unreadable file, empty/failed transfer, no triangulable faces) the
 	// returned TriMesh is empty() and, if `error` is non-null, it holds a human-readable reason.
 	TriMesh load_step_mesh(const std::string& path, double deflection_mm = 2.0, std::string* error = nullptr);
+
+	// Explicitly lossy convenience route. It skips exact contact preprocessing and discards
+	// the preview result's explicit not-performed readiness state. Strict consumers must use
+	// load_step_mesh() instead.
+	TriMesh load_step_mesh_approximate(const std::string& path, double deflection_mm = 2.0,
+		std::string* error = nullptr);
 
 }

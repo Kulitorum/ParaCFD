@@ -419,7 +419,12 @@ namespace paracfd::core
 			}
 			auto exact_occt_fallback=[&]()->bool
 			{
-				if(!opt.exact_cell_decomposer)return false;
+				// General Fuse is intentionally an explicit development oracle.  It is
+				// useful for manufactured comparisons, but warning-only Boolean reports
+				// do not identify a causal fabric feature and must not replace the
+				// deterministic finite-triangle arrangement in production preprocessing.
+				if(!opt.use_exact_cell_decomposer_as_development_oracle||
+					!opt.exact_cell_decomposer)return false;
 				auto reject=[&](std::string reason)
 				{
 					EbCellTopology& topology=eb.cells[cell];topology=EbCellTopology{};
@@ -605,13 +610,14 @@ namespace paracfd::core
 				return true;
 			};
 			if(exact_occt_fallback())continue;
-			auto exact_arrangement_fallback=[&]()->bool
+			auto exact_arrangement_fallback=[&](bool allow_qualitative_preview=false)->bool
 			{
 				// The subdivision option remains the product-level switch for complex-cell
 				// reconstruction, but the enabled path is geometric: it has no raster and no
 				// assumptions about a particular CAD model, seam layout, or fragment count.
 				if(opt.complex_subdivisions<2||
-					opt.allow_unverified_same_fragment_patches_for_diagnostics)return false;
+					(opt.allow_unverified_same_fragment_patches_for_diagnostics&&
+						!allow_qualitative_preview))return false;
 				std::vector<LocalSurfaceTriangle> input;input.reserve(ids.size());
 				double arrangement_contact=bvh.edge_contact_tolerance(),arrangement_clearance=bvh.edge_clearance_tolerance();
 				for(std::uint32_t id:ids)
@@ -928,7 +934,12 @@ namespace paracfd::core
 					const bool exact_area_mismatch=!(section_area>0)||std::abs(covered-section_area)>exact_area_tolerance;
 					if(aligned_edge_preflight||exact_area_mismatch)
 					{
-						if(exact_arrangement_fallback())continue;
+						// Sampling each adjacent cell independently cannot represent a partial
+						// membrane that lies exactly on their shared face: all of either cell's
+						// samples are on only one side, so the opening can be lost.  Use the exact
+						// finite-triangle arrangement for this rare case even in the explicitly
+						// qualitative preview.  This is CPU preprocessing, never a timestep path.
+						if(exact_arrangement_fallback(true))continue;
 						eb.cells[cell].state=EbCellState::unresolved;eb.unresolved.push_back({cell,ids,
 							"Cartesian-aligned fabric face is not exactly complete; enable complex_subdivisions for exact opening/overlap topology"});continue;
 					}

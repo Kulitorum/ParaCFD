@@ -1,7 +1,6 @@
 #pragma once
 
-#include "core/geometry/geometry_quality.h"
-#include "core/geometry/tri_mesh.h"
+#include "core/geometry/step_import.h"
 #include "core/paraglider_config.h"
 
 #include <QMainWindow>
@@ -104,6 +103,9 @@ namespace paracfd::gui
 		paracfd::core::TriMesh imported_mesh_;
 		paracfd::core::TriMesh source_mesh_;
 		paracfd::core::GeometryQualityReport geometry_quality_;
+		paracfd::core::GeometryQualityReport preview_geometry_quality_;
+		paracfd::core::StepCadContactGraph cad_contacts_;
+		paracfd::core::StepCadContactGraph preview_cad_contacts_;
 		std::vector<std::uint32_t> source_triangle_to_imported_;
 		QString step_path_,config_path_,orientation_note_;
 		std::uint64_t snapshot_generation_=0,surface_generation_=0;
@@ -143,8 +145,12 @@ namespace paracfd::gui
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
 		std::vector<float> cp_plus_,cp_minus_,delta_cp_,triangle_pressure_force_xyz_;
 		float delta_cp_range_=1,side_cp_range_=1;
+		std::size_t approximate_same_fragment_patches_=0;
+		double approximate_same_fragment_area_=0;
+		bool current_run_detailed_geometry_=false;
 		bool thin_debug_display_=false;
 		bool half_wing_display_=false;
+		bool detailed_geometry_display_=false;
 		bool embedded_boundary_diagnostic_display_=false;
 	};
 }

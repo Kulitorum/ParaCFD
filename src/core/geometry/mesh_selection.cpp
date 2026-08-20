@@ -68,6 +68,11 @@ namespace paracfd::core
 					source.triangle_cad_edge_certified_fan_degrees.begin() + first,
 					source.triangle_cad_edge_certified_fan_degrees.begin() + first + 3);
 			}
+			if (source.has_cad_edge_atom_provenance())
+				destination.triangle_cad_edge_atom_ids.insert(
+					destination.triangle_cad_edge_atom_ids.end(),
+					source.triangle_cad_edge_atom_ids.begin() + first,
+					source.triangle_cad_edge_atom_ids.begin() + first + 3);
 		}
 
 		void compute_referenced_bbox(TriMesh& mesh)
