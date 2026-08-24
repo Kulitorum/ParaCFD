@@ -31,7 +31,6 @@
     "surface_refinement_distance": 0.35,
     "wake_length": 8.0,
     "wake_radius": 2.0,
-    "complex_subdivisions": 4,
     "min_volume_fraction": 0.25,
     "min_aperture_area_fraction": 0.0001
   },

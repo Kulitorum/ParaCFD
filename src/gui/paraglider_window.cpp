@@ -1,6 +1,7 @@
 #include "gui/paraglider_window.h"
 
 #include "core/aero_sweep.h"
+#include "core/cuda_probe.h"
 #include "core/fluid/amr_eb.h"
 #include "core/fluid/amr_grid.h"
 #include "core/fluid/amr_pressure.h"
@@ -8,7 +9,6 @@
 #include "core/geometry/embedded_boundary.h"
 #include "core/geometry/model_placement.h"
 #include "core/geometry/mesh_clip.h"
-#include "core/geometry/mesh_selection.h"
 #include "core/geometry/step_import.h"
 #include "core/geometry/triangle_bvh.h"
 #include "gui/paraglider_sim_worker.h"
@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <set>
@@ -133,6 +134,101 @@ namespace paracfd::gui
 			return {};
 		}
 
+		std::size_t safe_cuda_budget(const CudaMemoryInfo& memory,bool include_current_free)
+		{
+			// Leave room for the desktop compositor, CUDA context, visualization and
+			// transient library workspaces.  Crossing dedicated VRAM into WDDM shared
+			// memory is technically legal but catastrophically slow for this workload.
+			const std::size_t total_budget=static_cast<std::size_t>(0.70L*memory.total_bytes);
+			if(!include_current_free)return total_budget;
+			const std::size_t free_budget=static_cast<std::size_t>(0.85L*memory.free_bytes);
+			return std::min(total_budget,free_budget);
+		}
+
+		struct WingSectionMeasurement
+		{
+			double chord=0.0,thickness=0.0;
+			int accepted_sections=0;
+		};
+
+		WingSectionMeasurement measure_wing_sections(const TriMesh& oriented)
+		{
+			WingSectionMeasurement result;if(oriented.empty())return result;
+			const double span=static_cast<double>(oriented.bbox_max[1])-oriented.bbox_min[1];
+			const double scale=std::max({span,
+				static_cast<double>(oriented.bbox_max[0])-oriented.bbox_min[0],
+				static_cast<double>(oriented.bbox_max[2])-oriented.bbox_min[2],1.0});
+			if(!(span>1.0e-9*scale))return result;
+			const double tolerance=1.0e-9*scale,tolerance2=tolerance*tolerance;
+			std::vector<double> chords,thicknesses;
+			for(const double fraction:{0.20,0.35,0.50,0.65,0.80})
+			{
+				const double plane=oriented.bbox_min[1]+fraction*span;
+				std::vector<Vec3d> points;
+				auto append_unique=[&](Vec3d point)
+				{
+					for(const Vec3d existing:points)
+						if((existing.x-point.x)*(existing.x-point.x)+
+							(existing.z-point.z)*(existing.z-point.z)<=tolerance2)return;
+					points.push_back(point);
+				};
+				for(std::size_t triangle=0;triangle<oriented.triangle_count();++triangle)
+				{
+					Vec3d vertex[3];double distance[3];
+					for(int corner=0;corner<3;++corner)
+					{
+						const auto value=oriented.vertex_position_double(
+							oriented.indices[3*triangle+corner]);
+						vertex[corner]={value[0],value[1],value[2]};
+						distance[corner]=vertex[corner].y-plane;
+						if(std::abs(distance[corner])<=tolerance)append_unique(vertex[corner]);
+					}
+					for(int edge=0;edge<3;++edge)
+					{
+						const int next=(edge+1)%3;
+						if(!((distance[edge]<-tolerance&&distance[next]>tolerance)||
+							(distance[edge]>tolerance&&distance[next]<-tolerance)))continue;
+						const double t=distance[edge]/(distance[edge]-distance[next]);
+						append_unique(vertex[edge]+(vertex[next]-vertex[edge])*t);
+					}
+				}
+				if(points.size()<6)continue;
+				double mean_x=0.0,mean_z=0.0;
+				for(const Vec3d point:points){mean_x+=point.x;mean_z+=point.z;}
+				mean_x/=points.size();mean_z/=points.size();
+				double xx=0.0,xz=0.0,zz=0.0;
+				for(const Vec3d point:points)
+				{
+					const double x=point.x-mean_x,z=point.z-mean_z;
+					xx+=x*x;xz+=x*z;zz+=z*z;
+				}
+				const double angle=0.5*std::atan2(2.0*xz,xx-zz);
+				const double ux=std::cos(angle),uz=std::sin(angle),
+					vx=-uz,vz=ux;
+				double chord_lo=std::numeric_limits<double>::infinity(),
+					chord_hi=-chord_lo,thickness_lo=chord_lo,thickness_hi=-chord_lo;
+				for(const Vec3d point:points)
+				{
+					const double x=point.x-mean_x,z=point.z-mean_z;
+					const double along=x*ux+z*uz,normal=x*vx+z*vz;
+					chord_lo=std::min(chord_lo,along);chord_hi=std::max(chord_hi,along);
+					thickness_lo=std::min(thickness_lo,normal);
+					thickness_hi=std::max(thickness_hi,normal);
+				}
+				const double chord=chord_hi-chord_lo,thickness=thickness_hi-thickness_lo;
+				if(!(chord>1.0e-6*scale&&thickness>1.0e-6*scale&&thickness<chord))continue;
+				chords.push_back(chord);thicknesses.push_back(thickness);
+			}
+			if(chords.empty())return result;
+			auto median=[](std::vector<double> values)
+			{
+				std::sort(values.begin(),values.end());const std::size_t middle=values.size()/2;
+				return values.size()%2?values[middle]:0.5*(values[middle-1]+values[middle]);
+			};
+			result.chord=median(chords);result.thickness=median(thicknesses);
+			result.accepted_sections=static_cast<int>(chords.size());return result;
+		}
+
 		std::vector<Vec3d> clip_triangle_to_box(const std::array<Vec3d,3>& triangle,
 			const Vec3d& lo,const Vec3d& hi)
 		{
@@ -170,8 +266,7 @@ namespace paracfd::gui
 		SimInfo initial;initial.nx=initial.ny=initial.nz=32;initial.h=0.5;initial.coarse_h=0.5;initial.finest_h=0.5;initial.Lx=initial.Ly=initial.Lz=16;initial.U=config_.freestream.speed;initial.rho=config_.freestream.rho;initial.nu=config_.freestream.nu;initial.name="paraglider";viewer_->setInfo(initial);
 		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(400);viewer_->setArrowSpeedMult(0.1f);viewer_->setArrowSizeMult(0.5f);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(7);
 		buildMenus();buildControls();configToUi(config_);
-		// The default interactive mode is the explicitly labelled first-order preview.
-		// Keep its controls visible rather than silently overriding stricter config values.
+		// Start with a modest grid; geometry topology always comes from the closed solid.
 		levels_->setValue(2);
 		min_volume_fraction_->setValue(0.005);
 		repaint_timer_=new QTimer(this);connect(repaint_timer_,&QTimer::timeout,this,[this]{updateSnapshot();viewer_->update();});repaint_timer_->start(16);
@@ -211,24 +306,9 @@ namespace paracfd::gui
 		auto* panel=new QWidget;auto* column=new QVBoxLayout(panel);column->setContentsMargins(8,8,8,8);
 		wing_label_=new QLabel("No STEP wing loaded");wing_label_->setWordWrap(true);column->addWidget(wing_label_);
 		auto* wind_hint=new QLabel(QString::fromUtf8("FREESTREAM +X  →\nBBox infers span/chord; leading/trailing needs confirmation."));wind_hint->setStyleSheet("font-weight:600;color:#ff9a75;background:#20242a;padding:6px;");column->addWidget(wind_hint);
-		auto* geometry_group=new QGroupBox("CAD geometry quality");auto* geometry_column=new QVBoxLayout(geometry_group);
-		geometry_quality_readout_=new QLabel("Load a STEP file to inspect exact fabric connectivity.");geometry_quality_readout_->setWordWrap(true);geometry_quality_readout_->setStyleSheet("color:#000;");
-		exclude_disconnected_=new QCheckBox("Exclude detached fabric after detailed check");exclude_disconnected_->setChecked(true);exclude_disconnected_->setEnabled(false);exclude_disconnected_->setToolTip("When the detailed check proves that a fabric component is detached, omit it from that CFD run. Uncheck this before Build to retain every checked surface. Connected ribs and mini-ribs remain aerodynamic fabric, and the STEP file is never modified.");
-		geometry_column->addWidget(geometry_quality_readout_);geometry_column->addWidget(exclude_disconnected_);column->addWidget(geometry_group);
-		connect(exclude_disconnected_,&QCheckBox::toggled,this,[this]
-		{
-			if(cad_contacts_.conforming_ready())
-			{
-				if(aoa_sweep_active_)cancelAoaSweep("detached-fabric selection changed");
-				shutdownWorker();restoreFullWingDisplay();geometry_quality_=preview_geometry_quality_;
-				cad_contacts_=preview_cad_contacts_;resetSimulationAfterGeometryChange();
-				viewer_->setMesh(source_mesh_);viewer_->setMeshPlacement(config_.placement);
-				updateGeometryIssueDisplay();updateWingLabel();viewer_->frameWingView();
-				statusBar()->showMessage("Detached-fabric preference changed. Build again with the detailed geometry check to apply it.",8000);
-				return;
-			}
-			applyGeometrySelection(true);
-		});
+		auto* geometry_group=new QGroupBox("Aerodynamic solid");auto* geometry_column=new QVBoxLayout(geometry_group);
+		solid_status_readout_=new QLabel("Load one closed STEP solid. Internal ribs and vents do not belong in the aerodynamic export.");solid_status_readout_->setWordWrap(true);solid_status_readout_->setStyleSheet("color:#000;");
+		geometry_column->addWidget(solid_status_readout_);column->addWidget(geometry_group);
 		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
 		auto* aoa_group=new QGroupBox("Aerodynamic reference / convergence / AoA sweep");
 		auto* aoa_column=new QVBoxLayout(aoa_group);
@@ -277,9 +357,6 @@ namespace paracfd::gui
 		conservative_momentum_=new QCheckBox("Experimental collocated CV momentum");
 		conservative_momentum_->setChecked(false);
 		conservative_momentum_->setToolTip("Development solver: currently unstable at high incidence. Leave unchecked to use the validated face-centred MAC production solver.");
-		strict_exact_eb_=new QCheckBox("Perform detailed geometry check (slower)");
-		strict_exact_eb_->setChecked(false);
-		strict_exact_eb_->setToolTip("Checks the CAD fabric contacts and builds one matching surface mesh before the normal CFD grid builder runs. If a concrete contact problem is found, the wing becomes transparent and the affected source interval is highlighted in red. This can take much longer.");
 		half_wing_=new QCheckBox("Use HalfWing Simulation");
 		half_wing_->setToolTip("Simulate the +Y span half with a free-slip mirror plane at the wing centre. Use only for symmetric geometry at zero sideslip. Integrated loads are reconstructed for the whole wing.");
 		auto_pause_=new QCheckBox("Auto-pause when converged / bounded");auto_pause_->setChecked(true);
@@ -291,31 +368,27 @@ namespace paracfd::gui
 		connect(step_button_,&QPushButton::clicked,this,[this]{if(worker_)worker_->stepOnce();});
 		connect(auto_pause_,&QCheckBox::toggled,this,[this](bool){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});
 		connect(auto_pause_sensitivity_,&QSlider::valueChanged,this,[this](int){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});
-		connect(half_wing_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&thin_y_debug_->isChecked())thin_y_debug_->setChecked(false);updateGridReadout();});
+		connect(half_wing_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&thin_y_debug_->isChecked())thin_y_debug_->setChecked(false);auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
 		auto* run_row=new QHBoxLayout;run_row->addWidget(play_button_);run_row->addWidget(step_button_);
 		auto* sensitivity_form=new QFormLayout;sensitivity_form->addRow("Settle sensitivity",auto_pause_sensitivity_);
-		run_column->addWidget(build_button_);run_column->addLayout(run_row);run_column->addWidget(conservative_momentum_);run_column->addWidget(strict_exact_eb_);run_column->addWidget(half_wing_);run_column->addWidget(auto_pause_);run_column->addLayout(sensitivity_form);column->addWidget(run_group);
-		auto* thin_group=new QGroupBox("Cropped Y-span diagnosis");auto* thin_form=new QFormLayout(thin_group);thin_y_debug_=new QCheckBox("Run cropped Y volume");thin_y_debug_->setToolTip("Crop the oriented wing and CFD domain to a configurable Y width at one span station. This uses the real uniform EB solver but is a diagnostic case, not a physical whole-wing result.");thin_y_fraction_=real_spin(0.05,0.95,0.5,3);thin_y_fraction_->setSingleStep(0.025);thin_y_fraction_->setToolTip("Span station through the oriented wing bbox: 0 is one tip, 0.5 is centre, 1 is the other tip.");thin_y_width_=real_spin(0.001,100.0,0.125,4," m");thin_y_width_->setSingleStep(0.125);thin_y_width_->setToolTip("Requested physical Y width. It is rounded upward to an integer number of configured finest cells; the actual width is shown below.");thin_form->addRow(thin_y_debug_);thin_form->addRow("Span station",thin_y_fraction_);thin_form->addRow("Y volume width",thin_y_width_);column->addWidget(thin_group);connect(thin_y_debug_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&half_wing_->isChecked())half_wing_->setChecked(false);updateGridReadout();});connect(thin_y_fraction_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(thin_y_width_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});
+		run_column->addWidget(build_button_);run_column->addLayout(run_row);run_column->addWidget(conservative_momentum_);run_column->addWidget(half_wing_);run_column->addWidget(auto_pause_);run_column->addLayout(sensitivity_form);column->addWidget(run_group);
+		auto* thin_group=new QGroupBox("Cropped Y-span diagnosis");auto* thin_form=new QFormLayout(thin_group);thin_y_debug_=new QCheckBox("Run cropped Y volume");thin_y_debug_->setToolTip("Crop the oriented wing and CFD domain to a configurable Y width at one span station. This uses the real uniform EB solver but is a diagnostic case, not a physical whole-wing result.");thin_y_fraction_=real_spin(0.05,0.95,0.5,3);thin_y_fraction_->setSingleStep(0.025);thin_y_fraction_->setToolTip("Span station through the oriented wing bbox: 0 is one tip, 0.5 is centre, 1 is the other tip.");thin_y_width_=real_spin(0.001,100.0,0.125,4," m");thin_y_width_->setSingleStep(0.125);thin_y_width_->setToolTip("Requested physical Y width. It is rounded upward to an integer number of configured finest cells; the actual width is shown below.");thin_form->addRow(thin_y_debug_);thin_form->addRow("Span station",thin_y_fraction_);thin_form->addRow("Y volume width",thin_y_width_);column->addWidget(thin_group);connect(thin_y_debug_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&half_wing_->isChecked())half_wing_->setChecked(false);auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(thin_y_fraction_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(thin_y_width_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
 
 		auto* physics=new QGroupBox("Freestream / solver (Build resets)");auto* form=new QFormLayout(physics);
+		auto* auto_config=new QPushButton("Auto config from wing sections");
+		auto_config->setToolTip("Measure representative wing sections, target 128 cells/chord and 16 cells/thickness, build a lightweight AMR preview, and coarsen only if the production GPU memory plan exceeds the safe device budget.");
+		form->addRow(auto_config);connect(auto_config,&QPushButton::clicked,this,
+			&ParagliderWindow::autoConfigureGridFromSections);
 		speed_=real_spin(0,100,10,3," m/s");rho_=real_spin(0.1,10,1.225,4," kg/m³");nu_=real_spin(1e-8,1e-2,1.5e-5,8," m²/s");tessellation_=real_spin(0.01,100,2,2," mm");
 		upstream_=real_spin(0,100,3,2," m");downstream_=real_spin(0,200,8,2," m");lateral_=real_spin(0,100,3,2," m");vertical_=real_spin(0,100,3,2," m");
 		base_h_=real_spin(0.015625,10,0.25,5," m");levels_=new ScrollSafeSpinBox;levels_->setRange(1,6);brick_size_=new ScrollSafeSpinBox;brick_size_->setRange(8,64);brick_size_->setSingleStep(8);
 		wing_refine_=real_spin(0,50,1,3," m");surface_refine_=real_spin(0,20,0.35,3," m");wake_length_=real_spin(0,200,8,2," m");wake_radius_=real_spin(0,100,2,2," m");
-		min_volume_fraction_=real_spin(0.001,0.49,0.005,4);min_volume_fraction_->setSingleStep(0.001);min_volume_fraction_->setToolTip("Small-fragment merge threshold. The quick preview currently needs 0.005 or lower on the supplied wing; use a larger validated threshold when performing the detailed geometry check.");min_aperture_area_fraction_=real_spin(0,0.1,1e-4,6);min_aperture_area_fraction_->setSingleStep(1e-4);min_aperture_area_fraction_->setToolTip("Diagnostic threshold only. Smaller positive-area apertures are reported but remain connected; ParaCFD does not seal physical vents by area cutoff.");
-		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(1e-8,1e-2,1e-5,8);projection_iterations_=new ScrollSafeSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
+		min_volume_fraction_=real_spin(0.001,0.49,0.005,4);min_volume_fraction_->setSingleStep(0.001);min_volume_fraction_->setToolTip("Small exterior-fluid fragment merge threshold.");min_aperture_area_fraction_=real_spin(0,0.1,1e-4,6);min_aperture_area_fraction_->setSingleStep(1e-4);min_aperture_area_fraction_->setToolTip("Diagnostic threshold only. Smaller positive-area apertures are reported but remain connected.");
+		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(5e-4,1e-2,5e-4,8);projection_tolerance_->setToolTip("Production FP32 floor. Smaller residual requests stall on the full cut-cell wing; use an FP64 validation build for tighter solves.");projection_iterations_=new ScrollSafeSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
 		reference_length_=real_spin(0,1000,0,3," m");
 		form->addRow("Speed",speed_);form->addRow("Density",rho_);form->addRow("Kinematic viscosity",nu_);form->addRow("STEP deflection",tessellation_);form->addRow("Upstream margin",upstream_);form->addRow("Downstream margin",downstream_);form->addRow("Lateral margin",lateral_);form->addRow("Vertical margin",vertical_);form->addRow("Base cell size",base_h_);form->addRow("AMR levels",levels_);form->addRow("Brick size",brick_size_);form->addRow("Wing refine distance",wing_refine_);form->addRow("Surface refine distance",surface_refine_);form->addRow("Wake length",wake_length_);form->addRow("Wake radius",wake_radius_);form->addRow("Min fragment volume / h³",min_volume_fraction_);form->addRow("Small-aperture audit / h²",min_aperture_area_fraction_);form->addRow("CFL",cfl_);form->addRow("Smagorinsky Cs",smagorinsky_);form->addRow("Projection tolerance",projection_tolerance_);form->addRow("Projection max iterations",projection_iterations_);form->addRow("Reference length",reference_length_);column->addWidget(physics);
-		for(auto* spin:{speed_,rho_,nu_,tessellation_,upstream_,downstream_,lateral_,vertical_,base_h_,wing_refine_,surface_refine_,wake_length_,wake_radius_,min_volume_fraction_,min_aperture_area_fraction_,cfl_,smagorinsky_,projection_tolerance_,reference_area_,reference_length_})connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(levels_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});connect(brick_size_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{updateGridReadout();});
-		connect(strict_exact_eb_,&QCheckBox::toggled,this,[this](bool strict)
-		{
-			min_volume_fraction_->setMaximum(strict?0.49:0.005);
-			if(!strict&&min_volume_fraction_->value()>0.005)min_volume_fraction_->setValue(0.005);
-			exclude_disconnected_->setEnabled(strict||
-				!default_excluded_triangle_ids(preview_geometry_quality_).empty());
-			updateGridReadout();
-		});
-		min_volume_fraction_->setMaximum(0.005);
+		for(auto* spin:{speed_,rho_,nu_,tessellation_,upstream_,downstream_,lateral_,vertical_,base_h_,wing_refine_,surface_refine_,wake_length_,wake_radius_,min_volume_fraction_,min_aperture_area_fraction_,cfl_,smagorinsky_,projection_tolerance_,reference_area_,reference_length_})connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(levels_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(brick_size_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(conservative_momentum_,&QCheckBox::toggled,this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
+		min_volume_fraction_->setMaximum(0.49);
 		grid_readout_=new QLabel;grid_readout_->setStyleSheet("font-family:Consolas;color:#000;");grid_readout_->setWordWrap(true);column->addWidget(grid_readout_);
 
 		auto* visualization=new QGroupBox("Field / display");auto* viz_form=new QFormLayout(visualization);
@@ -325,7 +398,7 @@ namespace paracfd::gui
 		auto_range_=new QCheckBox("Auto range");auto_range_->setChecked(true);
 		show_slice_=new QCheckBox("Slice");show_slice_->setChecked(true);show_model_=new QCheckBox("STEP surface");show_model_->setChecked(true);
 		show_iso_=new QCheckBox("Iso-surface");show_volume_=new QCheckBox("Cp volume");show_pressure_forces_=new QCheckBox("Pressure forces");
-		show_amr_=new QCheckBox("AMR grid");show_amr_->setToolTip("Show the cyan AMR brick boundaries.");show_eb_=new QCheckBox("EB cells");show_geometry_issues_=new QCheckBox("Geometry problems");show_geometry_issues_->setChecked(true);show_geometry_issues_->setEnabled(false);show_geometry_issues_->setToolTip("Show problems found by the detailed geometry check. Affected fabric is outlined with thick warning lines.");
+		show_amr_=new QCheckBox("AMR grid");show_amr_->setToolTip("Show the cyan AMR brick boundaries.");show_eb_=new QCheckBox("EB cells");show_geometry_issues_=new QCheckBox("Failed cells");show_geometry_issues_->setChecked(true);show_geometry_issues_->setEnabled(false);show_geometry_issues_->setToolTip("Show exact cells for which conservative cut-cell construction failed.");
 		show_arrows_=new QCheckBox("Velocity arrows");show_arrows_->setChecked(true);show_tracers_=new QCheckBox("Flow tracers");show_tracers_->setChecked(true);
 		clip_slice_=new QCheckBox("Clip representations at slice");clip_slice_->setToolTip("Hide the camera-side half of the canopy, volume and iso-surface at the active slice.");
 		surface_colour_=new ScrollSafeComboBox;surface_colour_->addItems({"Visible side Cp+/Cp-",QString::fromUtf8("Pressure difference ΔCp"),"Plus side Cp+","Minus side Cp-"});surface_colour_->setCurrentIndex(1);
@@ -440,10 +513,9 @@ namespace paracfd::gui
 		if(thin_y_debug_&&thin_y_debug_->isChecked()){QMessageBox::information(this,"AoA sweep unavailable","Disable the cropped Y-span diagnostic first. Use the full or symmetric half-wing domain for an aerodynamic sweep.");return;}
 		try{aoa_sweep_angles_=inclusive_angle_sweep(aoa_sweep_min_->value(),aoa_sweep_max_->value(),aoa_sweep_step_->value(),31);}
 		catch(const std::exception& exception){QMessageBox::critical(this,"Invalid AoA sweep",exception.what());return;}
-		restoreFullWingDisplay();aoa_sweep_baseline_=viewer_->modelPlacement();aoa_sweep_index_=0;aoa_sweep_active_=true;aoa_sweep_waiting_=false;aoa_sweep_previous_auto_pause_=auto_pause_->isChecked();auto_pause_->setChecked(true);auto_pause_->setEnabled(false);auto_pause_sensitivity_->setEnabled(false);aoa_mean_tolerance_->setEnabled(false);aoa_max_flow_throughs_->setEnabled(false);strict_exact_eb_->setEnabled(false);build_button_->setEnabled(false);aoa_sweep_button_->setText("Cancel AoA sweep");
-		const QString geometry_provenance=strict_exact_eb_->isChecked()
-			?"geometry = DETAILED CHECK REQUIRED for every case; production finite-triangle CFD topology"
-			:"geometry = APPROXIMATE: detailed fabric-contact check not performed; airflow and loads may be inaccurate";
+		restoreFullWingDisplay();aoa_sweep_baseline_=viewer_->modelPlacement();aoa_sweep_index_=0;aoa_sweep_active_=true;aoa_sweep_waiting_=false;aoa_sweep_previous_auto_pause_=auto_pause_->isChecked();auto_pause_->setChecked(true);auto_pause_->setEnabled(false);auto_pause_sensitivity_->setEnabled(false);aoa_mean_tolerance_->setEnabled(false);aoa_max_flow_throughs_->setEnabled(false);build_button_->setEnabled(false);aoa_sweep_button_->setText("Cancel AoA sweep");
+		const QString geometry_provenance=
+			"geometry = validated closed OCCT solid; canonical conservative cut cells";
 		aoa_sweep_results_->setPlainText(QString("AoA       <D> [N]     <L> [N]    L/D       CD       CL   sim [s]  wall [s]  exit\n%1\n%2\nmean tolerance = %3%; maximum = %4 flow-throughs").arg(reference_area_->value()>0?QString("reference area = %1 m²").arg(reference_area_->value(),0,'g',8):QString("reference area = 0: CL/CD withheld; force L/D remains available")).arg(geometry_provenance).arg(aoa_mean_tolerance_->value(),0,'g',4).arg(aoa_max_flow_throughs_->value(),0,'g',4));
 		statusBar()->showMessage(QString("Starting %1-case AoA sweep; current CAD placement is 0°.").arg(aoa_sweep_angles_.size()),8000);QTimer::singleShot(0,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
@@ -476,156 +548,40 @@ namespace paracfd::gui
 			else if(bounded_mean)exit_label+=" — FINAL-WINDOW MEAN";
 			else exit_label+=" — INSTANTANEOUS LOAD";
 		}
-		if(!current_run_detailed_geometry_)
-			exit_label+=QString(" — APPROXIMATE%1").arg(approximate_same_fragment_patches_
-				?QString("; %1 unverified same-fluid patch%2").arg(approximate_same_fragment_patches_)
-					.arg(approximate_same_fragment_patches_==1?"":"es"):QString{});
 		const double wall=paused_wall_ms_>=0?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);
 		const double angle=aoa_sweep_angles_[aoa_sweep_index_];
 		aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4  %5  %6  %7  %8  %9").arg(angle,6,'f',1).arg(force.x,10,'f',3).arg(force.z,10,'f',3).arg(ratio,8,'f',3).arg(cd,8).arg(cl,8).arg(snapshot.physical_time,8,'f',3).arg(wall,8,'f',2).arg(exit_label));
 		std::fprintf(stderr,"[paraglider-aoa-sweep] angle=%.6g mean-D=%.9g mean-L=%.9g L/D=%.9g CD=%s CL=%s sim=%.9g wall=%.3f exit=%s mean-drift=%.6g mean-rms=%.6g\n",angle,force.x,force.z,ratio,cd.toUtf8().constData(),cl.toUtf8().constData(),snapshot.physical_time,wall,exit_label.toUtf8().constData(),snapshot.mean_force_drift,snapshot.mean_force_rms);++aoa_sweep_index_;
 		if(aoa_sweep_index_>=aoa_sweep_angles_.size())
 		{
-			aoa_sweep_active_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);strict_exact_eb_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);aoa_sweep_results_->appendPlainText("Sweep complete. The viewer retains the final-angle solution.");statusBar()->showMessage(QString("AoA sweep complete: %1 cases.").arg(aoa_sweep_angles_.size()),10000);return;
+			aoa_sweep_active_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);aoa_sweep_results_->appendPlainText("Sweep complete. The viewer retains the final-angle solution.");statusBar()->showMessage(QString("AoA sweep complete: %1 cases.").arg(aoa_sweep_angles_.size()),10000);return;
 		}
 		QTimer::singleShot(100,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
 
 	void ParagliderWindow::cancelAoaSweep(const QString& reason)
 	{
-		if(!aoa_sweep_active_)return;aoa_sweep_active_=false;aoa_sweep_waiting_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);strict_exact_eb_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("Sweep stopped: %1.").arg(reason));statusBar()->showMessage(reason.isEmpty()?"AoA sweep stopped.":QString("AoA sweep stopped: %1.").arg(reason),7000);
+		if(!aoa_sweep_active_)return;aoa_sweep_active_=false;aoa_sweep_waiting_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("Sweep stopped: %1.").arg(reason));statusBar()->showMessage(reason.isEmpty()?"AoA sweep stopped.":QString("AoA sweep stopped: %1.").arg(reason),7000);
 	}
 
 	void ParagliderWindow::updateGeometryIssueDisplay()
 	{
-		std::vector<gui::GeometryIssuePolyline> display;
-		std::set<std::uint32_t> disconnected_triangles;
-		std::size_t disconnected_components=0,retained_warnings=0,blockers=0;
-		double disconnected_area=0;
-		const bool contacts_ready=cad_contacts_.conforming_ready();
-		const bool contact_check_not_performed=
-			cad_contacts_.audit_status==core::StepCadContactAuditStatus::not_performed;
-		const bool connectivity_verified=contacts_ready
-			&&geometry_quality_.exact_connectivity_verified();
-		for(const core::GeometryIssue& issue:geometry_quality_.issues)
-		{
-			if(issue.kind==core::GeometryIssueKind::disconnected_fabric_component
-				&&!connectivity_verified)continue;
-			if(issue.severity==core::GeometryIssueSeverity::blocker)++blockers;
-			if(issue.severity==core::GeometryIssueSeverity::warning_run&&!core::geometry_issue_is_default_exclusion(issue))++retained_warnings;
-		}
-		for(const core::GeometryIssue& issue:geometry_quality_.issues)
-		{
-			// An uncertified edge/face span may be the bridge which joins two apparent
-			// components.  Do not paint or offer those provisional islands for deletion.
-			if(issue.kind==core::GeometryIssueKind::disconnected_fabric_component
-				&&!connectivity_verified)continue;
-			gui::GeometryIssueKind display_kind=gui::GeometryIssueKind::UnexpectedGap;
-			bool draw_issue=true;
-			switch(issue.kind)
-			{
-			case core::GeometryIssueKind::disconnected_fabric_component:
-				display_kind=gui::GeometryIssueKind::IsolatedFabricComponent;
-				++disconnected_components;disconnected_triangles.insert(issue.source_triangle_ids.begin(),issue.source_triangle_ids.end());disconnected_area+=issue.surface_area_m2;
-				break;
-			case core::GeometryIssueKind::intentional_opening_boundary:display_kind=gui::GeometryIssueKind::IntentionalOpening;break;
-			case core::GeometryIssueKind::unclassified_free_boundary:display_kind=gui::GeometryIssueKind::UnclassifiedOpening;break;
-			case core::GeometryIssueKind::matched_unshared_seam:display_kind=gui::GeometryIssueKind::UnsharedSeam;break;
-			case core::GeometryIssueKind::near_miss_gap:display_kind=gui::GeometryIssueKind::UnexpectedGap;break;
-			default:display_kind=gui::GeometryIssueKind::UnexpectedGap;break;
-			}
-			if(draw_issue&&!thin_debug_display_&&!half_wing_display_)
-			for(const core::GeometryIssuePolyline& polyline:issue.boundary_polylines)
-				display.push_back({display_kind,polyline.points,polyline.measured_gap_m});
-		}
-		// These are exact source-curve intervals at which CAD contact certification
-		// could not finish.  They are evidence, not inferred holes or broad EB cells.
-		if(!thin_debug_display_&&!half_wing_display_)
-		for(const auto& span:cad_contacts_.unresolved_edge_face_spans)
-		{
-			gui::GeometryIssuePolyline polyline;
-			polyline.kind=gui::GeometryIssueKind::UnexpectedGap;
-			const auto append=[&](const std::array<double,3>& point)
-			{
-				if(std::all_of(point.begin(),point.end(),[](double value){return std::isfinite(value);}))
-					polyline.points.push_back({static_cast<float>(point[0]),
-						static_cast<float>(point[1]),static_cast<float>(point[2])});
-			};
-			append(span.endpoint_begin_m);append(span.endpoint_end_m);
-			if(polyline.points.size()==2&&polyline.points[0]!=polyline.points[1])
-				display.push_back(std::move(polyline));
-		}
-		viewer_->setGeometryIssuePolylines(std::move(display));
-		const bool has_issues=!geometry_quality_.issues.empty();
-		const bool has_exact_contact_lines=!cad_contacts_.unresolved_edge_face_spans.empty();
-		show_geometry_issues_->setEnabled(has_issues||has_exact_contact_lines||!contacts_ready);
-		if(!has_issues&&contacts_ready)
-		{
-			viewer_->setGeometryQualityStatus({});
-			geometry_quality_readout_->setText("CAD connectivity verified as one exact fabric component.");
-			geometry_quality_readout_->setStyleSheet("color:#075f2c;font-weight:600;");
-			return;
-		}
-		const bool has_suggestions=!default_excluded_triangle_ids(geometry_quality_).empty();
-		const bool excluded=has_suggestions&&exclude_disconnected_->isChecked();
-		if(!contacts_ready)
-			viewer_->setGeometryQualityStatus(contact_check_not_performed
-				?"APPROXIMATE CFD: detailed fabric-contact check not performed; airflow and loads may be inaccurate."
-				:"APPROXIMATE CFD: some fabric contacts could not be verified; airflow and loads may leak or be inaccurate.",true);
-		else if(blockers) viewer_->setGeometryQualityStatus("CFD blocked: fix the highlighted model errors.",true);
-		else if(excluded&&retained_warnings) viewer_->setGeometryQualityStatus("Some surfaces skipped; other model warnings remain.",true);
-		else if(excluded) viewer_->setGeometryQualityStatus("Detached fabric was skipped for this run.",false);
-		else if(has_suggestions) viewer_->setGeometryQualityStatus(
-			"Detailed geometry check completed; detached fabric remains included.",true);
-		else viewer_->setGeometryQualityStatus(
-			"Detailed geometry check completed; model warnings remain.",true);
-
-		QString text;
-		if(!contacts_ready)
-		{
-			if(contact_check_not_performed)
-				text+="Approximate CFD preview: Perform detailed geometry check has not been run. "
-					"The imported display triangulation can be simulated, but airflow and pressure loads may be inaccurate.\n";
-			else text+="Some fabric contacts could not be verified. Approximate CFD remains available, "
-				"but airflow and pressure loads may leak or be inaccurate.\n";
-			if(!contact_check_not_performed
-				&&cad_contacts_.audit_status==core::StepCadContactAuditStatus::failed
-				&&!cad_contacts_.audit_failure_reason.empty())
-				text+="The contact check stopped before a verified mesh was produced. "
-					"Enable Perform detailed geometry check and Build to see the exact reason.\n";
-			else if(!contact_check_not_performed)
-				text+=QString("Unresolved contacts: %1 edge/face span%2, %3 overlap%4, %5 UV projection%6.\n")
-					.arg(cad_contacts_.unresolved_edge_face_spans.size())
-					.arg(cad_contacts_.unresolved_edge_face_spans.size()==1?"":"s")
-					.arg(cad_contacts_.unresolved_partial_overlaps.size())
-					.arg(cad_contacts_.unresolved_partial_overlaps.size()==1?"":"s")
-					.arg(cad_contacts_.unresolved_uv_projections.size())
-					.arg(cad_contacts_.unresolved_uv_projections.size()==1?"":"s");
-		}
-		if(disconnected_components)
-			text+=QString("Exact topology: %1 disconnected component%2 (%3 unique triangles, %4 m²).\n")
-				.arg(disconnected_components).arg(disconnected_components==1?"":"s")
-				.arg(disconnected_triangles.size()).arg(disconnected_area,0,'g',6);
-		if(retained_warnings)text+=QString("%1 other geometry warning%2 remain represented in CFD.\n").arg(retained_warnings).arg(retained_warnings==1?"":"s");
-		if(blockers)text+=QString("%1 blocking geometry issue%2 must be resolved.\n").arg(blockers).arg(blockers==1?"":"s");
-		if(has_suggestions)text+=excluded
-			?"Detached components excluded from CFD; STEP unchanged."
-			:"Detached components INCLUDED; they may be intentional fabric. STEP unchanged.";
-		else if(!contacts_ready)text+="Automatic surface exclusion is disabled until contact connectivity is verified.";
-		else text+="No surfaces are eligible for automatic exclusion; warnings remain represented.";
-		geometry_quality_readout_->setText(text.trimmed());
-		geometry_quality_readout_->setStyleSheet(excluded&&!retained_warnings&&!blockers
-			?"color:#8a4b00;font-weight:700;":"color:#9b1c1c;font-weight:700;");
+		if(embedded_boundary_diagnostic_display_)return;
+		viewer_->clearGeometryIssuePolylines();
+		viewer_->setGeometryQualityStatus({});
+		show_geometry_issues_->setEnabled(false);
+		solid_status_readout_->setText(closed_solid_source_
+			?"Validated closed OCCT solid. OCCT material classification and canonical shared interfaces drive cut-cell construction."
+			:"Load one closed STEP solid. Internal ribs and vents do not belong in the aerodynamic export.");
+		solid_status_readout_->setStyleSheet(closed_solid_source_
+			?"color:#075f2c;font-weight:600;":"color:#000;");
 	}
 
 	void ParagliderWindow::updateWingLabel()
 	{
 		if(!wing_label_||step_path_.isEmpty()||imported_mesh_.empty())return;
-		const std::size_t excluded=imported_mesh_.triangle_count()>=source_mesh_.triangle_count()
-			?imported_mesh_.triangle_count()-source_mesh_.triangle_count():0;
-		wing_label_->setText(QString("%1\n%2 aerodynamic triangles (%3 imported; %4 excluded) — wires ignored\n%5\nLE/TE polarity must be confirmed")
+		wing_label_->setText(QString("%1\n%2 display triangles; CFD geometry is the closed OCCT BRep\n%3\nLE/TE polarity must be confirmed")
 			.arg(QFileInfo(step_path_).fileName()).arg(source_mesh_.triangle_count())
-			.arg(imported_mesh_.triangle_count()).arg(excluded)
 			.arg(orientation_note_.isEmpty()?"imported orientation":orientation_note_));
 	}
 
@@ -633,8 +589,6 @@ namespace paracfd::gui
 	{
 		build_wall_timer_active_=false;build_seen_running_=false;paused_wall_ms_=-1;
 		simulation_running_=simulation_auto_paused_=false;
-		current_run_detailed_geometry_=false;approximate_same_fragment_patches_=0;
-		approximate_same_fragment_area_=0;
 		last_steps_=0;last_time_=0;snapshot_generation_=surface_generation_=0;
 		amr_boxes_.clear();eb_boxes_.clear();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();triangle_pressure_force_xyz_.clear();
 		updateDebugBoxes();viewer_->clearTriangleSurfaceColouring();viewer_->clearTrianglePressureForces();
@@ -642,67 +596,20 @@ namespace paracfd::gui
 		viewer_->setSimulationState(false,false,auto_pause_&&auto_pause_->isChecked(),false,0,0);
 		{const QSignalBlocker blocker(play_button_);play_button_->setChecked(false);play_button_->setText("Play");}
 		play_button_->setEnabled(false);step_button_->setEnabled(false);
-		solver_readout_->setText("Grid not built — geometry selection changed.");
+		solver_readout_->setText("Grid not built — solid placement changed.");
 		load_readout_->setText("Aerodynamic loads unavailable — rebuild the CFD grid.");
-	}
-
-	void ParagliderWindow::applyGeometrySelection(bool invalidate_solver)
-	{
-		if(imported_mesh_.empty())return;
-		if(invalidate_solver)
-		{
-			if(aoa_sweep_active_)cancelAoaSweep("geometry selection changed");
-			shutdownWorker();thin_debug_display_=false;half_wing_display_=false;detailed_geometry_display_=false;
-			embedded_boundary_diagnostic_display_=false;viewer_->clearGeometryErrorDiagnostic();
-		}
-		std::vector<std::uint32_t> excluded=exclude_disconnected_&&exclude_disconnected_->isChecked()
-			?default_excluded_triangle_ids(geometry_quality_):std::vector<std::uint32_t>{};
-		if(excluded.size()>=imported_mesh_.triangle_count())
-		{
-			{const QSignalBlocker blocker(exclude_disconnected_);exclude_disconnected_->setChecked(false);}
-			excluded.clear();
-			QMessageBox::warning(this,"Geometry exclusion refused","The suggested exclusions cover every fabric triangle. ParaCFD kept the complete imported mesh; inspect the CAD diagnostics before building CFD.");
-		}
-		if(excluded.empty())
-		{
-			source_mesh_=imported_mesh_;source_triangle_to_imported_.resize(source_mesh_.triangle_count());
-			for(std::size_t triangle=0;triangle<source_triangle_to_imported_.size();++triangle)
-				source_triangle_to_imported_[triangle]=static_cast<std::uint32_t>(triangle);
-		}
-		else
-		{
-			try
-			{
-				TriMeshSelection selection=exclude_triangles(imported_mesh_,excluded);
-				if(selection.mesh.empty())throw std::runtime_error("geometry exclusion removed every fabric triangle");
-				source_mesh_=std::move(selection.mesh);source_triangle_to_imported_=std::move(selection.source_triangle_ids);
-			}
-			catch(const std::exception& exception)
-			{
-				{const QSignalBlocker blocker(exclude_disconnected_);exclude_disconnected_->setChecked(false);}
-				source_mesh_=imported_mesh_;source_triangle_to_imported_.resize(source_mesh_.triangle_count());
-				for(std::size_t triangle=0;triangle<source_triangle_to_imported_.size();++triangle)source_triangle_to_imported_[triangle]=static_cast<std::uint32_t>(triangle);
-				QMessageBox::critical(this,"Geometry exclusion failed",QString("ParaCFD retained the complete imported mesh. %1").arg(exception.what()));
-			}
-		}
-		viewer_->setMesh(source_mesh_);viewer_->setThinDebugState(false,0);
-		updateGeometryIssueDisplay();
-		if(!invalidate_solver)return;
-		normalizePlacementToDomain();viewer_->frameWingView();
-		resetSimulationAfterGeometryChange();updateWingLabel();
-		statusBar()->showMessage(QString("Geometry selection updated: %1 aerodynamic triangles. Rebuild the CFD grid.").arg(source_mesh_.triangle_count()),8000);
 	}
 
 	bool ParagliderWindow::loadStepFile(const QString& path,bool infer_orientation,bool remember_file)
 	{
-		if(embedded_boundary_diagnostic_display_||detailed_geometry_display_)restoreFullWingDisplay();
+		if(embedded_boundary_diagnostic_display_)restoreFullWingDisplay();
 		if(aoa_sweep_active_)cancelAoaSweep("wing changed");shutdownWorker();resetSimulationAfterGeometryChange();viewer_->setSimulationCaseLabel({});
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::string error;
-		StepGeometry geometry=load_step_geometry_preview(path.toStdString(),
+		StepGeometry geometry=load_step_solid_geometry(path.toStdString(),
 			tessellation_->value(),&error);
 		QApplication::restoreOverrideCursor();
-		if(geometry.mesh.empty())
+		if(geometry.mesh.empty()||!geometry.closed_solid)
 		{
 			QMessageBox::critical(this,"STEP import failed",QString::fromStdString(error));
 			return false;
@@ -711,18 +618,14 @@ namespace paracfd::gui
 		// A newly imported STEP is always shown in its full source frame.  In particular, do
 		// not let the previous run's identity-placed half-wing/thin-slab display state suppress
 		// this file's model-local CAD issue curves or leak into its status/readouts.
-		thin_debug_display_=false;half_wing_display_=false;detailed_geometry_display_=false;embedded_boundary_diagnostic_display_=false;
+		thin_debug_display_=false;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;
 		viewer_->clearGeometryErrorDiagnostic();viewer_->setThinDebugState(false,0);
-		imported_mesh_=std::move(geometry.mesh);geometry_quality_=std::move(geometry.quality);
-		cad_contacts_=std::move(geometry.contacts);
-		preview_geometry_quality_=geometry_quality_;
-		preview_cad_contacts_=cad_contacts_;
+		imported_mesh_=std::move(geometry.mesh);closed_solid_source_=std::move(geometry.closed_solid);
+		source_mesh_=imported_mesh_;
+		measured_section_chord_=measured_section_thickness_=0.0;measured_section_count_=0;
 		step_path_=QFileInfo(path).absoluteFilePath();config_.step_path=step_path_.toStdString();
-		const bool has_suggested_exclusions=!default_excluded_triangle_ids(geometry_quality_).empty();
-		{const QSignalBlocker blocker(exclude_disconnected_);exclude_disconnected_->setEnabled(
-			has_suggested_exclusions||(strict_exact_eb_&&strict_exact_eb_->isChecked()));
-			if(has_suggested_exclusions)exclude_disconnected_->setChecked(true);}
-		applyGeometrySelection(false);
+		viewer_->setMesh(source_mesh_);viewer_->setThinDebugState(false,0);
+		updateGeometryIssueDisplay();
 		viewer_->setSimulationStep(0);
 		QString orientation_note="placement restored from config";
 		if(infer_orientation)
@@ -749,14 +652,14 @@ namespace paracfd::gui
 		updateWingLabel();resetSimulationAfterGeometryChange();
 		if(remember_file)rememberRecentFile(step_path_);
 		statusBar()->showMessage(
-			"STEP preview loaded without the detailed geometry check. Approximate CFD is available; airflow and loads may be inaccurate until checked.",
+			"Validated closed aerodynamic solid loaded. CFD topology will use triangle/box clipping and local BSP fragments.",
 			12000);
 		return true;
 	}
 
 	bool ParagliderWindow::loadConfigFile(const QString& path,bool build_after_load)
 	{
-		ParagliderConfig loaded;std::string error;if(!load_paraglider_config(path.toStdString(),loaded,&error)){QMessageBox::critical(this,"Config load failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();configToUi(loaded);if(loaded.step_path.empty()){statusBar()->showMessage("Config loaded; choose its STEP wing.",6000);return true;}const QString step=resolve_step_path(config_path_,loaded.step_path);if(!loadStepFile(step,false,false))return false;config_.placement=loaded.placement;normalizePlacementToDomain();viewer_->setMeshPlacement(config_.placement);viewer_->frameWingView();rememberRecentFile(config_path_);return !build_after_load||buildGrid();
+		ParagliderConfig loaded;std::string error;if(!load_paraglider_config(path.toStdString(),loaded,&error)){QMessageBox::critical(this,"Config load failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();configToUi(loaded);if(loaded.step_path.empty()){statusBar()->showMessage("Config loaded; choose its closed STEP solid.",6000);return true;}const QString step=resolve_step_path(config_path_,loaded.step_path);if(!loadStepFile(step,false,false))return false;config_.placement=loaded.placement;normalizePlacementToDomain();viewer_->setMeshPlacement(config_.placement);viewer_->frameWingView();rememberRecentFile(config_path_);return !build_after_load||buildGrid();
 	}
 
 	bool ParagliderWindow::saveConfigFile(const QString& path)
@@ -764,9 +667,188 @@ namespace paracfd::gui
 		config_=configFromUi();if(!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
 	}
 
+	bool ParagliderWindow::autoConfigureGridFromSections()
+	{
+		if(source_mesh_.empty())
+		{
+			QMessageBox::information(this,"Auto config","Open and orient a closed STEP wing first.");
+			return false;
+		}
+		ModelPlacement orientation=viewer_->modelPlacement();
+		orientation.tx=orientation.ty=orientation.tz=0.0;
+		const WingSectionMeasurement measurement=measure_wing_sections(
+			placed_mesh(source_mesh_,orientation));
+		if(measurement.accepted_sections<2||!(measurement.chord>0.0)||
+			!(measurement.thickness>0.0))
+		{
+			QMessageBox::warning(this,"Auto config failed",
+				"Could not recover at least two closed X-Z section contours. Confirm that span is aligned with world Y and that the aerodynamic STEP contains one closed solid.");
+			return false;
+		}
+
+		// This is a defensible starting grid, not a claim of mesh independence. The
+		// chord criterion captures pressure gradients and circulation; the thickness
+		// criterion prevents a thin section from collapsing to only one or two cells.
+		const double requested_finest=std::min(measurement.chord/128.0,
+			measurement.thickness/16.0);
+		brick_size_->setValue(32);
+		upstream_->setValue(std::clamp(2.0*measurement.chord,
+			upstream_->minimum(),upstream_->maximum()));
+		downstream_->setValue(std::clamp(4.0*measurement.chord,
+			downstream_->minimum(),downstream_->maximum()));
+		lateral_->setValue(std::clamp(1.5*measurement.chord,
+			lateral_->minimum(),lateral_->maximum()));
+		vertical_->setValue(std::clamp(2.0*measurement.chord,
+			vertical_->minimum(),vertical_->maximum()));
+		wing_refine_->setValue(std::clamp(0.5*measurement.chord,
+			wing_refine_->minimum(),wing_refine_->maximum()));
+		surface_refine_->setValue(std::clamp(0.15*measurement.chord,
+			surface_refine_->minimum(),surface_refine_->maximum()));
+		wake_length_->setValue(std::clamp(4.0*measurement.chord,
+			wake_length_->minimum(),wake_length_->maximum()));
+		wake_radius_->setValue(std::clamp(std::max(0.5*measurement.chord,
+			4.0*measurement.thickness),wake_radius_->minimum(),wake_radius_->maximum()));
+		if(!(reference_length_->value()>0.0))reference_length_->setValue(measurement.chord);
+
+		struct Candidate
+		{
+			int levels=4;
+			double base=0.0,finest=0.0;
+			ExternalAeroGpuMemoryEstimate memory;
+		};
+		auto grid_for_finest=[&](double requested)
+		{
+			Candidate candidate;candidate.base=requested*static_cast<double>(1<<(candidate.levels-1));
+			while(candidate.base<base_h_->minimum()&&candidate.levels<levels_->maximum())
+				{++candidate.levels;candidate.base*=2.0;}
+			while(candidate.base>base_h_->maximum()&&candidate.levels>levels_->minimum())
+				{--candidate.levels;candidate.base*=0.5;}
+			candidate.base=std::clamp(candidate.base,base_h_->minimum(),base_h_->maximum());
+			candidate.finest=candidate.base/static_cast<double>(1<<std::max(0,candidate.levels-1));
+			return candidate;
+		};
+
+		CudaMemoryInfo cuda_memory;std::string cuda_error;
+		const bool have_cuda_memory=cuda_memory_info(cuda_memory,&cuda_error)&&cuda_memory.total_bytes>0;
+		const std::size_t budget=have_cuda_memory?safe_cuda_budget(cuda_memory,false):0;
+		const bool diagnostic=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		Candidate selected;double candidate_finest=requested_finest;
+		QApplication::setOverrideCursor(Qt::WaitCursor);
+		try
+		{
+			for(int attempt=0;attempt<10;++attempt)
+			{
+				selected=grid_for_finest(candidate_finest);
+				ParagliderConfig trial=configFromUi();trial.amr.base_cell_size=selected.base;
+				trial.amr.max_levels=selected.levels;trial.amr.brick_size=32;
+				const ModelPlacement placement=frame_wing_for_external_domain(source_mesh_,orientation,
+					trial.domain.upstream_margin,trial.domain.lateral_margin,
+					trial.domain.vertical_margin,trial.amr.base_cell_size*trial.amr.brick_size);
+				const TriMesh wing=placed_mesh(source_mesh_,placement);const TriangleBvh bvh(wing);
+				const AmrHierarchy hierarchy=AmrHierarchy::build_static(
+					automatic_flow_domain(wing,trial.domain),wing,bvh,trial.amr,false);
+				selected.memory=estimate_external_aero_gpu_memory(hierarchy,
+					conservative_momentum_&&conservative_momentum_->isChecked(),diagnostic);
+				if(!budget||selected.memory.recommended_bytes<=budget)break;
+				const double ratio=std::cbrt(static_cast<double>(selected.memory.recommended_bytes)/budget);
+				candidate_finest*=std::clamp(1.08*ratio,1.15,2.0);
+			}
+		}
+		catch(const std::exception& e)
+		{
+			QApplication::restoreOverrideCursor();
+			QMessageBox::warning(this,"Auto config failed",
+				QString("Could not build the lightweight AMR memory preview: %1").arg(e.what()));
+			return false;
+		}
+		QApplication::restoreOverrideCursor();
+		if(budget&&selected.memory.recommended_bytes>budget)
+		{
+			QMessageBox::warning(this,"Auto config failed",
+				"No supported starting grid fits the safe GPU memory budget. Reduce the flow-domain margins or use half-wing symmetry.");
+			return false;
+		}
+
+		base_h_->setValue(selected.base);levels_->setValue(selected.levels);
+		config_.placement=orientation;normalizePlacementToDomain();
+
+		measured_section_chord_=measurement.chord;
+		measured_section_thickness_=measurement.thickness;
+		measured_section_count_=measurement.accepted_sections;
+		auto_gpu_estimate_bytes_=selected.memory.recommended_bytes;
+		auto_gpu_budget_bytes_=budget;
+		updateGridReadout();
+		const int ratio=1<<std::max(0,levels_->value()-1);
+		const double actual_finest=base_h_->value()/ratio;
+		const bool memory_limited=actual_finest>requested_finest*1.001;
+		statusBar()->showMessage(QString(
+			"Auto config: %1 sections, chord %2 m, thickness %3 m; finest h %4 m (%5 cells/chord, %6 through thickness); GPU plan %7 / %8 GiB%9. Verify with a finer grid only when memory permits.")
+			.arg(measurement.accepted_sections).arg(measurement.chord,0,'g',5)
+			.arg(measurement.thickness,0,'g',5).arg(actual_finest,0,'g',5)
+			.arg(measurement.chord/actual_finest,0,'f',0)
+			.arg(measurement.thickness/actual_finest,0,'f',1)
+			.arg(selected.memory.recommended_bytes/(1024.0*1024.0*1024.0),0,'f',2)
+			.arg(budget?budget/(1024.0*1024.0*1024.0):0,0,'f',2)
+			.arg(memory_limited?" (memory-limited)":""),15000);
+		std::fprintf(stderr,"[paraglider-auto-config] sections=%d chord=%.9g m thickness=%.9g m finest-h=%.9g m cells/chord=%.3f cells/thickness=%.3f levels=%d stored-cells=%zu gpu-plan=%.3f-GiB budget=%.3f-GiB memory-limited=%d\n",
+			measurement.accepted_sections,measurement.chord,measurement.thickness,
+			actual_finest,measurement.chord/actual_finest,
+			measurement.thickness/actual_finest,levels_->value(),selected.memory.structured_cells,
+			selected.memory.recommended_bytes/(1024.0*1024.0*1024.0),
+			budget?budget/(1024.0*1024.0*1024.0):0,memory_limited?1:0);
+		return true;
+	}
+
 	void ParagliderWindow::updateGridReadout()
 	{
-		if(!grid_readout_)return;const auto c=configFromUi();const int ratio=1<<std::max(0,c.amr.max_levels-1);const double finest=c.amr.base_cell_size/ratio;QString text=QString("flow-collar h = %1 m (2:1 ×%2)\nbrick = %3³, coarse width %4 m\nEB merge < %5 h³, small-aperture audit < %6 h² (retained)\nproduction fields = %7").arg(finest,0,'g',5).arg(ratio).arg(c.amr.brick_size).arg(c.amr.base_cell_size*c.amr.brick_size,0,'g',5).arg(c.amr.min_volume_fraction,0,'g',4).arg(c.amr.min_aperture_area_fraction,0,'g',4).arg(sizeof(Real)==4?"FP32":"FP64 validation");text+=strict_exact_eb_&&strict_exact_eb_->isChecked()?"\nDetailed geometry check = enabled":"\nDetailed geometry check = not performed";if(c.amr.topology_refinement_levels>0){const int topology_ratio=1<<std::max(0,c.amr.max_levels+c.amr.topology_refinement_levels-1);text+=QString("\ntopology h = %1 m (+%2 surface level%3)").arg(c.amr.base_cell_size/topology_ratio,0,'g',5).arg(c.amr.topology_refinement_levels).arg(c.amr.topology_refinement_levels==1?"":"s");}if(half_wing_&&half_wing_->isChecked())text+="\nHALF-WING: +Y half, Y-min symmetry plane; whole loads reconstructed";if(thin_y_debug_&&thin_y_debug_->isChecked()){const int layers=std::max(2,static_cast<int>(std::ceil(thin_y_width_->value()/finest-1e-9)));text+=QString("\nCROPPED-Y DEBUG: uniform h=%1 m, %2 cells = %3 m, station=%4%5").arg(finest,0,'g',5).arg(layers).arg(layers*finest,0,'g',5).arg(thin_y_fraction_->value(),0,'f',3).arg(layers>128?" (too wide: max 128 cells)":"");}grid_readout_->setText(text);
+		if(!grid_readout_)return;
+		const auto c=configFromUi();
+		const int ratio=1<<std::max(0,c.amr.max_levels-1);
+		const double finest=c.amr.base_cell_size/ratio;
+		QString text=QString("flow-collar h = %1 m (2:1 ×%2)\n"
+			"brick = %3³, coarse width %4 m\n"
+			"EB merge < %5 h³, small-aperture audit < %6 h² (retained)\n"
+			"production fields = %7\n"
+			"geometry = validated OCCT solid / canonical shared interfaces")
+			.arg(finest,0,'g',5).arg(ratio).arg(c.amr.brick_size)
+			.arg(c.amr.base_cell_size*c.amr.brick_size,0,'g',5)
+			.arg(c.amr.min_volume_fraction,0,'g',4)
+			.arg(c.amr.min_aperture_area_fraction,0,'g',4)
+			.arg(sizeof(Real)==4?"FP32":"FP64 validation");
+		if(c.amr.topology_refinement_levels>0)
+		{
+			const int topology_ratio=1<<std::max(0,
+				c.amr.max_levels+c.amr.topology_refinement_levels-1);
+			text+=QString("\ntopology h = %1 m (+%2 surface level%3)")
+				.arg(c.amr.base_cell_size/topology_ratio,0,'g',5)
+				.arg(c.amr.topology_refinement_levels)
+				.arg(c.amr.topology_refinement_levels==1?"":"s");
+		}
+		if(auto_gpu_estimate_bytes_)
+			text+=QString("\nAUTO GPU PLAN: %1 GiB%2")
+				.arg(auto_gpu_estimate_bytes_/(1024.0*1024.0*1024.0),0,'f',2)
+				.arg(auto_gpu_budget_bytes_?QString(" / %1 GiB safe budget").arg(
+					auto_gpu_budget_bytes_/(1024.0*1024.0*1024.0),0,'f',2):QString{});
+		if(measured_section_count_>0&&measured_section_chord_>0&&
+			measured_section_thickness_>0)
+			text+=QString("\nSECTION AUTO: %1 cuts, chord %2 m, thickness %3 m"
+				"\nresolution: %4 cells/chord, %5 cells/thickness (starting grid; test h/2)")
+				.arg(measured_section_count_).arg(measured_section_chord_,0,'g',5)
+				.arg(measured_section_thickness_,0,'g',5)
+				.arg(measured_section_chord_/finest,0,'f',0)
+				.arg(measured_section_thickness_/finest,0,'f',1);
+		if(half_wing_&&half_wing_->isChecked())
+			text+="\nHALF-WING: +Y half, Y-min symmetry plane; whole loads reconstructed";
+		if(thin_y_debug_&&thin_y_debug_->isChecked())
+		{
+			const int layers=std::max(2,static_cast<int>(std::ceil(
+				thin_y_width_->value()/finest-1e-9)));
+			text+=QString("\nCROPPED-Y DEBUG: uniform h=%1 m, %2 cells = %3 m, station=%4%5")
+				.arg(finest,0,'g',5).arg(layers).arg(layers*finest,0,'g',5)
+				.arg(thin_y_fraction_->value(),0,'f',3)
+				.arg(layers>128?" (too wide: max 128 cells)":"");
+		}
+		grid_readout_->setText(text);
 	}
 
 	void ParagliderWindow::showEmbeddedBoundaryDiagnostic(const TriMesh& wing,
@@ -780,7 +862,6 @@ namespace paracfd::gui
 		viewer_->setThinDebugState(false,0);
 		thin_debug_display_=false;
 		half_wing_display_=false;
-		detailed_geometry_display_=false;
 		embedded_boundary_diagnostic_display_=true;
 
 		std::set<std::uint32_t> direct_triangle_ids,candidate_triangle_ids;
@@ -802,7 +883,7 @@ namespace paracfd::gui
 				candidate_face_ids.insert(problem.source_face_ids.begin(),problem.source_face_ids.end());
 				// A rejected whole-cell operation only tells us that these triangles
 				// participated.  Painting all of them red would falsely identify broad
-				// local context as defective fabric and rapidly obscures the model.
+				// local context as defective CAD and rapidly obscures the model.
 				continue;
 			}
 			direct_triangle_ids.insert(problem.source_triangles.begin(),problem.source_triangles.end());
@@ -844,7 +925,7 @@ namespace paracfd::gui
 		viewer_->clearGeometryIssuePolylines();
 		viewer_->setGeometryQualityStatus({});
 		const QString source_note=direct_triangle_ids.empty()
-			?QString("No specific faulty fabric feature was identified; broad local triangle context is hidden")
+			?QString("No specific faulty solid feature was identified; broad local triangle context is hidden")
 			:QString("%1 directly identified source triangle%2 highlighted red; broad local context is hidden")
 				.arg(direct_triangle_ids.size()).arg(direct_triangle_ids.size()==1?"":"s");
 		viewer_->setGeometryErrorDiagnosticSegments(std::move(error_segments),
@@ -862,7 +943,7 @@ namespace paracfd::gui
 			"%1 unresolved embedded-boundary cell%2 (%3 active, %4 topology halo)\n"
 			"%5 directly identified source triangle%6 on %7 CAD face%8\n"
 			"%9 local-context triangle%10 on %11 CAD face%12 hidden\n\n"
-			"Red boxes are exact failed CFD cells. Only specifically identified source fabric is highlighted red. "
+			"Red boxes are exact failed CFD cells. Only specifically identified source surface is highlighted red. "
 			"Whole-cell input context is deliberately hidden because it does not prove that those surfaces are defective. "
 			"A failure can indicate a CAD gap/junction, local topology, insufficient grid resolution, or a checker limitation; "
 			"ParaCFD has not modified the STEP file.")
@@ -873,180 +954,46 @@ namespace paracfd::gui
 			.arg(candidate_triangle_ids.size()).arg(candidate_triangle_ids.size()==1?"":"s")
 			.arg(candidate_face_ids.size()).arg(candidate_face_ids.size()==1?"":"s");
 		solver_readout_->setText(detail);
-		statusBar()->showMessage("CFD preprocessing stopped. Red boxes are exact failed cells; only specifically identified fabric is red.",12000);
+		statusBar()->showMessage("CFD preprocessing stopped. Red boxes are exact failed cells; only specifically identified source surfaces are red.",12000);
 	}
 
 	void ParagliderWindow::restoreFullWingDisplay()
 	{
-		if((!thin_debug_display_&&!half_wing_display_&&!detailed_geometry_display_&&!embedded_boundary_diagnostic_display_)||source_mesh_.empty())return;viewer_->clearGeometryErrorDiagnostic();viewer_->setMesh(source_mesh_);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);thin_debug_display_=false;half_wing_display_=false;detailed_geometry_display_=false;embedded_boundary_diagnostic_display_=false;amr_boxes_.clear();eb_boxes_.clear();updateDebugBoxes();updateGeometryIssueDisplay();
+		if((!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)||source_mesh_.empty())return;viewer_->clearGeometryErrorDiagnostic();viewer_->setMesh(source_mesh_);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);thin_debug_display_=false;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;amr_boxes_.clear();eb_boxes_.clear();updateDebugBoxes();updateGeometryIssueDisplay();
 	}
 
 	bool ParagliderWindow::buildGrid()
 	{
-		if(source_mesh_.empty()){QMessageBox::information(this,"No wing","Open a STEP wing first.");return false;}
-		const bool strict_exact_eb=strict_exact_eb_&&strict_exact_eb_->isChecked();
-		if(!strict_exact_eb)
-		{
-			geometry_quality_=preview_geometry_quality_;
-			cad_contacts_=preview_cad_contacts_;
-		}
-		StepGeometry strict_geometry;
-		TriMesh strict_selected_mesh;
+		if(source_mesh_.empty()||!closed_solid_source_){QMessageBox::information(this,"No solid","Open a valid closed STEP solid first.");return false;}
 		const TriMesh* run_source_mesh=&source_mesh_;
-		if(strict_exact_eb)
-		{
-			QApplication::setOverrideCursor(Qt::WaitCursor);
-			std::string strict_error;
-			strict_geometry=load_step_geometry(step_path_.toStdString(),
-				tessellation_->value(),&strict_error);
-			QApplication::restoreOverrideCursor();
-			if(strict_geometry.mesh.empty())
-			{
-				strict_geometry.contacts={};
-				strict_geometry.contacts.audit_status=core::StepCadContactAuditStatus::failed;
-				strict_geometry.contacts.audit_failure_reason=strict_error.empty()
-					?"the detailed geometry check produced no usable mesh":strict_error;
-			}
-			if(strict_geometry.contacts.conforming_ready())
-			{
-				geometry_quality_=strict_geometry.quality;
-				cad_contacts_=strict_geometry.contacts;
-				const std::vector<std::uint32_t> suggested=
-					default_excluded_triangle_ids(geometry_quality_);
-				{
-					const QSignalBlocker blocker(exclude_disconnected_);
-					exclude_disconnected_->setEnabled(!suggested.empty());
-				}
-				bool selected=false;
-				if(!suggested.empty()&&exclude_disconnected_->isChecked())
-				{
-					if(suggested.size()>=strict_geometry.mesh.triangle_count())
-					{
-						const QSignalBlocker blocker(exclude_disconnected_);
-						exclude_disconnected_->setChecked(false);
-						QMessageBox::warning(this,"Geometry exclusion refused",
-							"The detailed check marked every fabric triangle as detached. ParaCFD kept the complete checked mesh; inspect the geometry warnings before rebuilding.");
-					}
-					else
-					{
-						TriMeshSelection selection=exclude_triangles(strict_geometry.mesh,suggested);
-						if(selection.mesh.empty())
-						{
-							const QSignalBlocker blocker(exclude_disconnected_);
-							exclude_disconnected_->setChecked(false);
-							QMessageBox::warning(this,"Geometry exclusion refused",
-								"Detached-fabric exclusion produced no usable checked mesh. ParaCFD kept the complete checked mesh.");
-						}
-						else
-						{
-							strict_selected_mesh=std::move(selection.mesh);selected=true;
-						}
-					}
-				}
-				run_source_mesh=selected?&strict_selected_mesh:&strict_geometry.mesh;
-			}
-			else
-			{
-				// Retain focused exact evidence for the diagnostic overlay, but never replace
-				// the normal imported preview mesh with the failed strict attempt.
-				cad_contacts_=strict_geometry.contacts;
-				updateGeometryIssueDisplay();
-			}
-		}
-		if(geometry_quality_.flow_eligibility()==core::GeometryFlowEligibility::blocked)
-		{
-			// A blocker means the imported surface itself cannot be represented safely;
-			// unlike an uncertified contact audit, this is not an approximate-mode choice.
-			restoreFullWingDisplay();shutdownWorker();simulation_running_=simulation_auto_paused_=false;
-			build_wall_timer_active_=false;build_seen_running_=false;paused_wall_ms_=-1;
-			viewer_->clearTriangleSurfaceColouring();viewer_->clearTrianglePressureForces();
-			{const QSignalBlocker blocker(show_geometry_issues_);show_geometry_issues_->setChecked(true);}
-			viewer_->setShowGeometryIssues(true);updateGeometryIssueDisplay();viewer_->frameWingView();
-			const std::size_t blockers=geometry_quality_.blocker_count();
-			const QString summary=QString("CFD cannot start because the imported surface has %1 blocking geometry issue%2. Fix the highlighted model area and reload the STEP file.")
-				.arg(blockers).arg(blockers==1?"":"s");
-			solver_readout_->setText("CFD PREPROCESSING STOPPED\n"+summary);
-			QMessageBox::critical(this,"Model geometry must be fixed",summary);
-			return false;
-		}
-		if(strict_exact_eb&&!strict_geometry.contacts.conforming_ready())
-		{
-			// Refuse before constructing a BVH, AMR hierarchy, or solver.  The normal
-			// unchecked path remains available as an explicitly approximate playground.
-			restoreFullWingDisplay();shutdownWorker();simulation_running_=simulation_auto_paused_=false;
-			build_wall_timer_active_=false;build_seen_running_=false;paused_wall_ms_=-1;
-			viewer_->clearTriangleSurfaceColouring();viewer_->clearTrianglePressureForces();
-			{const QSignalBlocker blocker(show_geometry_issues_);show_geometry_issues_->setChecked(true);}
-			viewer_->setShowGeometryIssues(true);updateGeometryIssueDisplay();viewer_->frameWingView();
-			std::vector<std::array<float,6>> exact_span_segments;
-			const ModelPlacement diagnostic_placement=viewer_->modelPlacement();
-			for(const auto& span:cad_contacts_.unresolved_edge_face_spans)
-			{
-				double ax=0,ay=0,az=0,bx=0,by=0,bz=0;
-				diagnostic_placement.apply(span.endpoint_begin_m[0],span.endpoint_begin_m[1],
-					span.endpoint_begin_m[2],ax,ay,az);
-				diagnostic_placement.apply(span.endpoint_end_m[0],span.endpoint_end_m[1],
-					span.endpoint_end_m[2],bx,by,bz);
-				if(!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(az)
-					||!std::isfinite(bx)||!std::isfinite(by)||!std::isfinite(bz))continue;
-				const Vec3d delta{bx-ax,by-ay,bz-az};if(length2(delta)<=1e-24)continue;
-				exact_span_segments.push_back({static_cast<float>(ax),static_cast<float>(ay),
-					static_cast<float>(az),static_cast<float>(bx),static_cast<float>(by),
-					static_cast<float>(bz)});
-			}
-			if(!exact_span_segments.empty())
-			{
-				// Use the existing transparent diagnostic renderer, but feed it only exact
-				// unresolved CAD intervals—not broad CFD cells or candidate triangles.
-				const std::size_t highlighted_spans=exact_span_segments.size();
-				viewer_->setMesh(placed_mesh(source_mesh_,diagnostic_placement));
-				viewer_->setMeshPlacement(ModelPlacement{});viewer_->clearGeometryIssuePolylines();
-				viewer_->setGeometryQualityStatus({});
-				viewer_->setGeometryErrorDiagnosticSegments(std::move(exact_span_segments),
-					QString("FABRIC CONTACT CHECK — %1 EXACT UNVERIFIED SPAN%2\nRed lines are source intervals whose CAD contact could not be certified; no broad CFD cells are shown.")
-						.arg(highlighted_spans).arg(highlighted_spans==1?"":"S"),true);
-				embedded_boundary_diagnostic_display_=true;
-			}
-			QString reason;
-			if(!cad_contacts_.audit_failure_reason.empty())
-				reason=QString::fromStdString(cad_contacts_.audit_failure_reason);
-			else
-				reason=QString("%1 unresolved edge/face span%2, %3 overlap%4, and %5 UV projection%6 remain.")
-					.arg(cad_contacts_.unresolved_edge_face_spans.size())
-					.arg(cad_contacts_.unresolved_edge_face_spans.size()==1?"":"s")
-					.arg(cad_contacts_.unresolved_partial_overlaps.size())
-					.arg(cad_contacts_.unresolved_partial_overlaps.size()==1?"":"s")
-					.arg(cad_contacts_.unresolved_uv_projections.size())
-					.arg(cad_contacts_.unresolved_uv_projections.size()==1?"":"s");
-			const QString summary="The detailed geometry check cannot start CFD because some fabric contacts "
-				"were not verified. Exact unresolved source spans are highlighted in red where available. "
-				"No surface has been automatically removed.\n\n"+reason+
-				"\n\nUncheck Perform detailed geometry check to run an explicitly approximate result; airflow and loads may leak or be inaccurate.";
-			solver_readout_->setText("DETAILED GEOMETRY CHECK STOPPED BEFORE CFD\n"+summary);
-			QMessageBox::warning(this,"Fabric contacts need attention",summary);
-			return false;
-		}
 		if(!aoa_sweep_active_)viewer_->setSimulationCaseLabel({});
 		build_wall_timer_.restart();build_wall_timer_active_=true;build_seen_running_=false;paused_wall_ms_=-1;
 		restoreFullWingDisplay();shutdownWorker();simulation_running_=simulation_auto_paused_=false;viewer_->clearTriangleSurfaceColouring();viewer_->clearTrianglePressureForces();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();triangle_pressure_force_xyz_.clear();play_button_->setChecked(false);play_button_->setEnabled(false);step_button_->setEnabled(false);config_=configFromUi();config_.placement=viewer_->modelPlacement();normalizePlacementToDomain();config_.placement=viewer_->modelPlacement();
-		const bool thin_debug=thin_y_debug_&&thin_y_debug_->isChecked();const bool half_wing=half_wing_&&half_wing_->isChecked();int debug_layers=0;double debug_width=0;ParagliderConfig run_config=config_;TriMesh wing;
+		const bool thin_debug=thin_y_debug_&&thin_y_debug_->isChecked();const bool half_wing=half_wing_&&half_wing_->isChecked();int debug_layers=0;double debug_width=0;ParagliderConfig run_config=config_;TriMesh wing;ModelPlacement diagnostic_source_to_world=config_.placement;
 		if(thin_debug)
 		{
-			const int ratio=1<<std::max(0,config_.amr.max_levels-1);const double h=config_.amr.base_cell_size/ratio;debug_layers=std::max(2,static_cast<int>(std::ceil(thin_y_width_->value()/h-1e-9)));if(debug_layers>128){QMessageBox::critical(this,"Cropped Y volume too wide",QString("The requested width needs %1 finest cells. This diagnostic supports at most 128; reduce the width or use the full-wing run.").arg(debug_layers));return false;}debug_width=debug_layers*h;ModelPlacement orientation=config_.placement;orientation.tx=orientation.ty=orientation.tz=0;const TriMesh oriented=placed_mesh(*run_source_mesh,orientation);const double fraction=thin_y_fraction_->value(),centre=oriented.bbox_min[1]+fraction*(oriented.bbox_max[1]-oriented.bbox_min[1]);TriMesh clipped=clip_mesh_to_axis_slab(oriented,1,centre-0.5*debug_width,centre+0.5*debug_width);if(clipped.empty()){QMessageBox::critical(this,"Cropped Y volume failed","The selected Y slab contains no fabric triangles.");return false;}run_config.amr.base_cell_size=h;run_config.amr.max_levels=1;run_config.amr.brick_size=debug_layers;run_config.domain.lateral_margin=0;run_config.reference.area=0;run_config.reference.length=0;const ModelPlacement frame=frame_wing_for_external_domain(clipped,ModelPlacement{},run_config.domain.upstream_margin,0,run_config.domain.vertical_margin,debug_width);wing=placed_mesh(clipped,frame);run_config.placement=ModelPlacement{};std::fprintf(stderr,"[paraglider-thin-y] station=%.6g source-y=%.6g width=%.6g m h=%.6g layers=%d triangles=%zu\n",fraction,centre,debug_width,h,debug_layers,wing.triangle_count());
+			const int ratio=1<<std::max(0,config_.amr.max_levels-1);const double h=config_.amr.base_cell_size/ratio;debug_layers=std::max(2,static_cast<int>(std::ceil(thin_y_width_->value()/h-1e-9)));if(debug_layers>128){QMessageBox::critical(this,"Cropped Y volume too wide",QString("The requested width needs %1 finest cells. This diagnostic supports at most 128; reduce the width or use the full-wing run.").arg(debug_layers));return false;}debug_width=debug_layers*h;ModelPlacement orientation=config_.placement;orientation.tx=orientation.ty=orientation.tz=0;const TriMesh oriented=placed_mesh(*run_source_mesh,orientation);const double fraction=thin_y_fraction_->value(),centre=oriented.bbox_min[1]+fraction*(oriented.bbox_max[1]-oriented.bbox_min[1]);TriMesh clipped=clip_mesh_to_axis_slab(oriented,1,centre-0.5*debug_width,centre+0.5*debug_width);if(clipped.empty()){QMessageBox::critical(this,"Cropped Y volume failed","The selected Y slab contains no fabric triangles.");return false;}run_config.amr.base_cell_size=h;run_config.amr.max_levels=1;run_config.amr.brick_size=debug_layers;run_config.domain.lateral_margin=0;run_config.reference.area=0;run_config.reference.length=0;const ModelPlacement frame=frame_wing_for_external_domain(clipped,ModelPlacement{},run_config.domain.upstream_margin,0,run_config.domain.vertical_margin,debug_width);wing=placed_mesh(clipped,frame);diagnostic_source_to_world=composed_placement(frame,orientation);run_config.placement=ModelPlacement{};std::fprintf(stderr,"[paraglider-thin-y] station=%.6g source-y=%.6g width=%.6g m h=%.6g layers=%d triangles=%zu\n",fraction,centre,debug_width,h,debug_layers,wing.triangle_count());
 		}
 		else if(half_wing)
 		{
-			ModelPlacement orientation=config_.placement;orientation.tx=orientation.ty=orientation.tz=0;const TriMesh oriented=placed_mesh(*run_source_mesh,orientation);const double centre=0.5*(oriented.bbox_min[1]+oriented.bbox_max[1]);TriMesh clipped=clip_mesh_to_axis_slab(oriented,1,centre,oriented.bbox_max[1],true,false);if(clipped.empty()){QMessageBox::critical(this,"Half-wing crop failed","The positive-Y half of the oriented wing contains no fabric triangles.");return false;}const ModelPlacement frame=frame_positive_y_half_for_external_domain(clipped,ModelPlacement{},run_config.domain.upstream_margin,run_config.domain.vertical_margin,run_config.amr.base_cell_size*run_config.amr.brick_size);wing=placed_mesh(clipped,frame);run_config.reference.moment_origin=run_config.reference.moment_origin+Vec3d{frame.tx-config_.placement.tx,frame.ty-config_.placement.ty,frame.tz-config_.placement.tz};run_config.placement=ModelPlacement{};run_config.domain.half_wing_symmetry=true;std::fprintf(stderr,"[paraglider-half-wing] source-centre-y=%.9g retained=%zu/%zu triangles plane-y=%.9g tip-y=%.9g moment-origin=[%.9g %.9g %.9g]\n",centre,wing.triangle_count(),run_source_mesh->triangle_count(),wing.bbox_min[1],wing.bbox_max[1],run_config.reference.moment_origin.x,run_config.reference.moment_origin.y,run_config.reference.moment_origin.z);
+			ModelPlacement orientation=config_.placement;orientation.tx=orientation.ty=orientation.tz=0;const TriMesh oriented=placed_mesh(*run_source_mesh,orientation);const double centre=0.5*(oriented.bbox_min[1]+oriented.bbox_max[1]);TriMesh clipped=clip_mesh_to_axis_slab(oriented,1,centre,oriented.bbox_max[1],true,false);if(clipped.empty()){QMessageBox::critical(this,"Half-wing crop failed","The positive-Y half of the oriented wing contains no fabric triangles.");return false;}const ModelPlacement frame=frame_positive_y_half_for_external_domain(clipped,ModelPlacement{},run_config.domain.upstream_margin,run_config.domain.vertical_margin,run_config.amr.base_cell_size*run_config.amr.brick_size);wing=placed_mesh(clipped,frame);diagnostic_source_to_world=composed_placement(frame,orientation);run_config.reference.moment_origin=run_config.reference.moment_origin+Vec3d{frame.tx-config_.placement.tx,frame.ty-config_.placement.ty,frame.tz-config_.placement.tz};run_config.placement=ModelPlacement{};run_config.domain.half_wing_symmetry=true;std::fprintf(stderr,"[paraglider-half-wing] source-centre-y=%.9g retained=%zu/%zu triangles plane-y=%.9g tip-y=%.9g moment-origin=[%.9g %.9g %.9g]\n",centre,wing.triangle_count(),run_source_mesh->triangle_count(),wing.bbox_min[1],wing.bbox_max[1],run_config.reference.moment_origin.x,run_config.reference.moment_origin.y,run_config.reference.moment_origin.z);
 		}
 		else wing=placed_mesh(*run_source_mesh,config_.placement);
 		std::fprintf(stderr,"[paraglider-placement] t=[%.17g %.17g %.17g] M=[%.17g %.17g %.17g; %.17g %.17g %.17g; %.17g %.17g %.17g]\n",config_.placement.tx,config_.placement.ty,config_.placement.tz,config_.placement.m[0],config_.placement.m[1],config_.placement.m[2],config_.placement.m[3],config_.placement.m[4],config_.placement.m[5],config_.placement.m[6],config_.placement.m[7],config_.placement.m[8]);TriangleBvh bvh(wing);
 		ExternalAeroExecutionOptions execution;
-		// The detailed option certifies CAD contacts and supplies the conforming mesh.
-		// Both GUI modes then exercise the production finite-triangle EB implementation;
-		// the slower General Fuse cell decomposer remains an offline development oracle.
-		execution.allow_unsafe_same_fragment_patches=!strict_exact_eb;
-		execution.use_qualitative_first_order_orthogonal_pressure=!strict_exact_eb;
+		execution.closed_solid=closed_solid_source_->placed(diagnostic_source_to_world);
 		execution.conservative_cell_momentum=conservative_momentum_&&conservative_momentum_->isChecked();
+		CudaMemoryInfo cuda_memory;std::string cuda_error;
+		if(cuda_memory_info(cuda_memory,&cuda_error)&&cuda_memory.total_bytes)
+		{
+			execution.gpu_memory_budget_bytes=safe_cuda_budget(cuda_memory,true);
+			std::fprintf(stderr,"[gpu-memory-budget] free=%.2f GiB total=%.2f GiB safe-build-budget=%.2f GiB\n",
+				cuda_memory.free_bytes/(1024.0*1024.0*1024.0),
+				cuda_memory.total_bytes/(1024.0*1024.0*1024.0),
+				execution.gpu_memory_budget_bytes/(1024.0*1024.0*1024.0));
+		}
+		else std::fprintf(stderr,"[gpu-memory-budget] CUDA memory query unavailable: %s\n",
+			cuda_error.c_str());
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		std::unique_ptr<ExternalAeroCore> core;
 		try
@@ -1057,30 +1004,6 @@ namespace paracfd::gui
 		{
 			build_wall_timer_active_=false;QApplication::restoreOverrideCursor();
 			std::fprintf(stderr,"[paraglider] CFD grid preprocessing failed: %s\n",e.what());
-			if(!strict_exact_eb)
-			{
-				// A failure of the deliberately approximate triangle/EB path is not an
-				// exact CAD diagnosis. Keep the familiar full-wing preview and do not paint
-				// every rejected cell or its broad candidate triangle set red.
-				embedded_boundary_diagnostic_display_=false;detailed_geometry_display_=false;thin_debug_display_=false;
-				half_wing_display_=false;eb_boxes_.clear();amr_boxes_.clear();updateDebugBoxes();
-				viewer_->clearGeometryErrorDiagnostic();viewer_->setMesh(source_mesh_);
-				viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);
-				updateGeometryIssueDisplay();viewer_->frameWingView();
-				const QString summary=
-					"The approximate CFD grid could not be built from the display triangulation. "
-					"This does not identify a CAD defect, so no red error-cell forest is shown.\n\n"
-					"Enable Perform detailed geometry check and Build again for strict, localized diagnostics.";
-				solver_readout_->setText("APPROXIMATE CFD PREPROCESSING FAILED\n"+summary+
-					"\n\nAirflow and pressure loads are unavailable for this run.");
-				viewer_->setGeometryQualityStatus(
-					"APPROXIMATE CFD FAILED: no exact CAD defect inferred; detailed geometry check is available.",true);
-				auto* notice=new QMessageBox(QMessageBox::Warning,
-					"Approximate CFD grid could not be built",summary,QMessageBox::Ok,this);
-				notice->setDetailedText(QString::fromUtf8(e.what()));
-				notice->setAttribute(Qt::WA_DeleteOnClose);notice->setModal(false);notice->open();
-				return false;
-			}
 			showEmbeddedBoundaryDiagnostic(wing,e);
 			std::size_t shared_face_count=0,local_cell_count=0;
 			for(const ExternalAeroPreprocessingProblem& problem:e.problems())
@@ -1117,19 +1040,31 @@ namespace paracfd::gui
 		QApplication::restoreOverrideCursor();const AmrHierarchy& hierarchy=core->hierarchy();
 		amr_boxes_.clear();eb_boxes_.clear();for(const auto& level:hierarchy.levels())for(const auto& brick:level.bricks)if(brick.active()){const float width=hierarchy.brick_size()*brick.h;amr_boxes_.push_back({(float)brick.origin.x,(float)brick.origin.y,(float)brick.origin.z,(float)brick.origin.x+width,(float)brick.origin.y+width,(float)brick.origin.z+width});}
 		std::size_t fragments=0,apertures=0,patches=0,unresolved=0,static_pockets=0,
-			small_apertures=0,unmapped_surface_patches=0,face_state_retained_small_roots=0,
-			diagnostic_same_fragment_patches=0;
-		double small_aperture_area=0,unmapped_surface_area=0,
-			diagnostic_same_fragment_area=0,minimum_face_state_retained_volume_fraction=1;
+			small_apertures=0,face_state_retained_small_roots=0,
+			reconciled_facet_pairs=0,suppressed_subresolution_atom_splits=0;
+		double small_aperture_area=0,
+			minimum_face_state_retained_volume_fraction=1,
+			reconciled_facet_area_residual=0,
+			maximum_reconciled_facet_area_residual=0,
+			suppressed_subresolution_atom_volume=0,
+			maximum_suppressed_subresolution_atom_volume=0;
 		for(const auto& level:core->embedded_boundary().levels)
 		{
 			const auto& eb=level.topology;
 			small_apertures+=eb.retained_subgrid_apertures;
 			small_aperture_area+=eb.retained_subgrid_aperture_area;
-			unmapped_surface_patches+=eb.diagnostic_unmapped_surface_patches;
-			unmapped_surface_area+=eb.diagnostic_unmapped_surface_area;
-			diagnostic_same_fragment_patches+=eb.diagnostic_unverified_same_fragment_patches;
-			diagnostic_same_fragment_area+=eb.diagnostic_unverified_same_fragment_area;
+			reconciled_facet_pairs+=eb.reconciled_facet_pairs;
+			reconciled_facet_area_residual+=eb.reconciled_facet_area_residual;
+			maximum_reconciled_facet_area_residual=std::max(
+				maximum_reconciled_facet_area_residual,
+				eb.maximum_reconciled_facet_area_residual);
+			suppressed_subresolution_atom_splits+=
+				eb.suppressed_subresolution_atom_splits;
+			suppressed_subresolution_atom_volume+=
+				eb.suppressed_subresolution_atom_volume;
+			maximum_suppressed_subresolution_atom_volume=std::max(
+				maximum_suppressed_subresolution_atom_volume,
+				eb.maximum_suppressed_subresolution_atom_volume);
 			face_state_retained_small_roots+=level.face_state_retained_small_roots;
 			if(level.face_state_retained_small_roots)minimum_face_state_retained_volume_fraction=
 				std::min(minimum_face_state_retained_volume_fraction,
@@ -1153,39 +1088,27 @@ namespace paracfd::gui
 			for(const auto& problem:eb.unresolved)if(level.owned_cell[problem.parent_cell])++unresolved;
 		}
 		const Vec3d size=hierarchy.domain().hi-hierarchy.domain().lo;SimInfo info;info.h=hierarchy.levels().front().h;info.coarse_h=info.h;info.finest_h=hierarchy.finest_cell_size();info.nx=(int)std::llround(size.x/info.h);info.ny=(int)std::llround(size.y/info.h);info.nz=(int)std::llround(size.z/info.h);info.Lx=size.x;info.Ly=size.y;info.Lz=size.z;info.U=run_config.freestream.speed;info.rho=run_config.freestream.rho;info.nu=run_config.freestream.nu;info.name=thin_debug?"thin-y-debug":(half_wing?"half-wing-symmetry":"paraglider");viewer_->setInfo(info);slice_position_->setValue(500);
-		if(thin_debug){viewer_->setMesh(wing);viewer_->setMeshPlacement(ModelPlacement{});thin_debug_display_=true;half_wing_display_=false;detailed_geometry_display_=false;embedded_boundary_diagnostic_display_=false;slice_axis_->setCurrentIndex(1);slice_position_->setValue(500);arrow_mode_->setCurrentIndex(1);tracer_mode_->setCurrentIndex(1);viewer_->setThinDebugState(true,debug_layers);viewer_->frameThinYDebugView();}else if(half_wing){viewer_->setMesh(wing);viewer_->setMeshPlacement(ModelPlacement{});thin_debug_display_=false;half_wing_display_=true;detailed_geometry_display_=false;embedded_boundary_diagnostic_display_=false;viewer_->setThinDebugState(false,0);viewer_->frameWingView();}else{thin_debug_display_=false;half_wing_display_=false;detailed_geometry_display_=strict_exact_eb;embedded_boundary_diagnostic_display_=false;if(strict_exact_eb)viewer_->setMesh(*run_source_mesh);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);viewer_->frameWingView();}updateGeometryIssueDisplay();viewer_->setSimulationProgress(0,0,0);viewer_->setReferenceU(info.U);updateDebugBoxes();
+		if(thin_debug){viewer_->setMesh(wing);viewer_->setMeshPlacement(ModelPlacement{});thin_debug_display_=true;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;slice_axis_->setCurrentIndex(1);slice_position_->setValue(500);arrow_mode_->setCurrentIndex(1);tracer_mode_->setCurrentIndex(1);viewer_->setThinDebugState(true,debug_layers);viewer_->frameThinYDebugView();}else if(half_wing){viewer_->setMesh(wing);viewer_->setMeshPlacement(ModelPlacement{});thin_debug_display_=false;half_wing_display_=true;embedded_boundary_diagnostic_display_=false;viewer_->setThinDebugState(false,0);viewer_->frameWingView();}else{thin_debug_display_=false;half_wing_display_=false;embedded_boundary_diagnostic_display_=false;viewer_->setMesh(*run_source_mesh);viewer_->setMeshPlacement(config_.placement);viewer_->setThinDebugState(false,0);viewer_->frameWingView();}updateGeometryIssueDisplay();viewer_->setSimulationProgress(0,0,0);viewer_->setReferenceU(info.U);updateDebugBoxes();
 		const std::size_t bricks=hierarchy.active_brick_count(),
-			dofs=core->pressure_system().storage_size,gpu=core->gpu_bytes(),
-			pressure_fallbacks=core->pressure_system().qualitative_preview_orthogonal_fallback_count();
+			dofs=core->pressure_system().storage_size,gpu=core->gpu_bytes();
 		const int muscl=core->embedded_high_order_stencil_count(),
 			ls_full=core->embedded_least_squares_full_rank_count(),wall_nodes=core->fabric_wall_node_count();
-		current_run_detailed_geometry_=strict_exact_eb;
-		approximate_same_fragment_patches_=strict_exact_eb?0:diagnostic_same_fragment_patches;
-		approximate_same_fragment_area_=strict_exact_eb?0:diagnostic_same_fragment_area;
 		const QString momentum_mode=core->uses_conservative_cell_momentum()
 			?"COLLOCATED CONTROL-VOLUME — EXPERIMENTAL":"FACE-CENTRED MAC — PRODUCTION";
-		const QString topology_mode=strict_exact_eb
-			?"DETAILED GEOMETRY CHECK — CAD CONTACTS VERIFIED / PRODUCTION FINITE-TRIANGLE EB"
-			:(cad_contacts_.audit_status==core::StepCadContactAuditStatus::not_performed
-				?"APPROXIMATE CFD — DETAILED GEOMETRY CHECK NOT PERFORMED"
-				:(cad_contacts_.conforming_ready()?"APPROXIMATE CFD MODE — CAD FABRIC CONTACTS VERIFIED"
-					:"APPROXIMATE RESULT — SOME FABRIC CONTACTS UNVERIFIED"));
+		const QString topology_mode="CLOSED OCCT SOLID — CANONICAL CONSERVATIVE EMBEDDED BOUNDARY";
 		QString mode=topology_mode+"\n"+momentum_mode;
-		if(pressure_fallbacks)mode+=QString("\n%1 deferred pressure correction%2 omitted (first-order conservative A/d)")
-			.arg(pressure_fallbacks).arg(pressure_fallbacks==1?"":"s");
-		if(unmapped_surface_patches)mode+=QString("\n%1 unmappable load patch%2 omitted (%3 m²)")
-			.arg(unmapped_surface_patches).arg(unmapped_surface_patches==1?"":"es")
-			.arg(unmapped_surface_area,0,'g',4);
-		if(approximate_same_fragment_patches_)mode+=QString(
-			"\nWARNING: %1 fabric patch%2 (%3 m²) has both pressure sides in one sampled fluid region")
-			.arg(approximate_same_fragment_patches_)
-			.arg(approximate_same_fragment_patches_==1?"":"es")
-			.arg(approximate_same_fragment_area_,0,'g',4);
+		if(reconciled_facet_pairs)mode+=QString("\n%1 shared-interface partition residual%2 recorded (sum %3, max %4 m²)")
+			.arg(reconciled_facet_pairs).arg(reconciled_facet_pairs==1?"":"s")
+			.arg(reconciled_facet_area_residual,0,'g',4)
+			.arg(maximum_reconciled_facet_area_residual,0,'g',4);
+		if(suppressed_subresolution_atom_splits)mode+=QString("\n%1 sub-resolution grazing split%2 suppressed (sum %3, max %4 m³)")
+			.arg(suppressed_subresolution_atom_splits)
+			.arg(suppressed_subresolution_atom_splits==1?"":"s")
+			.arg(suppressed_subresolution_atom_volume,0,'g',4)
+			.arg(maximum_suppressed_subresolution_atom_volume,0,'g',4);
 		if(face_state_retained_small_roots)mode+=QString("\n%1 tiny face-state connector%2 retained (min %3 h³)")
 			.arg(face_state_retained_small_roots).arg(face_state_retained_small_roots==1?"":"s")
 			.arg(minimum_face_state_retained_volume_fraction,0,'g',3);
-		if(!cad_contacts_.conforming_ready())mode+=
-			"\nWARNING: unverified contacts can leak airflow and make pressure loads inaccurate";
 		const QString debug_header=thin_debug?QString("CROPPED-Y DEBUG — %1 CELLS / %2 m\n")
 			.arg(debug_layers).arg(debug_width,0,'g',5):(half_wing
 				?QString("HALF-WING +Y — Y-MIN SYMMETRY / WHOLE LOADS RECONSTRUCTED\n"):QString{});
@@ -1194,20 +1117,21 @@ namespace paracfd::gui
 			.arg(patches).arg(muscl).arg(ls_full).arg(wall_nodes).arg(unresolved).arg(static_pockets)
 			.arg(small_apertures).arg(small_aperture_area,0,'g',4).arg(gpu/(1024.0*1024.0),0,'f',1));
 		updateGeometryIssueDisplay();
-		if(approximate_same_fragment_patches_)
-			viewer_->setGeometryQualityStatus(QString(
-				"APPROXIMATE RESULT: %1 fabric patch%2 (%3 m²) has both pressure sides in one sampled fluid region; airflow and loads are unreliable there.")
-				.arg(approximate_same_fragment_patches_)
-				.arg(approximate_same_fragment_patches_==1?"":"es")
-				.arg(approximate_same_fragment_area_,0,'g',4),true);
-		std::fprintf(stderr,"[paraglider] grid: symmetry=%s, topology=%s, mode=%s, %zu bricks, %zu DOFs, fragments=%zu apertures=%zu MUSCL=%d LS-full=%d wall-nodes=%d patches=%zu unresolved=%zu pressure-fallbacks=%zu unmapped-load-patches=%zu/%.6g-m2 unverified-same-fragment=%zu/%.6g-m2 retained-small-apertures=%zu area=%.6g m2 face-state-retained-roots=%zu min-fraction=%.6g, GPU %.2f MiB\n",
-			half_wing?"half-y":"full",strict_exact_eb?"detailed-production":"qualitative-preview",
+		std::fprintf(stderr,"[paraglider] grid: symmetry=%s, topology=closed-solid-canonical-interface, mode=%s, %zu bricks, %zu DOFs, fragments=%zu apertures=%zu MUSCL=%d LS-full=%d wall-nodes=%d patches=%zu unresolved=%zu retained-small-apertures=%zu area=%.6g m2 face-state-retained-roots=%zu min-fraction=%.6g, GPU %.2f MiB\n",
+			half_wing?"half-y":"full",
 			core->uses_conservative_cell_momentum()?"collocated-experimental":"face-centred-mac-production",
-			bricks,dofs,fragments,apertures,muscl,ls_full,wall_nodes,patches,unresolved,pressure_fallbacks,
-			unmapped_surface_patches,unmapped_surface_area,diagnostic_same_fragment_patches,
-			diagnostic_same_fragment_area,small_apertures,small_aperture_area,face_state_retained_small_roots,
+			bricks,dofs,fragments,apertures,muscl,ls_full,wall_nodes,patches,unresolved,
+			small_apertures,small_aperture_area,face_state_retained_small_roots,
 			face_state_retained_small_roots?minimum_face_state_retained_volume_fraction:0,
 			gpu/(1024.0*1024.0));
+		if(reconciled_facet_pairs)std::fprintf(stderr,
+			"[paraglider] shared-interface partition residuals: count=%zu sum=%.9g m2 max=%.9g m2 (diagnostic; topology remains paired)\n",
+			reconciled_facet_pairs,reconciled_facet_area_residual,
+			maximum_reconciled_facet_area_residual);
+		if(suppressed_subresolution_atom_splits)std::fprintf(stderr,
+			"[paraglider] sub-resolution grazing splits suppressed: count=%zu sum=%.9g m3 max=%.9g m3 (parent atoms retained)\n",
+			suppressed_subresolution_atom_splits,suppressed_subresolution_atom_volume,
+			maximum_suppressed_subresolution_atom_volume);
 		spawnWorker(std::move(core));play_button_->setEnabled(true);step_button_->setEnabled(false);
 		{const QSignalBlocker blocker(play_button_);play_button_->setChecked(true);play_button_->setText("Pause");}
 		build_seen_running_=true;simulation_running_=true;simulation_auto_paused_=false;
@@ -1249,14 +1173,8 @@ namespace paracfd::gui
 		{QSignalBlocker blocker(play_button_);play_button_->setChecked(s.playing);play_button_->setText(s.playing?"Pause":"Play");}step_button_->setEnabled(!s.playing);
 		if(build_wall_timer_active_){if(s.playing){build_seen_running_=true;paused_wall_ms_=-1;}else if(build_seen_running_){paused_wall_ms_=build_wall_timer_.elapsed();build_seen_running_=false;}}
 		const double wall_seconds=paused_wall_ms_>=0&&!s.playing?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);const QString pause_label=pause_reason_label(s.pause_reason);viewer_->setSimulationState(s.playing,s.auto_paused,s.auto_pause_enabled,s.settling_ready,s.settling_score,s.flow_throughs,pause_label,{},s.mean_force_ready,s.mean_force_drift,aoa_mean_tolerance_->value()/100.0,aoa_max_flow_throughs_->value());last_steps_=s.steps;last_time_=s.physical_time;viewer_->setSimulationProgress(s.steps,s.physical_time,wall_seconds);
-		QString geometry_run_status=current_run_detailed_geometry_
-			?"DETAILED GEOMETRY CHECK COMPLETE — CAD CONTACTS VERIFIED / PRODUCTION FINITE-TRIANGLE EB"
-			:"APPROXIMATE CFD — DETAILED FABRIC-CONTACT CHECK NOT PERFORMED";
-		if(approximate_same_fragment_patches_)
-			geometry_run_status+=QString("\nWARNING: %1 fabric patch%2 (%3 m²) has both pressure sides in one sampled fluid region")
-				.arg(approximate_same_fragment_patches_)
-				.arg(approximate_same_fragment_patches_==1?"":"es")
-				.arg(approximate_same_fragment_area_,0,'g',4);
+		const QString geometry_run_status=
+			"CLOSED OCCT SOLID — CANONICAL CONSERVATIVE EMBEDDED BOUNDARY";
 		if(!s.initialized){solver_readout_->setText(geometry_run_status+"\nInitializing pressure field on GPU...");return;}
 		const bool new_surface_results=!s.delta_cp.empty();
 		if(new_surface_results){cp_plus_=std::move(s.cp_plus);cp_minus_=std::move(s.cp_minus);delta_cp_=std::move(s.delta_cp);triangle_pressure_force_xyz_=std::move(s.triangle_pressure_force_xyz);delta_cp_range_=std::max(std::abs(s.cp_min),std::abs(s.cp_max));side_cp_range_=std::max(std::abs(s.side_cp_min),std::abs(s.side_cp_max));applySurfaceColour();}

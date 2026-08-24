@@ -1,7 +1,11 @@
 #include "core/fluid/external_aero_core.h"
-
+#include "core/cuda_probe.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -12,6 +16,31 @@ namespace paracfd::core
 		double elapsed_ms(std::chrono::steady_clock::time_point begin,std::chrono::steady_clock::time_point end){return std::chrono::duration<double,std::milli>(end-begin).count();}
 	}
 
+	ExternalAeroGpuMemoryEstimate estimate_external_aero_gpu_memory(
+		const AmrHierarchy& hierarchy,bool conservative_cell_momentum,
+		bool full_nonorthogonal_diagnostic)
+	{
+		ExternalAeroGpuMemoryEstimate result;
+		for(const AmrLevel& level:hierarchy.levels())result.stored_bricks+=level.bricks.size();
+		const long double bs=hierarchy.brick_size();
+		const long double cells=static_cast<long double>(result.stored_bricks)*bs*bs*bs;
+		result.structured_cells=cells>=static_cast<long double>(std::numeric_limits<std::size_t>::max())
+			?std::numeric_limits<std::size_t>::max():static_cast<std::size_t>(cells);
+
+		// Mixed-precision production allocation is about 192 B/cell for the full PlanB
+		// hierarchy: flow fields and geometry coefficients are FP32, while the pressure
+		// vectors are FP64. 224 B/cell leaves measured headroom for cut-cell connectivity,
+		// pressure fragments and CUDA allocation granularity. The optional collocated and
+		// diagnostic paths retain materially more full-domain vectors.
+		long double bytes_per_cell=sizeof(Real)==4?224.0L:336.0L;
+		if(conservative_cell_momentum)bytes_per_cell+=sizeof(Real)==4?96.0L:176.0L;
+		if(full_nonorthogonal_diagnostic)bytes_per_cell+=sizeof(Real)==4?512.0L:896.0L;
+		const long double bytes=128.0L*1024.0L*1024.0L+cells*bytes_per_cell;
+		result.recommended_bytes=bytes>=static_cast<long double>(std::numeric_limits<std::size_t>::max())
+			?std::numeric_limits<std::size_t>::max():static_cast<std::size_t>(std::ceil(bytes));
+		return result;
+	}
+
 	ExternalAeroCore::ExternalAeroCore(const TriMesh& wing,const TriangleBvh& bvh,
 		const ParagliderConfig& config,ExternalAeroExecutionOptions options)
 		:config_(config),source_triangle_count_(wing.triangle_count()),
@@ -19,24 +48,59 @@ namespace paracfd::core
 		 enable_smooth_fabric_wall_(options.smooth_fabric_wall),
 		 enable_pressure_impulse_(options.pressure_impulse)
 	{
+		const auto build_begin=std::chrono::steady_clock::now();
+		auto stage_begin=build_begin;
+		auto report_stage=[&](const char* name)
+		{
+			const auto now=std::chrono::steady_clock::now();
+			std::fprintf(stderr,"[grid-profile] %-24s %9.1f ms\n",name,elapsed_ms(stage_begin,now));
+			std::fflush(stderr);stage_begin=now;
+		};
+		CudaMemoryInfo cuda_baseline;
+		auto report_cuda_memory=[&](const char* stage)
+		{
+			CudaMemoryInfo current;std::string error;if(!cuda_memory_info(current,&error))return;
+			const std::size_t delta=cuda_baseline.free_bytes>current.free_bytes
+				?cuda_baseline.free_bytes-current.free_bytes:0;
+			std::fprintf(stderr,"[gpu-memory-live] %-18s solver-delta=%.2f GiB device-used=%.2f GiB free=%.2f GiB\n",
+				stage,delta/(1024.0*1024.0*1024.0),
+				(current.total_bytes-current.free_bytes)/(1024.0*1024.0*1024.0),
+				current.free_bytes/(1024.0*1024.0*1024.0));
+			std::fflush(stderr);
+		};
 		if(wing.empty()||bvh.empty())
-			throw std::invalid_argument("external aerodynamic core requires a placed fabric mesh");
+			throw std::invalid_argument("external aerodynamic core requires a placed solid display mesh");
+		if(!options.closed_solid)
+			throw std::invalid_argument("external aerodynamic core requires a placed OCCT solid");
 		symmetry_plane_y_=wing.bbox_min[1];
 		hierarchy_=AmrHierarchy::build_static(automatic_flow_domain(wing,config_.domain),
 			wing,bvh,config_.amr,config_.domain.half_wing_symmetry);
+		report_stage("AMR hierarchy");
+		const bool full_nonorthogonal=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		const ExternalAeroGpuMemoryEstimate memory=estimate_external_aero_gpu_memory(
+			hierarchy_,use_conservative_cell_momentum_,full_nonorthogonal);
+		std::fprintf(stderr,"[gpu-memory-plan] stored-bricks=%zu structured-cells=%zu estimate=%.2f GiB%s",
+			memory.stored_bricks,memory.structured_cells,
+			static_cast<double>(memory.recommended_bytes)/(1024.0*1024.0*1024.0),
+			options.gpu_memory_budget_bytes?"":" (no caller limit)");
+		if(options.gpu_memory_budget_bytes)std::fprintf(stderr," budget=%.2f GiB\n",
+			static_cast<double>(options.gpu_memory_budget_bytes)/(1024.0*1024.0*1024.0));
+		else std::fputc('\n',stderr);
+		std::fflush(stderr);
+		if(options.gpu_memory_budget_bytes&&memory.recommended_bytes>options.gpu_memory_budget_bytes)
+			throw std::runtime_error("planned GPU memory "+std::to_string(
+				memory.recommended_bytes/(1024ull*1024ull))+" MiB exceeds the safe device budget "+
+				std::to_string(options.gpu_memory_budget_bytes/(1024ull*1024ull))+
+				" MiB; use Auto config, reduce refinement, or enable half-wing symmetry");
 
 		EmbeddedBoundaryBuildOptions eb_options;
 		eb_options.min_volume_fraction=config_.amr.min_volume_fraction;
 		eb_options.retain_signed_bracketed_small_roots_for_face_state=
 			!use_conservative_cell_momentum_;
 		eb_options.min_aperture_area_fraction=config_.amr.min_aperture_area_fraction;
-		eb_options.complex_subdivisions=config_.amr.complex_subdivisions;
-		eb_options.allow_unverified_same_fragment_patches_for_diagnostics=
-			options.allow_unsafe_same_fragment_patches;
-		eb_options.exact_cell_decomposer=options.exact_cell_decomposer;
-		eb_options.use_exact_cell_decomposer_as_development_oracle=
-			options.use_exact_cell_decomposer_as_development_oracle;
+		eb_options.closed_solid=std::move(options.closed_solid);
 		embedded_boundary_=build_amr_embedded_boundary_atlas(hierarchy_,wing,bvh,eb_options);
+		report_stage("embedded boundary atlas");
 
 		if(!embedded_boundary_.ready_for_flow())
 		{
@@ -131,17 +195,25 @@ namespace paracfd::core
 
 		CompositeAmrPressureBuildOptions pressure_options;
 		pressure_options.pressure_outlet_xmax=true;
-		if(options.use_qualitative_first_order_orthogonal_pressure)
-			pressure_options.unsupported_nonorthogonal_correction=
-				UnsupportedNonorthogonalCorrectionPolicy::qualitative_preview_first_order_orthogonal;
 		pressure_system_=build_composite_amr_pressure_system(
 			hierarchy_,embedded_boundary_,pressure_options);
+		report_stage("pressure topology");
+		(void)cuda_memory_info(cuda_baseline,nullptr);
 		fields_=std::make_unique<DeviceAmrFields>(hierarchy_);
+		report_stage("GPU AMR fields");
+		report_cuda_memory("AMR fields");
 		projection_=std::make_unique<DeviceCompositeAmrProjection>(pressure_system_,*fields_);
+		report_stage("GPU projection setup");
+		report_cuda_memory("projection");
 		if(use_conservative_cell_momentum_)
 			cell_momentum_=std::make_unique<DeviceCompositeCellMomentumTransport>(pressure_system_,*fields_);
 		else
 			advection_=std::make_unique<DeviceAmrAdvection>(hierarchy_,bvh,2.5,&pressure_system_);
+		report_stage(use_conservative_cell_momentum_?"GPU cell momentum setup":"GPU MAC advection setup");
+		report_cuda_memory(use_conservative_cell_momentum_?"cell momentum":"MAC advection");
+		std::fprintf(stderr,"[grid-profile] %-24s %9.1f ms\n","TOTAL GRID BUILD",
+			elapsed_ms(build_begin,std::chrono::steady_clock::now()));
+		std::fflush(stderr);
 	}
 
 	ExternalAeroCore::~ExternalAeroCore()=default;

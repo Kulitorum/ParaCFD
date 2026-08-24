@@ -34,7 +34,6 @@ namespace paracfd::core
 		double surface_refinement_distance = 0.35; // m
 		double wake_length = 8.0;                 // m, +X from wing bbox
 		double wake_radius = 2.0;                 // m around wing bbox y/z centre
-		int complex_subdivisions = 4;             // finest-cell N^3 fluid-connectivity fallback
 		double min_volume_fraction = 0.25;         // conservative same-side merge threshold
 		// Reporting threshold only: positive-area apertures below this h^2 fraction are
 		// counted in diagnostics but remain in the conservative pressure/flux graph.
@@ -45,7 +44,11 @@ namespace paracfd::core
 	{
 		double cfl = 0.7;
 		double smagorinsky_cs = 0.10;
-		double projection_tolerance = 1e-5;
+		// The production FP32 cut-cell operator reaches a measured residual floor of
+		// O(1e-4) on the full PlanB solid. Tighter requests stall rather than improve
+		// the corrected flux field; use an FP64 validation build when tighter solves
+		// are required.
+		double projection_tolerance = 5e-4;
 		int projection_max_iterations = 600;
 	};
 
@@ -58,6 +61,8 @@ namespace paracfd::core
 
 	struct ParagliderConfig
 	{
+		// The sole geometry input: one closed aerodynamic OCCT solid. Construction
+		// sheets, ribs, baffles, and open vent geometry are not accepted here.
 		std::string step_path;
 		double tessellation_deflection_mm = 2.0;
 		ModelPlacement placement;

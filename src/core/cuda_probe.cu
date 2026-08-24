@@ -35,6 +35,14 @@ namespace paracfd::core
 		}
 	}
 
+	bool cuda_memory_info(CudaMemoryInfo& info,std::string* err)
+	{
+		info={};
+		std::size_t free_bytes=0,total_bytes=0;
+		if(!cuda_ok(cudaMemGetInfo(&free_bytes,&total_bytes),"cudaMemGetInfo",err))return false;
+		info.free_bytes=free_bytes;info.total_bytes=total_bytes;return true;
+	}
+
 	bool saxpy_gpu(float a, const std::vector<float>& x, const std::vector<float>& y, std::vector<float>& out, std::string* err)
 	{
 		const int n = static_cast<int>(x.size());

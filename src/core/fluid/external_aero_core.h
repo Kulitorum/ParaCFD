@@ -76,7 +76,6 @@ namespace paracfd::core
 		double effective_cfl = 0.0;
 		int diffusion_substeps = 1;
 		AmrGpuSolveResult pressure;
-		bool side_safe_fabric_transport = true;
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
 		bool smooth_fabric_wall_applied = false;
@@ -91,6 +90,19 @@ namespace paracfd::core
 		double absolute_integrated_flux_error = 0.0; // sum |divergence * volume|, m^3/s
 		double net_integrated_flux_error = 0.0;     // sum divergence * volume, m^3/s
 	};
+	struct ExternalAeroGpuMemoryEstimate
+	{
+		std::size_t stored_bricks = 0;
+		std::size_t structured_cells = 0;
+		// Conservative planning value, including geometry-dependent pressure/EB
+		// storage and allocator headroom.  It intentionally exceeds bytes() from
+		// the known fixed arrays so Auto config cannot drive WDDM into shared RAM.
+		std::size_t recommended_bytes = 0;
+	};
+	ExternalAeroGpuMemoryEstimate estimate_external_aero_gpu_memory(
+		const AmrHierarchy& hierarchy,bool conservative_cell_momentum=false,
+		bool full_nonorthogonal_diagnostic=false);
+
 	struct ExternalAeroExecutionOptions
 	{
 		// The face-centred MAC solver is the validated production path. The
@@ -98,20 +110,12 @@ namespace paracfd::core
 		bool conservative_cell_momentum = false;
 		bool smooth_fabric_wall = true;
 		bool pressure_impulse = true;
-		// Test harness only: reproduce pressure behavior on the historical sampled
-		// topology. Any front end enabling this must label the result qualitative.
-		bool allow_unsafe_same_fragment_patches = false;
-		// Keep the conservative two-point A/d pressure flux when the legacy preview
-		// topology cannot support its deferred non-orthogonal WLS correction. Strict
-		// CAD-certified runs leave this false and reject the topology instead.
-		bool use_qualitative_first_order_orthogonal_pressure = false;
-		// Static geometry callback supplied by front ends that link
-		// paracfd_geometry. The solver library itself remains OpenCascade-free.
-		ExactCellDecomposer exact_cell_decomposer = nullptr;
-		// Explicitly opt into the slower OpenCascade cell decomposition as a
-		// development/diagnostic oracle. Merely linking the callback must not divert
-		// the production finite-triangle path through General Fuse.
-		bool use_exact_cell_decomposer_as_development_oracle = false;
+		// Authoritative placed BRep. This is required; the triangle mesh is never a
+		// fallback topology source.
+		ClosedSolidGeometryPtr closed_solid;
+		// Front-end safety limit. Zero leaves memory policy to the caller (used by
+		// validation probes); the GUI supplies a device-derived production budget.
+		std::size_t gpu_memory_budget_bytes = 0;
 	};
 	// GPU-native static-geometry paraglider flow core. CAD/BVH/EB work happens once in
 	// the constructor. initialize() and step() retain all fields and pressure topology on

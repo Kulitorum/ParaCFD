@@ -1,16 +1,74 @@
 #include "core/fluid/amr_eb.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace paracfd::core
 {
+	namespace
+	{
+		double elapsed_ms(std::chrono::steady_clock::time_point begin,
+			std::chrono::steady_clock::time_point end)
+		{
+			return std::chrono::duration<double,std::milli>(end-begin).count();
+		}
+
+		template<class Work>
+		unsigned parallel_for_cells(int count,Work&& work)
+		{
+			if(count<=0)return 0;
+			unsigned workers=std::max(1u,std::thread::hardware_concurrency());
+			if(const char* configured=std::getenv("PARACFD_GRID_THREADS"))
+			{
+				char* end=nullptr;const long parsed=std::strtol(configured,&end,10);
+				if(end!=configured&&parsed>0)workers=static_cast<unsigned>(parsed);
+			}
+			workers=std::min(workers,static_cast<unsigned>(count));
+			if(workers<=1)
+			{
+				for(int cell=0;cell<count;++cell)work(cell);
+				return 1;
+			}
+			std::atomic<int> next{0};std::atomic<bool> failed{false};
+			std::exception_ptr error;std::mutex error_mutex;
+			constexpr int grain=4096;
+			auto run=[&]
+			{
+				try
+				{
+					while(!failed.load(std::memory_order_relaxed))
+					{
+						const int begin=next.fetch_add(grain,std::memory_order_relaxed);
+						if(begin>=count)break;const int end=std::min(count,begin+grain);
+						for(int cell=begin;cell<end;++cell)work(cell);
+					}
+				}
+				catch(...)
+				{
+					failed.store(true,std::memory_order_relaxed);
+					std::lock_guard<std::mutex> lock(error_mutex);if(!error)error=std::current_exception();
+				}
+			};
+			std::vector<std::thread> threads;threads.reserve(workers-1);
+			for(unsigned worker=1;worker<workers;++worker)threads.emplace_back(run);
+			run();for(auto& thread:threads)thread.join();if(error)std::rethrow_exception(error);
+			return workers;
+		}
+	}
+
 	std::size_t AmrEmbeddedBoundaryAtlas::unresolved_count() const
 	{
 		std::size_t count=0;for(const AmrEbLevelAtlas& atlas:levels)count+=atlas.topology.unresolved.size();return count;
@@ -24,17 +82,21 @@ namespace paracfd::core
 	AmrEmbeddedBoundaryAtlas build_amr_embedded_boundary_atlas(const AmrHierarchy& hierarchy,
 		const TriMesh& mesh, const TriangleBvh& bvh, const EmbeddedBoundaryBuildOptions& options)
 	{
+		if(!options.closed_solid)
+			throw std::invalid_argument("AMR embedded-boundary construction requires a closed solid");
 		AmrEmbeddedBoundaryAtlas result;const int bs=hierarchy.brick_size();
 		for(int level=0;level<static_cast<int>(hierarchy.levels().size());++level)
 		{
+			const auto level_begin=std::chrono::steady_clock::now();
 			const AmrLevel& source=hierarchy.levels()[level];Int3 minimum{std::numeric_limits<int>::max(),std::numeric_limits<int>::max(),std::numeric_limits<int>::max()},maximum{std::numeric_limits<int>::min(),std::numeric_limits<int>::min(),std::numeric_limits<int>::min()};bool found=false;
 			for(const BrickMetadata& brick:source.bricks)if(brick.active())
 			{
 				const double width=bs*static_cast<double>(brick.h);const Aabb3d brick_box{brick.origin,brick.origin+Vec3d{width,width,width}};if(!brick.embedded_boundary()&&bvh.query_aabb(brick_box).empty())continue;found=true;minimum.x=std::min(minimum.x,brick.coord.x);minimum.y=std::min(minimum.y,brick.coord.y);minimum.z=std::min(minimum.z,brick.coord.z);maximum.x=std::max(maximum.x,brick.coord.x);maximum.y=std::max(maximum.y,brick.coord.y);maximum.z=std::max(maximum.z,brick.coord.z);
 			}
 			if(!found)continue;const double h=source.h;const Vec3d extent=hierarchy.domain().hi-hierarchy.domain().lo;const Int3 domain_cells{static_cast<int>(std::llround(extent.x/h)),static_cast<int>(std::llround(extent.y/h)),static_cast<int>(std::llround(extent.z/h))};const Int3 cell_lo{std::max(0,minimum.x*bs-1),std::max(0,minimum.y*bs-1),std::max(0,minimum.z*bs-1)},cell_hi{std::min(domain_cells.x,(maximum.x+1)*bs+1),std::min(domain_cells.y,(maximum.y+1)*bs+1),std::min(domain_cells.z,(maximum.z+1)*bs+1)};const Vec3d origin=hierarchy.domain().lo+Vec3d{cell_lo.x*h,cell_lo.y*h,cell_lo.z*h};const UniformEbGrid grid{origin,cell_hi.x-cell_lo.x,cell_hi.y-cell_lo.y,cell_hi.z-cell_lo.z,h};
-			AmrEbLevelAtlas atlas;atlas.level=level;atlas.minimum_brick_coord=minimum;atlas.maximum_brick_coord=maximum;atlas.topology=build_embedded_boundary(mesh,bvh,grid,options);atlas.owned_cell.assign(grid.cell_count(),0);
-			for(int cell=0;cell<grid.cell_count();++cell){const BrickLocation owner=hierarchy.locate_finest(grid.cell_centroid(cell));atlas.owned_cell[cell]=static_cast<unsigned char>(owner.found()&&owner.level==level);}
+			EmbeddedBoundaryBuildOptions level_options=options;
+			AmrEbLevelAtlas atlas;atlas.level=level;atlas.minimum_brick_coord=minimum;atlas.maximum_brick_coord=maximum;atlas.topology=build_closed_solid_embedded_boundary(mesh,bvh,*level_options.closed_solid,grid,level_options);const auto topology_end=std::chrono::steady_clock::now();atlas.owned_cell.assign(grid.cell_count(),0);
+			const unsigned ownership_workers=parallel_for_cells(grid.cell_count(),[&](int cell){const BrickLocation owner=hierarchy.locate_finest(grid.cell_centroid(cell));atlas.owned_cell[cell]=static_cast<unsigned char>(owner.found()&&owner.level==level);});const auto ownership_end=std::chrono::steady_clock::now();
 			// Rebuild stabilization from OWNED fluid only. The geometry builder sees a
 			// one-cell topology halo and cannot know which volumes survive composite AMR
 			// ownership. Every accepted union below follows a real open aperture, remains
@@ -57,6 +119,14 @@ namespace paracfd::core
 			}
 			for(const SurfacePatch& patch:eb.patches)
 			{
+				if(patch.plus_fragment==invalid_fragment||patch.minus_fragment==invalid_fragment)
+				{
+					const FragmentRef fluid=patch.plus_fragment!=invalid_fragment?
+						patch.plus_fragment:patch.minus_fragment;
+					if(fluid==invalid_fragment)
+						report_unresolved(-1,"wall patch has no adjacent fluid fragment");
+					continue;
+				}
 				const bool plus_owned=ref_owned(patch.plus_fragment),minus_owned=ref_owned(patch.minus_fragment);
 				if(plus_owned!=minus_owned){const FragmentRef owned=plus_owned?patch.plus_fragment:patch.minus_fragment;report_unresolved(ref_cell(owned),"fabric patch crosses an AMR ownership boundary; both pressure sides must be represented on one composite topology");}
 			}
@@ -269,7 +339,11 @@ namespace paracfd::core
 					std::to_string(reject_fabric)+"/"+std::to_string(reject_bracketing)+"/"+
 					std::to_string(reject_other)+"; refine and rebuild");
 			}
-			result.levels.push_back(std::move(atlas));
+			const auto level_end=std::chrono::steady_clock::now();
+			std::fprintf(stderr,"[grid-profile] EB level %d: topology %.1f ms, ownership %.1f ms (%u CPU workers), stabilization %.1f ms, cells=%d\n",
+				level,elapsed_ms(level_begin,topology_end),elapsed_ms(topology_end,ownership_end),
+				ownership_workers,elapsed_ms(ownership_end,level_end),grid.cell_count());
+			std::fflush(stderr);result.levels.push_back(std::move(atlas));
 		}
 		return result;
 	}
@@ -277,6 +351,8 @@ namespace paracfd::core
 	OneLevelEmbeddedBoundary build_one_level_embedded_boundary(const AmrHierarchy& hierarchy,
 		const TriMesh& mesh, const TriangleBvh& bvh, const EmbeddedBoundaryBuildOptions& options)
 	{
+		if(!options.closed_solid)
+			throw std::invalid_argument("one-level embedded-boundary construction requires a closed solid");
 		if (hierarchy.levels().size() != 1) throw std::invalid_argument("one-level EB bridge requires exactly one AMR level");
 		const AmrLevel& level = hierarchy.levels().front();
 		if (!(level.h > 0) || level.bricks.empty()) throw std::invalid_argument("one-level EB bridge requires a non-empty level");
@@ -288,7 +364,8 @@ namespace paracfd::core
 			return rounded;
 		};
 		UniformEbGrid grid{domain.lo, cell_count(extent.x), cell_count(extent.y), cell_count(extent.z), level.h};
-		OneLevelEmbeddedBoundary out; out.topology = build_embedded_boundary(mesh, bvh, grid, options);
+		OneLevelEmbeddedBoundary out; out.topology =
+			build_closed_solid_embedded_boundary(mesh,bvh,*options.closed_solid,grid,options);
 		out.field_layout = BrickFieldLayout::make(hierarchy.brick_size(), hierarchy.ghost_cells());
 		out.cell_field_index.resize(grid.cell_count(), std::numeric_limits<std::size_t>::max());
 		const int bs = hierarchy.brick_size();

@@ -12,6 +12,7 @@ namespace paracfd::core
 		using json = nlohmann::json;
 		double number(const json& j, const char* key, double fallback) { auto it = j.find(key); return it != j.end() && it->is_number() ? it->get<double>() : fallback; }
 		int integer(const json& j, const char* key, int fallback) { auto it = j.find(key); return it != j.end() && it->is_number_integer() ? it->get<int>() : fallback; }
+
 	}
 
 	bool load_paraglider_config(const std::string& path, ParagliderConfig& out, std::string* error)
@@ -52,7 +53,6 @@ namespace paracfd::core
 				c.amr.wing_refinement_distance = number(*it, "wing_refinement_distance", c.amr.wing_refinement_distance);
 				c.amr.surface_refinement_distance = number(*it, "surface_refinement_distance", c.amr.surface_refinement_distance);
 				c.amr.wake_length = number(*it, "wake_length", c.amr.wake_length); c.amr.wake_radius = number(*it, "wake_radius", c.amr.wake_radius);
-				c.amr.complex_subdivisions = integer(*it, "complex_subdivisions", c.amr.complex_subdivisions);
 				c.amr.min_volume_fraction = number(*it, "min_volume_fraction", c.amr.min_volume_fraction);
 				c.amr.min_aperture_area_fraction = number(*it, "min_aperture_area_fraction", c.amr.min_aperture_area_fraction);
 			}
@@ -70,7 +70,7 @@ namespace paracfd::core
 			if (!(c.tessellation_deflection_mm > 0 && c.freestream.speed >= 0 && c.freestream.rho > 0 && c.freestream.nu > 0 &&
 				c.domain.upstream_margin >= 0 && c.domain.downstream_margin >= 0 && c.domain.lateral_margin >= 0 && c.domain.vertical_margin >= 0 &&
 				c.amr.base_cell_size > 0 && c.amr.max_levels >= 1 && c.amr.max_levels <= 10 && c.amr.topology_refinement_levels >= 0 && c.amr.topology_refinement_levels <= 2 && c.amr.max_levels + c.amr.topology_refinement_levels <= 10 && c.amr.brick_size >= 4 && c.amr.brick_size <= 128 && c.amr.ghost_cells >= 1 && c.amr.ghost_cells <= 4 &&
-				c.amr.wing_refinement_distance >= 0 && c.amr.surface_refinement_distance >= 0 && c.amr.wake_length >= 0 && c.amr.wake_radius >= 0 && c.amr.complex_subdivisions >= 0 && c.amr.complex_subdivisions <= 16 && c.amr.min_volume_fraction > 0 && c.amr.min_volume_fraction < 0.5 && c.amr.min_aperture_area_fraction >= 0 && c.amr.min_aperture_area_fraction < 0.5 &&
+				c.amr.wing_refinement_distance >= 0 && c.amr.surface_refinement_distance >= 0 && c.amr.wake_length >= 0 && c.amr.wake_radius >= 0 && c.amr.min_volume_fraction > 0 && c.amr.min_volume_fraction < 0.5 && c.amr.min_aperture_area_fraction >= 0 && c.amr.min_aperture_area_fraction < 0.5 &&
 				c.solver.cfl > 0 && c.solver.smagorinsky_cs >= 0 && c.solver.projection_tolerance > 0 && c.solver.projection_max_iterations > 0 && c.reference.area >= 0 && c.reference.length >= 0))
 			{
 				if (error) *error = "invalid non-positive or out-of-range paraglider configuration value"; return false;
@@ -90,7 +90,7 @@ namespace paracfd::core
 				{"matrix",{c.placement.m[0],c.placement.m[1],c.placement.m[2],c.placement.m[3],c.placement.m[4],c.placement.m[5],c.placement.m[6],c.placement.m[7],c.placement.m[8]}}};
 			root["freestream"]={{"speed",c.freestream.speed},{"rho",c.freestream.rho},{"nu",c.freestream.nu}};
 			root["domain"]={{"upstream_margin",c.domain.upstream_margin},{"downstream_margin",c.domain.downstream_margin},{"lateral_margin",c.domain.lateral_margin},{"vertical_margin",c.domain.vertical_margin},{"half_wing_symmetry",c.domain.half_wing_symmetry}};
-			root["amr"]={{"base_cell_size",c.amr.base_cell_size},{"max_levels",c.amr.max_levels},{"topology_refinement_levels",c.amr.topology_refinement_levels},{"brick_size",c.amr.brick_size},{"ghost_cells",c.amr.ghost_cells},{"wing_refinement_distance",c.amr.wing_refinement_distance},{"surface_refinement_distance",c.amr.surface_refinement_distance},{"wake_length",c.amr.wake_length},{"wake_radius",c.amr.wake_radius},{"complex_subdivisions",c.amr.complex_subdivisions},{"min_volume_fraction",c.amr.min_volume_fraction},{"min_aperture_area_fraction",c.amr.min_aperture_area_fraction}};
+			root["amr"]={{"base_cell_size",c.amr.base_cell_size},{"max_levels",c.amr.max_levels},{"topology_refinement_levels",c.amr.topology_refinement_levels},{"brick_size",c.amr.brick_size},{"ghost_cells",c.amr.ghost_cells},{"wing_refinement_distance",c.amr.wing_refinement_distance},{"surface_refinement_distance",c.amr.surface_refinement_distance},{"wake_length",c.amr.wake_length},{"wake_radius",c.amr.wake_radius},{"min_volume_fraction",c.amr.min_volume_fraction},{"min_aperture_area_fraction",c.amr.min_aperture_area_fraction}};
 			root["solver"]={{"cfl",c.solver.cfl},{"smagorinsky_cs",c.solver.smagorinsky_cs},{"projection_tolerance",c.solver.projection_tolerance},{"projection_max_iterations",c.solver.projection_max_iterations}};
 			root["reference"]={{"area",c.reference.area},{"length",c.reference.length},{"moment_origin",{c.reference.moment_origin.x,c.reference.moment_origin.y,c.reference.moment_origin.z}}};
 			std::ofstream out(path);if(!out){if(error)*error="cannot open paraglider config '"+path+"' for writing";return false;}out<<root.dump(2)<<'\n';if(!out){if(error)*error="failed while writing paraglider config '"+path+"'";return false;}if(error)error->clear();return true;

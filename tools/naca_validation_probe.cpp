@@ -334,7 +334,7 @@ void diagnose_connectivity(const CompositeAmrPressureSystem &system, const AmrEm
 		  auto cell_b = cell_a;
 		  ++cell_b[aperture.axis];
 		  const int neighbour_cell = topology.grid.cell_index(cell_b[0], cell_b[1], cell_b[2]);
-		  std::printf(" atlas=L%d h=%.6g cells=(%d,%d,%d)/(%d,%d,%d) sample=%u/%u fragments=%u/%u cellFaces=%u/%u", atlas.level, topology.grid.h, cell_a[0], cell_a[1], cell_a[2], cell_b[0], cell_b[1], cell_b[2], topology.cells[aperture.parent_face_cell].sampled_resolution, topology.cells[neighbour_cell].sampled_resolution, topology.cells[aperture.parent_face_cell].fragment_count, topology.cells[neighbour_cell].fragment_count, topology.cells[aperture.parent_face_cell].source_face_id, topology.cells[neighbour_cell].source_face_id);
+		  std::printf(" atlas=L%d h=%.6g cells=(%d,%d,%d)/(%d,%d,%d) states=%u/%u fragments=%u/%u", atlas.level, topology.grid.h, cell_a[0], cell_a[1], cell_a[2], cell_b[0], cell_b[1], cell_b[2], static_cast<unsigned>(topology.cells[aperture.parent_face_cell].state), static_cast<unsigned>(topology.cells[neighbour_cell].state), topology.cells[aperture.parent_face_cell].fragment_count, topology.cells[neighbour_cell].fragment_count);
 		  auto print_fragment = [&](FragmentRef ref)
 		  {
 			if (fragment_is_regular(ref))
@@ -344,13 +344,7 @@ void diagnose_connectivity(const CompositeAmrPressureSystem &system, const AmrEm
 			}
 			const int index = irregular_fragment_index(ref);
 			const FluidFragment &fragment = topology.fragments[index];
-			std::printf(" frag(%d cell=%d sides=%d faces=", index, fragment.parent_cell, fragment.surface_side_count);
-			for (int side = 0; side < fragment.surface_side_count; ++side)
-			{
-			  const FragmentSurfaceSide &surface = topology.fragment_surface_sides[fragment.surface_side_offset + side];
-			  std::printf("%s%u:%u", side ? "," : "", surface.source_face_id, surface.side_mask);
-			}
-			std::printf(")");
+			std::printf(" frag(%d cell=%d)", index, fragment.parent_cell);
 		  };
 		  std::printf(" refs=");
 		  print_fragment(aperture.fragment_a);
@@ -483,7 +477,6 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   if (!load_paraglider_config(config_path, config, &error)) throw std::runtime_error(error);
   config.step_path = step_path;
   if (std::isfinite(validation_tessellation_deflection_mm)) config.tessellation_deflection_mm = validation_tessellation_deflection_mm;
-  config.amr.complex_subdivisions = subdivisions;
   if (validation_topology_refinement_levels >= 0) config.amr.topology_refinement_levels = validation_topology_refinement_levels;
   config.solver.projection_max_iterations = std::max(config.solver.projection_max_iterations, 3000);
   config.solver.smagorinsky_cs = validation_smagorinsky_cs;
@@ -496,8 +489,10 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   if (std::isfinite(validation_downstream_margin)) config.domain.downstream_margin = validation_downstream_margin;
   if (std::isfinite(validation_vertical_margin)) config.domain.vertical_margin = validation_vertical_margin;
   config.placement = pitch_placement(config.placement, angle);
-  TriMesh source = load_step_mesh(step_path, config.tessellation_deflection_mm, &error);
-  if (source.empty()) throw std::runtime_error(error);
+  StepGeometry imported = load_step_solid_geometry(step_path,
+      config.tessellation_deflection_mm, &error);
+  if (imported.mesh.empty() || !imported.closed_solid) throw std::runtime_error(error);
+  TriMesh source = std::move(imported.mesh);
   constexpr double requested_width = .125;
   double h = 0, width = 0;
   int layers = 0;
@@ -536,6 +531,7 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   config.reference.area = width;
   config.reference.length = 1;
   config.placement = frame_wing_for_external_domain(clipped, ModelPlacement{}, config.domain.upstream_margin, 0, config.domain.vertical_margin, config.amr.base_cell_size * config.amr.brick_size);
+  const ModelPlacement solid_placement=composed_placement(config.placement,orientation);
   TriMesh wing = placed_mesh(clipped, config.placement);
   TriangleBvh bvh(wing);
   const auto start = std::chrono::steady_clock::now();
@@ -548,8 +544,7 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
       smooth_wall ? "turbulent smooth wall" : "slip wall", reynolds,
       config.freestream.nu, h, width, phase_fraction);
   ExternalAeroExecutionOptions execution;
-  execution.exact_cell_decomposer = &decompose_exact_cell;
-  execution.use_exact_cell_decomposer_as_development_oracle = true;
+  execution.closed_solid=imported.closed_solid->placed(solid_placement);
   execution.smooth_fabric_wall = smooth_wall;
   execution.conservative_cell_momentum = conservative_momentum;
   ExternalAeroCore core(wing, bvh, config, execution);
@@ -565,11 +560,6 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   double represented = 0;
   for (const auto &patch : core.pressure_system().surface_patches) represented += patch.area;
   result.coverage = represented / mesh_area(wing);
-  for (const auto &level : core.embedded_boundary().levels)
-  {
-	result.recovered_sides += level.topology.recovered_subgrid_surface_sides;
-	result.max_recovery_cells = std::max(result.max_recovery_cells, level.topology.maximum_surface_side_recovery_distance / level.topology.grid.h);
-  }
   if (validation_diagnose_connectivity) diagnose_connectivity(core.pressure_system(), core.embedded_boundary(), bvh, wing);
   if (validation_preprocess_only)
   {

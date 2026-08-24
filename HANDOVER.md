@@ -1,5 +1,132 @@
 # ParaCFD handover
 
+## 2026-08-21 reset checkpoint -- read this first
+
+This section supersedes the historical geometry and pressure-solver descriptions below.
+Do not restart the old open-fabric/contact-topology work merely because it remains in the
+history of this file.
+
+### Current physical and geometry decision
+
+ParaCFD is presently solving the external aerodynamics of an assumed rigid, inflated wing.
+For that purpose the ribs, crossports, diagonals, and other internal fabric are irrelevant.
+The CFD obstacle is the clean closed outer envelope exported by LeParaglider as
+`Test-Data/PlanBParakite-Solid.step`. The vent openings are closed in this export, so OCCT can
+provide a proper solid with an unambiguous inside, outside, and outward orientation. Do not
+reintroduce the earlier zero-thickness internal-fabric pressure graph unless the user explicitly
+changes the physical problem.
+
+The current production geometry path is reported as `closed-solid-triangle-bsp`:
+
+- OCCT loads and validates the closed solid (`69` faces, `4.40065444 m3`, no orientation reversal);
+- the solid is tessellated once, placed in the CFD frame, and indexed by the triangle BVH;
+- cell/triangle candidates use AABB queries and local polygon/BSP clipping rather than per-cell
+  OCCT booleans or a 3-D point-sample flood fill;
+- adjacent-cell triangle overlap pieces are coalesced into one conservative common region per
+  fragment pair in `src/core/geometry/solid_embedded_boundary.cpp`;
+- `src/core/fluid/amr_eb.cpp` now requires `options.closed_solid` and calls
+  `build_closed_solid_embedded_boundary`;
+- much of the old contact-conforming/open-fabric geometry implementation and its probes has been
+  deliberately removed from the working tree.
+
+Do not add isotropic remeshing yet. OCCT tessellation remains deflection-driven; the proposed
+`huxingyi/isotropicremesher` integration and a nominal 50 mm target edge length were explicitly
+deferred until the closed-solid CFD path works correctly.
+
+The current two-level PlanB build reports approximately `168,938` triangles, `36` active bricks,
+`1,313,933` pressure DOFs, `10,471` EB edges, `215,656` surface patches, and `464.71 MiB` persistent
+GPU storage. STEP load is about `0.86--0.95 s`; all remaining preprocessing is about `2.2--2.4 s`.
+Surface representation is essentially complete (`0.99999997` area coverage, no collapsed
+two-sided patches). Shared-control-volume closure is not mathematically clean yet: the diagnostic
+still reports `4,119` corrected rows, `sum|dA|=18.9290`, and `max|dA|=0.0270633`. Do not hide that
+number; revisit common-face consistency if force accuracy points back to it.
+
+### Current pressure solver decision
+
+The former production pressure path was structurally unusable. Its displayed iteration count was
+an outer flexible GCRO/GMRES count, and every outer basis vector launched a `27--50` iteration PCG
+solve; every inner iteration included `16` coarse Jacobi sweeps and several synchronizing GPU
+reductions. A nominal `330`-iteration step therefore meant thousands of full-grid passes and took
+about `14--18 s`. Tuning that nested solver is not the current direction.
+
+Production now uses one symmetric conservative orthogonal/two-point pressure operator and the
+matching two-point regular/EB flux correction in `src/core/fluid/amr_pressure.cu`. Deferred
+non-orthogonal flux kernels are skipped so the solved matrix and corrected divergence remain
+consistent. The old full non-orthogonal GCRO path is retained only for diagnosis by setting:
+
+```
+PARACFD_PRESSURE_FULL_NONORTHOGONAL=1
+```
+
+Do not enable that flag for an ordinary GUI run: it restores the multi-second nested solver.
+
+The direct FP32 solve has a real precision floor on this highly cut graph. Initialization stalled
+near `2.9e-5` even after `5,000` PCG iterations, and an evolved RHS could stall around
+`2.4e-4`; requesting `1e-5` is therefore dishonest in the current FP32 formulation. Explicit
+defect correction is implemented, but it cannot remove residual components below the stored
+FP32 operator/pressure resolution. `configs/planb_parakite.json` is consequently set to the
+measured usable tolerance `5e-4`. Do not silently tighten it back to `1e-5` without changing the
+numerics or precision and re-benchmarking the complete wing.
+
+### Latest verified run
+
+Command:
+
+```
+build-paraglider-ui/Release/paraglider_case_probe.exe \
+  --config configs/planb_parakite.json --steps 100 --sample-every 10 \
+  --staggered-momentum --projection-tolerance 5e-4
+```
+
+The run completed successfully in `12.2 s`, including STEP load and preprocessing. The first
+evolved projection is a difficult initialization transient and took about `1.34 s` (`3,000`
+accumulated PCG/refinement iterations). It did not recur. Normal early steps took `48--78 ms`
+total with `28--59 ms` in projection; by step 100 the result was:
+
+- physical time `0.261087 s` (this is still an early transient, not a converged aerodynamic run);
+- regular/special velocity maxima `11.745 / 14.845 m/s`;
+- total force `[109.749, 0.397, 17.645] N` and pressure force
+  `[104.792, 0.355, 17.609] N`;
+- volume-weighted RMS divergence `4.514e-5 1/s`, net integrated flux error
+  `-1.564e-2 m3/s`;
+- final pressure solve `65` iterations, residual `4.435e-4`;
+- final step `49.27 ms`, of which projection was `29.41 ms`.
+
+The initial compact velocity spike was about `70 m/s` and decayed rather than growing. Step-zero
+pressure/load is an initialization impulse and must not be interpreted aerodynamically. This run
+demonstrates boundedness and useful performance only; it does not yet prove lift convergence,
+grid convergence, or validated non-orthogonal spatial accuracy.
+
+All four configured Release tests pass: `parity`, `aero_convergence`, `paraglider_gpu`, and
+`visualization_fields`. The rebuilt GUI is
+`build-paraglider-ui/Release/paracfd-gui.exe`.
+
+Build command used on this machine:
+
+```
+$env:CUDA_PATH='C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1'
+$env:CudaToolkitDir=$env:CUDA_PATH
+cmake --build build-paraglider-ui --config Release --target paracfd-gui -- /m /p:TrackFileAccess=false
+```
+
+### Exact restart point
+
+1. Run the rebuilt GUI with `configs/planb_parakite.json` and confirm its live timings match the
+   probe rather than the obsolete `18 s/step` path.
+2. Run long enough to cover physically meaningful flow-through time before judging whether the
+   wing produces the expected force. One hundred steps covered only `0.261 s`.
+3. If accuracy is wrong, inspect the remaining shared-control-volume closure corrections first.
+   Do not return to internal ribs, vent connectivity, point-sampling boxes, or OCCT per-cell
+   booleans; those solve the discarded physical model.
+4. Solver improvements should target a genuine multigrid/direct SPD implementation and/or a
+   precision strategy. Do not optimize or restore nested GCRO -> PCG.
+5. Keep the conservative orthogonal flux/operator pairing intact. Any later deferred
+   non-orthogonal correction needs a small fixed number of outer defect/Picard updates with a
+   measured cost and stability gate, not hundreds of nested Krylov solves.
+
+The working tree contains extensive intentional geometry deletions/changes plus the untracked
+`Test-Data/PlanBParakite-Solid.step`. Preserve them; do not reset or clean the tree.
+
 ## Current state
 
 ParaCFD is a purpose-built static-geometry paraglider solver. The former building/channel product path has been removed. The repository builds in production FP32 and validation FP64 modes. Its invariant is zero-thickness, two-sided fabric: never extrude it, flood-fill it, close openings, or replace it with a binary solid mask.

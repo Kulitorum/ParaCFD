@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ParaCFD — GPU paraglider aerodynamics from zero-thickness STEP fabric
+# ParaCFD — GPU paraglider aerodynamics from a closed STEP solid
 # (C++20/CUDA + Qt6/OpenGL + OpenCascade).
 project(ParaCFD LANGUAGES CXX CUDA)
 
@@ -56,12 +56,11 @@ add_library(libparacfd STATIC
 	src/core/fluid/external_aero_core.cpp
 	src/core/fluid/eb_pressure.cpp
 	src/core/fluid/eb_pressure.cu
-	# Paraglider geometry acceleration and zero-thickness embedded boundaries.
+	# Display-mesh acceleration and closed-solid embedded boundaries.
 	src/core/geometry/triangle_bvh.cpp
 	src/core/geometry/mesh_clip.cpp
-	src/core/geometry/mesh_selection.cpp
 	src/core/geometry/embedded_boundary.cpp
-	src/core/geometry/local_surface_arrangement.cpp
+	src/core/geometry/solid_embedded_boundary.cpp
 	src/core/geometry/naca_theory.cpp
 )
 set_target_properties(libparacfd PROPERTIES
@@ -88,19 +87,19 @@ target_include_directories(libparacfd PUBLIC
 # --- paracfd_geometry (STEP import via OpenCascade; isolates OCC from the core) -
 # Qt-free static lib that mirrors how paracfd_gui_cuda splits out the GL/CUDA interop:
 # it is the ONLY target that links OpenCascade, so libparacfd and every physics gate
-# test stay OCC-free. Only paracfd-gui and the geometry unit test link it. STEP files
-# arrive in millimetres and are scaled to metres inside step_import.cpp (PLAN §3).
+# tests stay OCC-free. Only closed-solid import consumers link it. STEP files arrive
+# in millimetres and are scaled to metres at the OCCT boundary.
 set(OPENCASCADE_DIR "C:/OpenCASCADE-8.0/build2" CACHE PATH "OpenCascade 8.0 install root")
 set(OCC_INCLUDE_DIR "${OPENCASCADE_DIR}/inc")
 set(OCC_LIB_DIR "${OPENCASCADE_DIR}/win64/vc14/lib")
 set(OCC_BIN_DIR "${OPENCASCADE_DIR}/win64/vc14/bin")
 
-# Minimal toolkits needed to READ + TRIANGULATE a STEP shape (PLAN §3). These are the
+# Toolkits needed to read, validate, tessellate, and Boolean a STEP solid. These are the
 # .lib import libs we link; being PRIVATE on a STATIC lib, CMake still propagates them
 # (as $<LINK_ONLY>) to paracfd-gui / the geometry test so their final link resolves.
 set(OCC_LINK_TOOLKITS
 	TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKPrim
-	TKBO TKBool TKXSBase TKDESTEP)
+	TKBO TKBool TKShHealing TKXSBase TKDESTEP)
 
 # Full transitive runtime DLL closure of the link set (computed via dumpbin /dependents:
 # TKDESTEP.dll pulls in TKDE/TKXCAF/TKLCAF/TKShHealing → TKV3d/TKService → freetype, etc.).
@@ -111,8 +110,7 @@ set(OCC_RUNTIME_TOOLKITS
 	TKHLR TKLCAF TKMath TKMesh TKPrim TKService TKShHealing TKTopAlgo TKV3d TKVCAF TKXCAF TKXSBase)
 set(OCC_3RDPARTY_DLLS freetype brotlicommon brotlidec bz2 libpng16 zlib1)
 
-# Copy the OpenCascade runtime DLLs next to a target's exe (POST_BUILD, copy_if_different so
-# it is a no-op once deployed). Called for both paracfd-gui and the geometry test exe.
+# Copy the OpenCascade runtime DLLs next to each closed-solid consumer.
 function(paracfd_deploy_occ_dlls target)
 	if(NOT WIN32)
 		return()
@@ -134,16 +132,7 @@ endfunction()
 
 add_library(paracfd_geometry STATIC
 	src/core/geometry/step_import.cpp
-	src/core/geometry/step_face_uv_projection.cpp
-	src/core/geometry/exact_cell_decomposition.cpp
-	src/core/geometry/uv_constraint_mesh.cpp
-	src/core/geometry/occt_trimmed_edge_face.cpp
-	src/core/geometry/occt_contact_atomizer.cpp
-	src/core/geometry/occt_contact_topology_builder.cpp
-	src/core/geometry/occt_face_triangulation_conformer.cpp
-	src/core/geometry/occt_conforming_mesh_builder.cpp
-	src/core/geometry/occt_conforming_import_assembly.cpp
-	src/core/geometry/occt_surface_normalization.cpp
+	src/core/geometry/occt_closed_solid.cpp
 	src/core/geometry/naca_step.cpp)
 set_target_properties(paracfd_geometry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(paracfd_geometry PUBLIC cxx_std_20)
@@ -165,10 +154,6 @@ foreach(_tk ${OCC_LINK_TOOLKITS})
 	target_link_libraries(paracfd_geometry PRIVATE "${OCC_LIB_DIR}/${_tk}.lib")
 endforeach()
 
-add_executable(paraglider_probe tools/paraglider_probe.cpp)
-target_link_libraries(paraglider_probe PRIVATE libparacfd paracfd_geometry)
-paracfd_deploy_occ_dlls(paraglider_probe)
-
 # Reproducible analytic CAD for aerodynamic validation, independent of imported
 # paraglider topology and normals. The output is a regular STEP file consumed by
 # exactly the same OpenCascade/EB pipeline as a wing from another application.
@@ -189,321 +174,8 @@ add_executable(naca_validation_probe tools/naca_validation_probe.cpp)
 target_link_libraries(naca_validation_probe PRIVATE libparacfd paracfd_geometry)
 paracfd_deploy_occ_dlls(naca_validation_probe)
 
-# --- parity_probe: immutable CPU/GPU oracle for reusable FP64 MAC kernels -----
+# --- retained solver tests ---------------------------------------------------
 enable_testing()
-
-# Verify that OpenCascade import preserves the topology/precision contract needed by
-# the zero-thickness EB classifier across tessellation settings.  This intentionally
-# links only the isolated geometry target: no OCC types leak into the CFD core.
-add_executable(step_import_provenance_probe
-	tools/step_import_provenance_probe.cpp
-	src/core/geometry/mesh_clip.cpp)
-target_link_libraries(step_import_provenance_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(step_import_provenance_probe)
-add_test(NAME step_import_provenance COMMAND step_import_provenance_probe)
-set_tests_properties(step_import_provenance PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-
-# OCC-free face-local constrained triangulation. The probe exercises the production
-# geometry component without requiring a STEP fixture or OpenCascade type in its API.
-add_executable(uv_constraint_mesh_probe tools/uv_constraint_mesh_probe.cpp)
-target_link_libraries(uv_constraint_mesh_probe PRIVATE paracfd_geometry)
-add_test(NAME uv_constraint_mesh COMMAND uv_constraint_mesh_probe)
-
-# Direct OCCT regression for deterministic trim-valid contact UV charts. It
-# manufactures shifted/full-period cylinders to exercise exact boundary
-# pcurves, periodic lifts, 3D round trips, ambiguity and seam discontinuity.
-add_executable(step_face_uv_projection_probe
-	tools/step_face_uv_projection_probe.cpp)
-target_compile_features(step_face_uv_projection_probe PRIVATE cxx_std_20)
-target_include_directories(step_face_uv_projection_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(step_face_uv_projection_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(step_face_uv_projection_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(step_face_uv_projection_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(step_face_uv_projection_probe)
-add_test(NAME step_face_uv_projection COMMAND step_face_uv_projection_probe)
-
-# Exact source-edge intervals covered by a trimmed face. The helper uses a
-# fail-closed Boolean Common followed by zero-fuzzy edge mapping and classifies
-# one-/two-sector spans from actual target-face boundary occurrences.
-add_executable(occt_trimmed_edge_face_probe
-	tools/occt_trimmed_edge_face_probe.cpp)
-target_compile_features(occt_trimmed_edge_face_probe PRIVATE cxx_std_20)
-target_include_directories(occt_trimmed_edge_face_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_trimmed_edge_face_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_trimmed_edge_face_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_trimmed_edge_face_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_trimmed_edge_face_probe)
-add_test(NAME occt_trimmed_edge_face COMMAND occt_trimmed_edge_face_probe)
-
-# Atomize exact partial/shared CAD contacts into deterministic physical curve
-# intervals before any face is retriangulated.  This probe covers openings,
-# split edges, nonlinear reciprocal mappings, T/fan junctions and periodic seams.
-add_executable(occt_contact_atomizer_probe
-	tools/occt_contact_atomizer_probe.cpp)
-target_compile_features(occt_contact_atomizer_probe PRIVATE cxx_std_20)
-target_include_directories(occt_contact_atomizer_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_contact_atomizer_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_contact_atomizer_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_contact_atomizer_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_contact_atomizer_probe)
-add_test(NAME occt_contact_atomizer COMMAND occt_contact_atomizer_probe)
-
-# Translate the complete oriented BRep wire topology plus exact edge/face interval
-# certificates into deterministic contact atoms. This is the sole topology index
-# consumed by the conforming face-mesh stage.
-add_executable(occt_contact_topology_builder_probe
-	tools/occt_contact_topology_builder_probe.cpp)
-target_compile_features(occt_contact_topology_builder_probe PRIVATE cxx_std_20)
-target_include_directories(occt_contact_topology_builder_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_contact_topology_builder_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_contact_topology_builder_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_contact_topology_builder_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_contact_topology_builder_probe)
-add_test(NAME occt_contact_topology_builder
-	COMMAND occt_contact_topology_builder_probe)
-
-# Insert the atomized contact chains into each face's existing trimmed UV mesh,
-# re-evaluate every output node on the exact located surface, and preserve shared
-# physical topology IDs across independent face-local render vertices.
-add_executable(occt_face_triangulation_conformer_probe
-	tools/occt_face_triangulation_conformer_probe.cpp)
-target_compile_features(occt_face_triangulation_conformer_probe PRIVATE cxx_std_20)
-target_include_directories(occt_face_triangulation_conformer_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_face_triangulation_conformer_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_face_triangulation_conformer_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_face_triangulation_conformer_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_face_triangulation_conformer_probe)
-add_test(NAME occt_face_triangulation_conformer
-	COMMAND occt_face_triangulation_conformer_probe)
-
-# Assemble every atomized CAD boundary/interior contact as exact UV constraints,
-# conform all source-face meshes transactionally, and decode the resulting CAD and
-# contact provenance without leaking OCCT into the CFD core.
-add_executable(occt_conforming_mesh_builder_probe
-	tools/occt_conforming_mesh_builder_probe.cpp)
-target_compile_features(occt_conforming_mesh_builder_probe PRIVATE cxx_std_20)
-target_include_directories(occt_conforming_mesh_builder_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_conforming_mesh_builder_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_conforming_mesh_builder_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_conforming_mesh_builder_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_conforming_mesh_builder_probe)
-add_test(NAME occt_conforming_mesh_builder
-	COMMAND occt_conforming_mesh_builder_probe)
-
-# Convert the conformed face-local meshes into the OCCT-free TriMesh/contact
-# contracts, assigning global topology IDs and verifying exact contact incidence.
-add_executable(occt_conforming_import_assembly_probe
-	tools/occt_conforming_import_assembly_probe.cpp)
-target_compile_features(occt_conforming_import_assembly_probe PRIVATE cxx_std_20)
-target_include_directories(occt_conforming_import_assembly_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_conforming_import_assembly_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_conforming_import_assembly_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_conforming_import_assembly_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_conforming_import_assembly_probe)
-add_test(NAME occt_conforming_import_assembly
-	COMMAND occt_conforming_import_assembly_probe)
-
-# These topology checks intentionally use local CAD exports that are not repository
-# fixtures. Keep the clean-checkout test graph independent of them while allowing the
-# corrected and known-bad A/B models to be checked explicitly during development.
-option(PARACFD_ENABLE_LOCAL_STEP_TESTS
-	"Register topology tests that require local user STEP fixtures" OFF)
-if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
-	foreach(_local_step_fixture
-		"${CMAKE_SOURCE_DIR}/Test-Data/Two-Cells.stp"
-		"${CMAKE_SOURCE_DIR}/Test-Data/Two-Cells-fixed.stp"
-		"${CMAKE_SOURCE_DIR}/Test-Data/MiniripFixed.step")
-		if(NOT EXISTS "${_local_step_fixture}")
-			message(FATAL_ERROR
-				"PARACFD_ENABLE_LOCAL_STEP_TESTS requires ${_local_step_fixture}")
-		endif()
-	endforeach()
-	add_test(NAME step_topology_known_bad COMMAND step_import_provenance_probe
-		Test-Data/Two-Cells.stp --quality-only --expect-components 5
-		--expect-warnings 4 --expect-contacts 41 --expect-source-edges 66
-		--expect-edge-face-spans 18 --expect-uv-failures 0)
-	set_tests_properties(step_topology_known_bad PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	# Until exact interval atomization lands, these are intentionally disconnected
-	# contact-graph counts caused by retained unresolved intervals. They are not CAD
-	# geometry warnings and must not be relaxed back into false whole-edge contacts.
-	add_test(NAME step_topology_fixed_small COMMAND step_import_provenance_probe
-		Test-Data/Two-Cells-fixed.stp --quality-only --expect-components 3
-		--expect-warnings 2 --expect-contacts 45 --expect-source-edges 70
-		--expect-shared-nodes-min 1 --expect-edge-face-spans 18 --expect-uv-failures 0
-		--expect-edge-face-span 130 4 -316.19216104219998 -29.568793656477339 interior 2 partial
-		--expect-edge-face-span 130 4 -16.449786237252113 0 interior 2 partial)
-	set_tests_properties(step_topology_fixed_small PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	add_test(NAME step_topology_fixed_full COMMAND step_import_provenance_probe
-		Test-Data/MiniripFixed.step --quality-only --expect-components 18
-		--expect-warnings 17 --expect-contacts 195 --expect-source-edges 369
-		--expect-shared-nodes-min 1 --expect-partial-overlaps 2
-		--expect-edge-face-spans 172 --expect-uv-failures 0
-		--expect-edge-face-span 1085 47 0 16.449786237154626 interior 2 partial
-		--expect-edge-face-span 1085 47 29.568793656626433 316.19216104219998 interior 2 partial)
-	set_tests_properties(step_topology_fixed_full PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	add_test(NAME step_trimmed_intervals_meshing_invariant COMMAND
-		occt_trimmed_edge_face_probe --compare-meshed-step
-		Test-Data/MiniripFixed.step 1085 47)
-	set_tests_properties(step_trimmed_intervals_meshing_invariant PROPERTIES
-		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	# The normal GUI deliberately uses the explicitly labelled qualitative preview.
-	# These local fixtures guard its practical contract: preprocessing must remain
-	# usable without silently switching the detailed CAD checker into approximate mode.
-	add_test(NAME preview_eb_fixed_small COMMAND paraglider_case_probe
-		--step Test-Data/Two-Cells-fixed.stp --steps 0 --max-levels 1
-		--qualitative-preview-eb)
-	add_test(NAME preview_eb_fixed_full COMMAND paraglider_case_probe
-		--step Test-Data/MiniripFixed.step --steps 0 --max-levels 1
-		--qualitative-preview-eb)
-	set_tests_properties(preview_eb_fixed_small preview_eb_fixed_full PROPERTIES
-		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-endif()
-
-add_executable(mesh_selection_probe
-	tools/mesh_selection_probe.cpp
-	src/core/geometry/mesh_selection.cpp)
-target_compile_features(mesh_selection_probe PRIVATE cxx_std_20)
-target_include_directories(mesh_selection_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-add_test(NAME mesh_selection COMMAND mesh_selection_probe)
-
-add_executable(topology_vertex_probe tools/topology_vertex_probe.cpp)
-target_link_libraries(topology_vertex_probe PRIVATE libparacfd)
-add_test(NAME topology_vertex_ids COMMAND topology_vertex_probe)
-
-# Lightweight imported-CAD half-edge topology diagnostic. It deliberately stops at
-# STEP/BVH preprocessing so classifier failures can be counted without building EB/AMR.
-add_executable(cad_edge_classifier_probe tools/cad_edge_classifier_probe.cpp)
-target_link_libraries(cad_edge_classifier_probe PRIVATE libparacfd paracfd_geometry)
-paracfd_deploy_occ_dlls(cad_edge_classifier_probe)
-
-# Standalone diagnostic for evaluating OCCT BRep face imprinting before tessellation.
-# It deliberately does not link the CFD/embedded-boundary core and is not a production path.
-add_executable(occt_topology_normalization_probe tools/occt_topology_normalization_probe.cpp)
-target_compile_features(occt_topology_normalization_probe PRIVATE cxx_std_20)
-target_include_directories(occt_topology_normalization_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_topology_normalization_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_topology_normalization_probe PRIVATE OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_topology_normalization_probe PRIVATE paracfd_geometry
-	"${OCC_LIB_DIR}/TKBO.lib" "${OCC_LIB_DIR}/TKShHealing.lib")
-paracfd_deploy_occ_dlls(occt_topology_normalization_probe)
-
-# Transactional exact-CAD contact experiment.  Unlike the broad normalization probe,
-# this measures two-face and one-cell imprints around certified rib/skin contacts and
-# never sews or inflates tolerances.  It is diagnostic only, not a CTest/production path.
-add_executable(occt_contact_imprint_probe tools/occt_contact_imprint_probe.cpp)
-target_compile_features(occt_contact_imprint_probe PRIVATE cxx_std_20)
-target_include_directories(occt_contact_imprint_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_contact_imprint_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_contact_imprint_probe PRIVATE OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_contact_imprint_probe PRIVATE paracfd_geometry
-	"${OCC_LIB_DIR}/TKBO.lib" "${OCC_LIB_DIR}/TKShHealing.lib")
-paracfd_deploy_occ_dlls(occt_contact_imprint_probe)
-
-# Guarded face-local constrained-meshing spike.  It injects a manufactured interior
-# T-junction by default and can audit every curved interior-contact face in a STEP
-# model.  Every requested segment must be a two-sided edge in both the transient mesh
-# and final Poly_Triangulation; real-mode success requires every candidate to pass.
-add_executable(occt_constrained_mesh_probe tools/occt_constrained_mesh_probe.cpp)
-target_compile_features(occt_constrained_mesh_probe PRIVATE cxx_std_20)
-target_include_directories(occt_constrained_mesh_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_constrained_mesh_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_constrained_mesh_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_constrained_mesh_probe PRIVATE paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_constrained_mesh_probe)
-add_test(NAME occt_constrained_mesh COMMAND occt_constrained_mesh_probe)
-
-# Production planar-overlap normalizer probe. The helper retains one-to-many source
-# provenance and proves coverage/load-area conservation before accepting each cluster;
-# STEP-import integration is a separate, subsequent milestone.
-add_executable(occt_overlap_normalization_probe
-	tools/occt_overlap_normalization_probe.cpp)
-target_compile_features(occt_overlap_normalization_probe PRIVATE cxx_std_20)
-target_include_directories(occt_overlap_normalization_probe PRIVATE ${OCC_INCLUDE_DIR})
-if(EXISTS "${OCC_DEPRECATED_DIR}")
-	target_include_directories(occt_overlap_normalization_probe PRIVATE ${OCC_DEPRECATED_DIR})
-endif()
-target_compile_definitions(occt_overlap_normalization_probe PRIVATE
-	OCCT_NO_DEBUG OCCT_NO_DEPRECATED)
-target_link_libraries(occt_overlap_normalization_probe PRIVATE paracfd_geometry
-	"${OCC_LIB_DIR}/TKBO.lib")
-paracfd_deploy_occ_dlls(occt_overlap_normalization_probe)
-add_test(NAME occt_overlap_normalization_manufactured
-	COMMAND occt_overlap_normalization_probe --manufactured-only)
-if(PARACFD_ENABLE_LOCAL_STEP_TESTS)
-	add_test(NAME occt_overlap_normalization_fixed_small
-		COMMAND occt_overlap_normalization_probe --step Test-Data/Two-Cells-fixed.stp
-			--expect-clusters 1 --expect-overlap-pairs 1)
-	set_tests_properties(occt_overlap_normalization_fixed_small PROPERTIES
-		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-	add_test(NAME occt_overlap_normalization_fixed_full
-		COMMAND occt_overlap_normalization_probe --step Test-Data/MiniripFixed.step
-			--expect-clusters 2 --expect-overlap-pairs 2)
-	set_tests_properties(occt_overlap_normalization_fixed_full PROPERTIES
-		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-endif()
-
-# OCCT-backed reference decomposition of finite, conforming zero-thickness sheets inside
-# one Cartesian cell. This is the correctness gate for replacing the inference-heavy EB
-# topology builder; it stays in the OCC-isolated preprocessing target and never runs per step.
-add_executable(occt_cell_split_probe tools/occt_cell_split_probe.cpp)
-target_link_libraries(occt_cell_split_probe PRIVATE libparacfd paracfd_geometry)
-paracfd_deploy_occ_dlls(occt_cell_split_probe)
-add_test(NAME exact_cell_decomposition COMMAND occt_cell_split_probe)
-
-# Fail-closed transaction gate for exact-cell failures at AMR ownership seams and
-# for shared faces whose second participant rejects after an earlier face committed.
-add_executable(amr_eb_transaction_probe tools/amr_eb_transaction_probe.cpp)
-target_link_libraries(amr_eb_transaction_probe PRIVATE libparacfd)
-add_test(NAME amr_eb_transactions COMMAND amr_eb_transaction_probe)
-
-# A three-node aperture fan can contain a real sub-threshold fluid connector for
-# which either local merge would reverse the surviving pressure distance. Exercise
-# the production atlas stabilizer through its deterministic exact-cell test seam.
-add_executable(amr_small_root_probe tools/amr_small_root_probe.cpp)
-target_link_libraries(amr_small_root_probe PRIVATE libparacfd)
-add_test(NAME amr_small_root COMMAND amr_small_root_probe)
-
-# The strict composite pressure builder rejects an unsupported compact WLS
-# correction. Only the explicitly labelled qualitative preview may fall back to
-# the conservative orthogonal A/d term, and that fallback remains observable.
-add_executable(amr_pressure_preview_probe tools/amr_pressure_preview_probe.cpp)
-target_link_libraries(amr_pressure_preview_probe PRIVATE libparacfd)
-add_test(NAME amr_pressure_preview_fallback COMMAND amr_pressure_preview_probe)
-
-# Freeze the currently shipped qualitative-preview EB behavior before its legacy
-# inference path is quarantined/replaced. This is intentionally a separate test from
-# the strict geometry oracle and must never be interpreted as CAD certification.
-add_executable(preview_topology_probe tools/preview_topology_probe.cpp)
-target_link_libraries(preview_topology_probe PRIVATE libparacfd)
-add_test(NAME preview_topology COMMAND preview_topology_probe)
 
 add_executable(parity_probe tools/parity_probe.cu)
 set_target_properties(parity_probe PROPERTIES
@@ -520,32 +192,9 @@ add_executable(aero_convergence_probe tools/aero_convergence_probe.cpp)
 target_include_directories(aero_convergence_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME aero_convergence COMMAND aero_convergence_probe)
 
-# Deterministic CPU geometry/EB/AMR gates plus a tiny CUDA halo parity check. This is the
-# zero-thickness membrane acceptance oracle; it does not use snapshot goldens.
-add_executable(paraglider_geometry_probe tools/paraglider_geometry_probe.cpp)
-target_link_libraries(paraglider_geometry_probe PRIVATE libparacfd paracfd_geometry)
-paracfd_deploy_occ_dlls(paraglider_geometry_probe)
-add_test(NAME paraglider_geometry COMMAND paraglider_geometry_probe)
-set_tests_properties(paraglider_geometry PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-
-# Imported analytic airfoil regression: the closed NACA extrusion must retain a
-# separate internal fluid pressure component with no dead pressure mappings.
-add_test(NAME naca_geometry COMMAND paraglider_probe --config configs/naca2412.json
-	--expect-gauges 1 --expect-no-inactive-mappings)
-set_tests_properties(naca_geometry PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-
 add_executable(paraglider_gpu_probe tools/paraglider_gpu_probe.cpp)
 target_link_libraries(paraglider_gpu_probe PRIVATE libparacfd)
 add_test(NAME paraglider_gpu COMMAND paraglider_gpu_probe)
-
-add_executable(paraglider_flow_probe tools/paraglider_flow_probe.cpp)
-target_link_libraries(paraglider_flow_probe PRIVATE libparacfd)
-add_test(NAME paraglider_flow COMMAND paraglider_flow_probe)
-set_tests_properties(paraglider_flow PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-
-add_executable(local_surface_arrangement_probe tools/local_surface_arrangement_probe.cpp)
-target_link_libraries(local_surface_arrangement_probe PRIVATE libparacfd)
-add_test(NAME local_surface_arrangement COMMAND local_surface_arrangement_probe)
 
 # --- paracfd_gui_cuda (Qt-free slice sampler/colour reference) ----------------
 add_library(paracfd_gui_cuda STATIC

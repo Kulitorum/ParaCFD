@@ -1,6 +1,6 @@
 {
   "step": {
-    "path": "Test-Data/PlanBParakite.step",
+    "path": "Test-Data/PlanBParakite-Solid.step",
     "tessellation_deflection_mm": 2.0
   },
   "placement": {
@@ -30,14 +30,13 @@
     "surface_refinement_distance": 0.35,
     "wake_length": 8.0,
     "wake_radius": 2.0,
-    "complex_subdivisions": 4,
     "min_volume_fraction": 0.005,
     "min_aperture_area_fraction": 0.0001
   },
   "solver": {
     "cfl": 0.7,
     "smagorinsky_cs": 0.10,
-    "projection_tolerance": 1e-5,
+    "projection_tolerance": 5e-4,
     "projection_max_iterations": 600
   },
   "reference": {

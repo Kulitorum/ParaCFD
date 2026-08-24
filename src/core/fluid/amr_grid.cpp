@@ -1,8 +1,13 @@
 #include "core/fluid/amr_grid.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <exception>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 
 namespace paracfd::core
@@ -20,6 +25,36 @@ namespace paracfd::core
 			const double w = bs * static_cast<double>(b.h); return {b.origin, b.origin + Vec3d{w, w, w}};
 		}
 		bool box_overlap(const Aabb3d& a, const Aabb3d& b) { return a.overlaps(b); }
+		template<class Work>
+		void parallel_for_ranges(int count,Work&& work)
+		{
+			if(count<=0)return;unsigned workers=std::max(1u,std::thread::hardware_concurrency());
+			if(const char* configured=std::getenv("PARACFD_GRID_THREADS"))
+			{
+				char* end=nullptr;const long parsed=std::strtol(configured,&end,10);
+				if(end!=configured&&parsed>0)workers=static_cast<unsigned>(parsed);
+			}
+			workers=std::min(workers,static_cast<unsigned>(count));
+			if(workers<=1){work(0,count);return;}
+			std::atomic<bool> failed{false};std::exception_ptr error;std::mutex error_mutex;
+			auto run=[&](unsigned worker)
+			{
+				try
+				{
+					const int begin=static_cast<int>((static_cast<long long>(count)*worker)/workers);
+					const int end=static_cast<int>((static_cast<long long>(count)*(worker+1))/workers);
+					if(!failed.load(std::memory_order_relaxed))work(begin,end);
+				}
+				catch(...)
+				{
+					failed.store(true,std::memory_order_relaxed);const std::lock_guard<std::mutex> lock(error_mutex);
+					if(!error)error=std::current_exception();
+				}
+			};
+			std::vector<std::thread> threads;threads.reserve(workers-1);
+			for(unsigned worker=1;worker<workers;++worker)threads.emplace_back(run,worker);
+			run(0);for(auto& thread:threads)thread.join();if(error)std::rethrow_exception(error);
+		}
 	}
 
 	std::uint64_t AmrHierarchy::coord_hash(Int3 c)
@@ -47,7 +82,12 @@ namespace paracfd::core
 			requested.lo.z - 0.5 * excess.z};
 		domain_.hi = domain_.lo + padded_size;
 		levels_.assign(max_levels_, {});
-		for (int l = 0; l < max_levels_; ++l) { levels_[l].level = l; levels_[l].h = static_cast<float>(h / static_cast<double>(1 << l)); }
+		// Grid topology is constructed in world-space doubles. Keeping h as FP32 while
+		// domain padding and base-brick origins used the requested FP64 value produced
+		// two subtly different lattices for values such as 0.2. At a brick boundary,
+		// point location could then select the brick on the wrong side and corrupt the
+		// pressure graph. Retain one exact host lattice; GPU field values remain FP32.
+		for (int l = 0; l < max_levels_; ++l) { levels_[l].level = l; levels_[l].h = h / static_cast<double>(1 << l); }
 		AmrLevel& base = levels_[0]; base.bricks.reserve(static_cast<std::size_t>(dims.x) * dims.y * dims.z);
 		for (int z = 0; z < dims.z; ++z) for (int y = 0; y < dims.y; ++y) for (int x = 0; x < dims.x; ++x)
 		{
@@ -71,7 +111,10 @@ namespace paracfd::core
 		for (int l = 0; l + 1 < out.max_levels_; ++l)
 		{
 			const std::size_t count = out.levels_[l].bricks.size();
-			for (std::size_t id = 0; id < count; ++id)
+			std::vector<unsigned char> refine(count,0);
+			parallel_for_ranges(static_cast<int>(count),[&](int begin,int end)
+			{
+			for(int id=begin;id<end;++id)
 			{
 				const BrickMetadata& b = out.levels_[l].bricks[id]; if (!b.active()) continue;
 				const Aabb3d bb = brick_box(b, out.brick_size_);
@@ -89,8 +132,10 @@ namespace paracfd::core
 				// resolve ribs, openings, or trailing edges. Keep the near wake one level
 				// coarser; its length/radius remain independently configurable.
 				const bool wake_region = l + 1 < c.max_levels - 1 && box_overlap(bb, wake);
-				if (wing_region || surface_region || wake_region) out.refine_brick(l, static_cast<int>(id));
+				refine[id]=static_cast<unsigned char>(wing_region || surface_region || wake_region);
 			}
+			});
+			for(std::size_t id=0;id<count;++id)if(refine[id])out.refine_brick(l,static_cast<int>(id));
 			out.rebuild_level_tables_and_metadata(&bvh);
 		}
 		out.enforce_balance(); out.rebuild_level_tables_and_metadata(&bvh); return out;
@@ -129,7 +174,9 @@ namespace paracfd::core
 				while (lev.lookup[slot].brick_id >= 0) slot = (slot + 1) & lev.lookup_mask;
 				lev.lookup[slot] = {b.coord, id}; if (b.active()) ++lev.active_bricks;
 			}
-			for (int id = 0; id < static_cast<int>(lev.bricks.size()); ++id)
+			parallel_for_ranges(static_cast<int>(lev.bricks.size()),[&](int begin,int end)
+			{
+			for(int id=begin;id<end;++id)
 			{
 				BrickMetadata& b = lev.bricks[id];
 				const Int3 d[6] = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
@@ -140,6 +187,7 @@ namespace paracfd::core
 				if (std::abs(b.origin.z - domain_.lo.z) <= eps) b.flags |= BRICK_ZMIN; if (std::abs(bh.z - domain_.hi.z) <= eps) b.flags |= BRICK_ZMAX;
 				if (bvh && !bvh->query_aabb(brick_box(b, brick_size_)).empty()) b.flags |= BRICK_EMBEDDED_BOUNDARY;
 			}
+			});
 		}
 	}
 

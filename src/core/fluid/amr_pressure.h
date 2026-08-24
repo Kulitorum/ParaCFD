@@ -180,24 +180,9 @@ namespace paracfd::core
 		std::vector<int> fragment_dof; // atlas fragment -> resolved same-side composite DOF
 	};
 
-	// The CAD-certified solver must reject a non-orthogonal pressure correction that
-	// its compact same-fluid WLS stencil cannot represent.  The second policy exists
-	// solely for the explicitly labelled legacy-triangle qualitative preview: it keeps
-	// the conservative two-point A/d flux and drops only the unsupported deferred term.
-	enum class UnsupportedNonorthogonalCorrectionPolicy : std::uint8_t
-	{
-		reject = 0,
-		qualitative_preview_orthogonal_fallback = 1,
-		// Explicit first-order preview: use the conservative orthogonal A/d term on
-		// every skew face and omit all deferred WLS corrections, supported or not.
-		qualitative_preview_first_order_orthogonal = 2
-	};
-
 	struct CompositeAmrPressureBuildOptions
 	{
 		bool pressure_outlet_xmax = true;
-		UnsupportedNonorthogonalCorrectionPolicy unsupported_nonorthogonal_correction =
-			UnsupportedNonorthogonalCorrectionPolicy::reject;
 	};
 
 	struct CompositeAmrPressureSystem
@@ -241,26 +226,13 @@ namespace paracfd::core
 		// The extension follows only real open apertures and therefore never crosses
 		// a zero-thickness fabric surface.
 		std::vector<std::uint8_t> pressure_gradient_ring;
-		// Corrections below 16 production-scalar epsilons are indistinguishable from
-		// orthogonal in the FP32 operator and are explicitly stored as zero. Counts keep
-		// this representation-aware classification observable during validation.
+		// Corrections below 16 geometry-coefficient epsilons are indistinguishable from
+		// orthogonal when stored and are explicitly recorded as zero. Counts keep this
+		// representation-aware classification observable during validation.
 		std::size_t numerically_orthogonal_regular = 0;
 		std::size_t numerically_orthogonal_coarse_fine = 0;
 		std::size_t numerically_orthogonal_embedded = 0;
 		double maximum_numerically_orthogonal_correction = 0;
-		// Non-zero only for an explicitly requested qualitative-preview build. Each
-		// count is one deferred non-orthogonal term replaced by its conservative
-		// orthogonal two-point flux. The fallback policy counts unsupported terms;
-		// first-order preview counts every represented skew term. Strict builds throw.
-		std::size_t qualitative_preview_orthogonal_fallback_regular = 0;
-		std::size_t qualitative_preview_orthogonal_fallback_coarse_fine = 0;
-		std::size_t qualitative_preview_orthogonal_fallback_embedded = 0;
-		std::size_t qualitative_preview_orthogonal_fallback_count() const
-		{
-			return qualitative_preview_orthogonal_fallback_regular +
-				qualitative_preview_orthogonal_fallback_coarse_fine +
-				qualitative_preview_orthogonal_fallback_embedded;
-		}
 		// Static CAD provenance and two-sided pressure mapping. These records are
 		// consumed only when publishing loads/visualization, not by timestep kernels.
 		std::vector<CompositeSurfacePressurePatch> surface_patches;
@@ -310,8 +282,8 @@ namespace paracfd::core
 		~DeviceCompositeAmrPressureOperator();
 		DeviceCompositeAmrPressureOperator(const DeviceCompositeAmrPressureOperator&) = delete;
 		DeviceCompositeAmrPressureOperator& operator=(const DeviceCompositeAmrPressureOperator&) = delete;
-		void apply(const Real* pressure, Real* output) const;
-		void apply_orthogonal(const Real* pressure, Real* output) const;
+		void apply(const PressureReal* pressure, PressureReal* output) const;
+		void apply_orthogonal(const PressureReal* pressure, PressureReal* output) const;
 		int storage_size() const { return storage_size_; }
 		std::size_t bytes() const { return bytes_; }
 
@@ -325,9 +297,10 @@ namespace paracfd::core
 		int *gradient_node_dof_ = nullptr, *gradient_offset_ = nullptr,
 			*gradient_neighbour_ = nullptr, *connection_lower_node_ = nullptr,
 			*connection_upper_node_ = nullptr;
-		Real *gradient_weight_ = nullptr, *gradient_ = nullptr,
+		Real *gradient_weight_ = nullptr,
 			*connection_correction_ = nullptr, *connection_upper_weight_ = nullptr,
 			*connection_area_ = nullptr;
+		PressureReal* gradient_ = nullptr;
 		int *regular_correction_lower_ = nullptr, *regular_correction_upper_ = nullptr,
 			*regular_correction_lower_node_ = nullptr, *regular_correction_upper_node_ = nullptr;
 		Real *regular_correction_two_point_delta_ = nullptr,
@@ -373,45 +346,52 @@ namespace paracfd::core
 		~DeviceCompositeAmrPressureSolver();
 		DeviceCompositeAmrPressureSolver(const DeviceCompositeAmrPressureSolver&) = delete;
 		DeviceCompositeAmrPressureSolver& operator=(const DeviceCompositeAmrPressureSolver&) = delete;
-		AmrGpuSolveResult solve(Real* pressure, const Real* rhs, double tolerance, int max_iterations, bool warm_start = false);
+		AmrGpuSolveResult solve(PressureReal* pressure, const PressureReal* rhs, double tolerance, int max_iterations, bool warm_start = false);
 		std::size_t bytes() const { return bytes_; }
 
 	private:
+		struct AlgebraicMgLevel
+		{
+			int cells = 0;
+			int *row_offset = nullptr, *neighbour = nullptr;
+			PressureReal *coefficient = nullptr, *diagonal = nullptr;
+			PressureReal *rhs = nullptr, *x = nullptr, *temporary = nullptr, *residual = nullptr;
+			int *aggregate = nullptr, *restrict_offset = nullptr, *restrict_dof = nullptr;
+		};
 		DeviceCompositeAmrPressureOperator op_;
 		int n_ = 0;
-		Real *r_ = nullptr, *z_ = nullptr, *direction_ = nullptr, *Ad_ = nullptr,
+		PressureReal *r_ = nullptr, *z_ = nullptr, *direction_ = nullptr, *Ad_ = nullptr,
 			*t_ = nullptr, *correction_ = nullptr, *defect_rhs_ = nullptr,
 			*gmres_v_ = nullptr, *gmres_z_ = nullptr,
 			*gmres_recycle_u_ = nullptr, *gmres_recycle_c_ = nullptr,
 			*diagonal_ = nullptr;
 		unsigned char* active_ = nullptr;
 		int *aggregate_ = nullptr, *aggregate_restrict_offset_ = nullptr,
-			*aggregate_restrict_dof_ = nullptr, *base_neighbors_ = nullptr,
-			*base_extra_a_ = nullptr, *base_extra_b_ = nullptr,
-			*base_extra_incident_dof_ = nullptr, *base_extra_incident_offset_ = nullptr,
-			*base_extra_incident_edge_ = nullptr;
-		Real *base_positive_ = nullptr, *base_diagonal_ = nullptr, *base_extra_coefficient_ = nullptr, *base_rhs_ = nullptr, *base_x_ = nullptr, *base_tmp_ = nullptr;
+			*aggregate_restrict_dof_ = nullptr;
+		std::vector<AlgebraicMgLevel> mg_levels_;
 		int *schwarz_block_offset_ = nullptr, *schwarz_factor_offset_ = nullptr,
 			*schwarz_dof_ = nullptr, *schwarz_pivot_ = nullptr;
-		Real *schwarz_lu_ = nullptr, *schwarz_rhs_ = nullptr;
-		int base_offset_ = 0, base_bricks_ = 0, base_cells_ = 0, base_extra_count_ = 0,
-			base_extra_incident_dof_count_ = 0, schwarz_block_count_ = 0,
-			schwarz_dof_count_ = 0, schwarz_max_block_size_ = 0, brick_size_ = 0;
+		Real* schwarz_lu_ = nullptr;
+		PressureReal* schwarz_rhs_ = nullptr;
+		int base_offset_ = 0, base_cells_ = 0, schwarz_block_count_ = 0,
+			schwarz_dof_count_ = 0, schwarz_max_block_size_ = 0;
 		// Flexible GCRO/LGMRES retains a few realized solution-space corrections U and
 		// their orthonormal true images C=A*U across restarts. This preserves the modes
 		// that plain short-restart FGMRES discarded without retaining a 128-vector basis.
 		static constexpr int gmres_restart_ = 24;
 		static constexpr int gmres_recycle_capacity_ = 3;
 		int gmres_recycle_count_ = 0;
+		bool full_nonorthogonal_ = false;
 		// Non-owning and populated only when PARACFD_PRESSURE_TRACE is set. Pressure
 		// systems already outlive their device projection; this avoids any production
 		// host-memory cost for failure-only residual localization.
 		const CompositeAmrPressureSystem* trace_system_ = nullptr;
 		std::size_t bytes_ = 0;
-		void apply_preconditioner(const Real* residual, Real* output);
-		void apply_irregular_schwarz(const Real* residual, Real* output);
-		void trace_failure_residual(const Real* residual) const;
-		AmrGpuSolveResult solve_orthogonal(Real* pressure, const Real* rhs,
+		void apply_mg_level(int level);
+		void apply_preconditioner(const PressureReal* residual, PressureReal* output);
+		void apply_irregular_schwarz(const PressureReal* residual, PressureReal* output);
+		void trace_failure_residual(const PressureReal* residual) const;
+		AmrGpuSolveResult solve_orthogonal(PressureReal* pressure, const PressureReal* rhs,
 			double tolerance, int max_iterations, bool warm_start);
 	};
 
@@ -486,7 +466,7 @@ namespace paracfd::core
 		void download_pressure(std::vector<Real>& host) const;
 		Real* pressure() { return pressure_; }
 		const Real* pressure() const { return pressure_; }
-		const Real* rhs() const { return rhs_; }
+		const PressureReal* rhs() const { return rhs_; }
 		// First segment of the compact special-flux array: one +axis velocity for
 		// every fine-owned 2:1 pressure aperture. Exposed read-only so conservative
 		// momentum transport can use exactly the projected mass flux on the GPU.
@@ -503,8 +483,9 @@ namespace paracfd::core
 		DeviceCompositeAmrFluxLevelView* levels_ = nullptr;
 		unsigned char* active_ = nullptr;
 		std::uint8_t* cut_face_mask_ = nullptr;
-		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr, *rhs_ = nullptr,
+		Real *volume_ = nullptr, *integrated_ = nullptr, *divergence_ = nullptr,
 			*pressure_ = nullptr;
+		PressureReal *rhs_ = nullptr, *pressure_solve_ = nullptr;
 		int *first_dof_ = nullptr, *second_dof_ = nullptr,
 			*special_incident_dof_ = nullptr, *special_incident_offset_ = nullptr,
 			*special_incident_edge_ = nullptr;
@@ -515,9 +496,10 @@ namespace paracfd::core
 		int *pressure_gradient_node_dof_ = nullptr, *pressure_gradient_offset_ = nullptr,
 			*pressure_gradient_neighbour_ = nullptr, *special_lower_gradient_node_ = nullptr,
 			*special_upper_gradient_node_ = nullptr;
-		Real *pressure_gradient_weight_ = nullptr, *pressure_gradient_ = nullptr,
+		Real *pressure_gradient_weight_ = nullptr,
 			*special_nonorthogonal_correction_ = nullptr,
 			*special_upper_gradient_weight_ = nullptr;
+		PressureReal* pressure_gradient_ = nullptr;
 		int *regular_correction_lower_ = nullptr, *regular_correction_upper_ = nullptr,
 			*regular_correction_lower_node_ = nullptr, *regular_correction_upper_node_ = nullptr,
 			*regular_correction_level_ = nullptr;

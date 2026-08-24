@@ -34,8 +34,8 @@ namespace paracfd::gui
 	class SliceViewer;
 	struct ParagliderDisplaySnapshot;
 
-	// Purpose-built paraglider application shell. It owns no channel, seabed, solid
-	// voxel, or building state: STEP -> placed two-sided TriMesh -> static AMR/EB -> GPU.
+	// Purpose-built paraglider application shell: validated STEP solid -> conservative cut cells
+	// cuts -> static AMR/EB -> GPU. The TriMesh is both CFD and display geometry.
 	class ParagliderWindow final : public QMainWindow
 	{
 		Q_OBJECT
@@ -51,6 +51,7 @@ namespace paracfd::gui
 		void setThinYDiagnostic(double span_fraction,double width_metres=0.125);
 		void setConservativeMomentum(bool enabled);
 		void setHalfWingSimulation(bool enabled);
+		bool autoConfigureGridFromSections();
 		void setAoaSweepControls(double mean_tolerance_percent,double maximum_flow_throughs,
 			double reference_area=0);
 		bool startAoaSweep(double minimum_degrees,double maximum_degrees,double step_degrees);
@@ -83,7 +84,6 @@ namespace paracfd::gui
 		void updateSnapshot();
 		void applySurfaceColour();
 		void updateDebugBoxes();
-		void applyGeometrySelection(bool invalidate_solver);
 		void updateGeometryIssueDisplay();
 		void updateWingLabel();
 		void resetSimulationAfterGeometryChange();
@@ -102,11 +102,7 @@ namespace paracfd::gui
 		paracfd::core::ParagliderConfig config_;
 		paracfd::core::TriMesh imported_mesh_;
 		paracfd::core::TriMesh source_mesh_;
-		paracfd::core::GeometryQualityReport geometry_quality_;
-		paracfd::core::GeometryQualityReport preview_geometry_quality_;
-		paracfd::core::StepCadContactGraph cad_contacts_;
-		paracfd::core::StepCadContactGraph preview_cad_contacts_;
-		std::vector<std::uint32_t> source_triangle_to_imported_;
+		paracfd::core::ClosedSolidSourcePtr closed_solid_source_;
 		QString step_path_,config_path_,orientation_note_;
 		std::uint64_t snapshot_generation_=0,surface_generation_=0;
 		long long last_steps_=0;
@@ -134,10 +130,10 @@ namespace paracfd::gui
 		QCheckBox *auto_range_=nullptr,*show_slice_=nullptr,*show_model_=nullptr,*show_amr_=nullptr,
 			*show_eb_=nullptr,*show_arrows_=nullptr,*show_tracers_=nullptr,*show_iso_=nullptr,*show_volume_=nullptr,
 			*show_pressure_forces_=nullptr,*clip_slice_=nullptr,*thin_y_debug_=nullptr,*auto_pause_=nullptr,
-			*conservative_momentum_=nullptr,*strict_exact_eb_=nullptr,*half_wing_=nullptr,*exclude_disconnected_=nullptr,
+			*conservative_momentum_=nullptr,*half_wing_=nullptr,
 			*show_geometry_issues_=nullptr;
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
-		QLabel *wing_label_=nullptr,*geometry_quality_readout_=nullptr,*grid_readout_=nullptr,
+		QLabel *wing_label_=nullptr,*solid_status_readout_=nullptr,*grid_readout_=nullptr,
 			*solver_readout_=nullptr,*load_readout_=nullptr;
 		QPushButton* aoa_sweep_button_=nullptr;
 		QPlainTextEdit* aoa_sweep_results_=nullptr;
@@ -145,12 +141,11 @@ namespace paracfd::gui
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;
 		std::vector<float> cp_plus_,cp_minus_,delta_cp_,triangle_pressure_force_xyz_;
 		float delta_cp_range_=1,side_cp_range_=1;
-		std::size_t approximate_same_fragment_patches_=0;
-		double approximate_same_fragment_area_=0;
-		bool current_run_detailed_geometry_=false;
+		double measured_section_chord_=0,measured_section_thickness_=0;
+		int measured_section_count_=0;
+		std::size_t auto_gpu_estimate_bytes_=0,auto_gpu_budget_bytes_=0;
 		bool thin_debug_display_=false;
 		bool half_wing_display_=false;
-		bool detailed_geometry_display_=false;
 		bool embedded_boundary_diagnostic_display_=false;
 	};
 }

@@ -2,7 +2,9 @@
 #include "core/fluid/amr_eb.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <sstream>
@@ -28,7 +30,17 @@ namespace paracfd::core
 		}
 		int base_aggregate_dof(const CompositeAmrPressureSystem& system,Vec3d point)
 		{
-			const AmrLevel& base=system.hierarchy->levels().front();const double brick_width=system.brick_size*base.h;const Aabb3d& domain=system.hierarchy->domain();Int3 coord{static_cast<int>(std::floor((point.x-domain.lo.x)/brick_width)),static_cast<int>(std::floor((point.y-domain.lo.y)/brick_width)),static_cast<int>(std::floor((point.z-domain.lo.z)/brick_width))};const int brick=system.hierarchy->find_brick(0,coord);if(brick<0)return -1;const BrickMetadata& metadata=base.bricks[brick];const int i=std::clamp(static_cast<int>(std::floor((point.x-metadata.origin.x)/base.h)),0,system.brick_size-1),j=std::clamp(static_cast<int>(std::floor((point.y-metadata.origin.y)/base.h)),0,system.brick_size-1),k=std::clamp(static_cast<int>(std::floor((point.z-metadata.origin.z)/base.h)),0,system.brick_size-1);return system.dof(0,brick,i,j,k);
+			const AmrLevel& base=system.hierarchy->levels().front();
+			const double brick_width=system.brick_size*base.h;
+			const Aabb3d& domain=system.hierarchy->domain();
+			Int3 coord{static_cast<int>(std::floor((point.x-domain.lo.x)/brick_width)),static_cast<int>(std::floor((point.y-domain.lo.y)/brick_width)),static_cast<int>(std::floor((point.z-domain.lo.z)/brick_width))};
+			const int brick=system.hierarchy->find_brick(0,coord);if(brick<0)return -1;
+			const BrickMetadata& metadata=base.bricks[brick];
+			int local[3]={
+				std::clamp(static_cast<int>(std::floor((point.x-metadata.origin.x)/base.h)),0,system.brick_size-1),
+				std::clamp(static_cast<int>(std::floor((point.y-metadata.origin.y)/base.h)),0,system.brick_size-1),
+				std::clamp(static_cast<int>(std::floor((point.z-metadata.origin.z)/base.h)),0,system.brick_size-1)};
+			return system.dof(0,brick,local[0],local[1],local[2]);
 		}
 
 		int symmetric_pseudoinverse_3x3(const double* input,double* inverse)
@@ -47,17 +59,9 @@ namespace paracfd::core
 
 		struct PressureGradientSample { int neighbour=-1; double weight=0; };
 
-		void finalize_nonorthogonal_pressure_topology(CompositeAmrPressureSystem& system,
-			UnsupportedNonorthogonalCorrectionPolicy unsupported_policy)
+		void finalize_nonorthogonal_pressure_topology(CompositeAmrPressureSystem& system)
 		{
-			if(unsupported_policy!=UnsupportedNonorthogonalCorrectionPolicy::reject&&
-				unsupported_policy!=UnsupportedNonorthogonalCorrectionPolicy::qualitative_preview_orthogonal_fallback&&
-				unsupported_policy!=UnsupportedNonorthogonalCorrectionPolicy::qualitative_preview_first_order_orthogonal)
-				throw std::invalid_argument("unknown unsupported nonorthogonal pressure-correction policy");
 			system.regular_pressure_corrections.clear();system.pressure_gradient_dof.clear();system.pressure_gradient_offset.clear();system.pressure_gradient_neighbour.clear();system.pressure_gradient_weight.clear();system.pressure_gradient_rank.clear();system.pressure_gradient_ring.clear();system.numerically_orthogonal_regular=system.numerically_orthogonal_coarse_fine=system.numerically_orthogonal_embedded=0;system.maximum_numerically_orthogonal_correction=0;
-			system.qualitative_preview_orthogonal_fallback_regular=0;
-			system.qualitative_preview_orthogonal_fallback_coarse_fine=0;
-			system.qualitative_preview_orthogonal_fallback_embedded=0;
 			auto prepare=[](CompositeAmrPressureSystem& owner,CoarseFinePressureConnection& edge,std::size_t& below_resolution)
 			{
 				if(edge.coarse_dof<0||edge.fine_dof<0||edge.coarse_dof>=owner.storage_size||edge.fine_dof>=owner.storage_size||edge.coarse_dof==edge.fine_dof||!(edge.open_area>0))throw std::runtime_error("invalid compact pressure connection");
@@ -88,38 +92,6 @@ namespace paracfd::core
 					}
 				}
 			}
-			if(unsupported_policy==UnsupportedNonorthogonalCorrectionPolicy::qualitative_preview_first_order_orthogonal)
-			{
-				auto drop_connection=[](CoarseFinePressureConnection& edge,std::size_t& count)
-				{
-					if(length2(edge.nonorthogonal_correction)>1e-24)++count;
-					edge.nonorthogonal_correction={};edge.lower_gradient_node=edge.upper_gradient_node=-1;
-				};
-				for(auto& edge:system.coarse_fine)
-					drop_connection(edge,system.qualitative_preview_orthogonal_fallback_coarse_fine);
-				for(auto& edge:system.embedded)
-					drop_connection(edge,system.qualitative_preview_orthogonal_fallback_embedded);
-				for(auto& edge:system.regular_pressure_corrections)
-				{
-					if(length2(edge.nonorthogonal_correction)>1e-24)
-						++system.qualitative_preview_orthogonal_fallback_regular;
-					edge.nonorthogonal_correction={};edge.lower_gradient_node=edge.upper_gradient_node=-1;
-				}
-				// A skew same-level face whose signed-normal distance is still exactly h
-				// now needs neither a two-point delta nor a deferred term. Removing that
-				// empty record keeps the first-order preview's compact work list minimal.
-				system.regular_pressure_corrections.erase(std::remove_if(
-					system.regular_pressure_corrections.begin(),system.regular_pressure_corrections.end(),
-					[&](const RegularPressureCorrection& edge)
-					{
-						const double h=system.hierarchy->levels()[edge.level].h;
-						return std::abs(edge.two_point_delta)*h<=1e-12;
-					}),system.regular_pressure_corrections.end());
-				// No deferred term survives, so no WLS nodes, graph rings, response matrix,
-				// or GPU gradient buffers are required for this explicitly first-order path.
-				return;
-			}
-
 			std::unordered_map<int,int> node_map;auto register_connection=[&](const CoarseFinePressureConnection& edge)
 			{
 				if(length2(edge.nonorthogonal_correction)<=1e-24)return;const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;for(int dof:{lower,upper})if(node_map.emplace(dof,static_cast<int>(node_map.size())).second)system.pressure_gradient_dof.push_back(dof);
@@ -188,32 +160,22 @@ namespace paracfd::core
 			// can create a non-conservative feedback loop. Audit the final affine response
 			// here, once during preprocessing, and fail with the exact offending topology.
 			std::vector<std::array<double,9>> response(system.pressure_gradient_dof.size());for(std::size_t node=0;node<response.size();++node){const int centre=system.pressure_gradient_dof[node];for(int q=system.pressure_gradient_offset[node];q<system.pressure_gradient_offset[node+1];++q){const Vec3d d=system.centroid[system.pressure_gradient_neighbour[q]]-system.centroid[centre],weight=system.pressure_gradient_weight[q];for(int row=0;row<3;++row)for(int column=0;column<3;++column)response[node][3*row+column]+=weight[row]*d[column];}}
-			auto reject_or_drop=[&](std::string message,Vec3d& correction,int& lower_node,
-				int& upper_node,std::size_t& fallback_count)
-			{
-				if(unsupported_policy==UnsupportedNonorthogonalCorrectionPolicy::reject)
-					throw std::runtime_error(message);
-				if(unsupported_policy!=UnsupportedNonorthogonalCorrectionPolicy::qualitative_preview_orthogonal_fallback)
-					throw std::invalid_argument("unknown unsupported nonorthogonal pressure-correction policy");
-				// Preserve the implicit conservative A/d term selected by prepare(). Only
-				// the unsupported deferred correction is removed from this preview edge.
-				correction={};lower_node=upper_node=-1;++fallback_count;
-			};
 			auto validate_correction=[&](const char* kind,std::size_t index,int lower_dof,
 				int upper_dof,int& lower_node,int& upper_node,double upper_weight,
-				double open_area,Vec3d face_centroid,Vec3d& correction,std::size_t& fallback_count)
+				double open_area,Vec3d face_centroid,Vec3d& correction)
 			{
 				const double magnitude=std::sqrt(length2(correction));if(magnitude<=1e-12)return;
 				if(lower_node<0||upper_node<0||lower_node>=static_cast<int>(response.size())||
 					upper_node>=static_cast<int>(response.size()))
 				{
-					reject_or_drop(std::string("nonorthogonal pressure correction has no WLS nodes: ")+
-						kind+" edge "+std::to_string(index),correction,lower_node,upper_node,fallback_count);
+					throw std::runtime_error(std::string(
+						"nonorthogonal pressure correction has no WLS nodes: ")+
+						kind+" edge "+std::to_string(index));
 					return;
 				}
-				Vec3d represented{};for(int column=0;column<3;++column)for(int row=0;row<3;++row)represented[column]+=((1-upper_weight)*response[lower_node][3*row+column]+upper_weight*response[upper_node][3*row+column])*correction[row];const double error=std::sqrt(length2(represented-correction));if(error<=1e-8+1e-3*magnitude)return;std::ostringstream message;message<<"unsupported nonorthogonal pressure correction: "<<kind<<" edge "<<index<<" dofs ["<<lower_dof<<','<<upper_dof<<"] nodes ["<<lower_node<<','<<upper_node<<"] ranks ["<<static_cast<int>(system.pressure_gradient_rank[lower_node])<<','<<static_cast<int>(system.pressure_gradient_rank[upper_node])<<"] rings ["<<static_cast<int>(system.pressure_gradient_ring[lower_node])<<','<<static_cast<int>(system.pressure_gradient_ring[upper_node])<<"] samples ["<<(system.pressure_gradient_offset[lower_node+1]-system.pressure_gradient_offset[lower_node])<<','<<(system.pressure_gradient_offset[upper_node+1]-system.pressure_gradient_offset[upper_node])<<"] volumes ["<<system.volume[lower_dof]<<','<<system.volume[upper_dof]<<"] centroids [["<<system.centroid[lower_dof].x<<','<<system.centroid[lower_dof].y<<','<<system.centroid[lower_dof].z<<"],["<<system.centroid[upper_dof].x<<','<<system.centroid[upper_dof].y<<','<<system.centroid[upper_dof].z<<"]] face=["<<face_centroid.x<<','<<face_centroid.y<<','<<face_centroid.z<<"] area="<<open_area<<" k=["<<correction.x<<','<<correction.y<<','<<correction.z<<"] relative error="<<error/magnitude;reject_or_drop(message.str(),correction,lower_node,upper_node,fallback_count);
+				Vec3d represented{};for(int column=0;column<3;++column)for(int row=0;row<3;++row)represented[column]+=((1-upper_weight)*response[lower_node][3*row+column]+upper_weight*response[upper_node][3*row+column])*correction[row];const double error=std::sqrt(length2(represented-correction));if(error<=1e-8+1e-3*magnitude)return;std::ostringstream message;message<<"unsupported nonorthogonal pressure correction: "<<kind<<" edge "<<index<<" dofs ["<<lower_dof<<','<<upper_dof<<"] nodes ["<<lower_node<<','<<upper_node<<"] ranks ["<<static_cast<int>(system.pressure_gradient_rank[lower_node])<<','<<static_cast<int>(system.pressure_gradient_rank[upper_node])<<"] rings ["<<static_cast<int>(system.pressure_gradient_ring[lower_node])<<','<<static_cast<int>(system.pressure_gradient_ring[upper_node])<<"] samples ["<<(system.pressure_gradient_offset[lower_node+1]-system.pressure_gradient_offset[lower_node])<<','<<(system.pressure_gradient_offset[upper_node+1]-system.pressure_gradient_offset[upper_node])<<"] volumes ["<<system.volume[lower_dof]<<','<<system.volume[upper_dof]<<"] centroids [["<<system.centroid[lower_dof].x<<','<<system.centroid[lower_dof].y<<','<<system.centroid[lower_dof].z<<"],["<<system.centroid[upper_dof].x<<','<<system.centroid[upper_dof].y<<','<<system.centroid[upper_dof].z<<"]] face=["<<face_centroid.x<<','<<face_centroid.y<<','<<face_centroid.z<<"] area="<<open_area<<" k=["<<correction.x<<','<<correction.y<<','<<correction.z<<"] relative error="<<error/magnitude;throw std::runtime_error(message.str());
 			};
-			for(std::size_t q=0;q<system.coarse_fine.size();++q){auto& edge=system.coarse_fine[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("coarse/fine",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction,system.qualitative_preview_orthogonal_fallback_coarse_fine);}for(std::size_t q=0;q<system.embedded.size();++q){auto& edge=system.embedded[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("embedded",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction,system.qualitative_preview_orthogonal_fallback_embedded);}for(std::size_t q=0;q<system.regular_pressure_corrections.size();++q){auto& edge=system.regular_pressure_corrections[q];validate_correction("regular",q,edge.lower_dof,edge.upper_dof,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,{},edge.nonorthogonal_correction,system.qualitative_preview_orthogonal_fallback_regular);}
+			for(std::size_t q=0;q<system.coarse_fine.size();++q){auto& edge=system.coarse_fine[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("coarse/fine",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.embedded.size();++q){auto& edge=system.embedded[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("embedded",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.regular_pressure_corrections.size();++q){auto& edge=system.regular_pressure_corrections[q];validate_correction("regular",q,edge.lower_dof,edge.upper_dof,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,{},edge.nonorthogonal_correction);}
 		}
 
 		std::vector<Vec3d> reconstruct_pressure_gradients(const CompositeAmrPressureSystem& system,const std::vector<double>& pressure)
@@ -266,8 +228,10 @@ namespace paracfd::core
 		return build_composite_amr_pressure_system(hierarchy,options);
 	}
 
-	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
-		const CompositeAmrPressureBuildOptions& options)
+	namespace
+	{
+	CompositeAmrPressureSystem build_composite_amr_pressure_base(const AmrHierarchy& hierarchy,
+		const CompositeAmrPressureBuildOptions& options,bool finalize)
 	{
 		CompositeAmrPressureSystem system; system.hierarchy = &hierarchy; system.brick_size = hierarchy.brick_size(); system.pressure_outlet_xmax = options.pressure_outlet_xmax;
 		const int bs = system.brick_size, cells_per_brick = bs * bs * bs; system.level_offset.resize(hierarchy.levels().size());
@@ -311,8 +275,14 @@ namespace paracfd::core
 				}
 			}
 		}
-		finalize_component_gauges(system);finalize_nonorthogonal_pressure_topology(system,
-			options.unsupported_nonorthogonal_correction);return system;
+		if(finalize){finalize_component_gauges(system);finalize_nonorthogonal_pressure_topology(system);}return system;
+	}
+	}
+
+	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
+		const CompositeAmrPressureBuildOptions& options)
+	{
+		return build_composite_amr_pressure_base(hierarchy,options,true);
 	}
 
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
@@ -327,11 +297,13 @@ namespace paracfd::core
 	{
 		if(!atlas.ready_for_flow())throw std::invalid_argument(
 			"cannot build a composite pressure operator from unresolved AMR embedded-boundary topology");
-		CompositeAmrPressureSystem system=build_composite_amr_pressure_system(hierarchy,options);system.gauges.clear();
+		const auto pressure_begin=std::chrono::steady_clock::now();
+		CompositeAmrPressureSystem system=build_composite_amr_pressure_base(hierarchy,options,false);system.gauges.clear();
+		const auto base_end=std::chrono::steady_clock::now();
 		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
 		{
 			if(level_atlas.level<0||level_atlas.level>=static_cast<int>(hierarchy.levels().size()))throw std::invalid_argument("EB atlas level is outside AMR hierarchy");const EmbeddedBoundary& eb=level_atlas.topology;std::vector<int> cell_global(eb.grid.cell_count(),-1),fragment_global(eb.fragments.size(),-1);
-			for(int cell=0;cell<eb.grid.cell_count();++cell)if(level_atlas.owned_cell[cell]){const BrickLocation owner=hierarchy.locate_finest(eb.grid.cell_centroid(cell));if(!owner.found()||owner.level!=level_atlas.level)throw std::runtime_error("owned EB atlas cell has no matching AMR owner");const int dof=system.dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);cell_global[cell]=dof;if(eb.cells[cell].state==EbCellState::split){system.active[dof]=0;system.volume[dof]=0;}else if(eb.cells[cell].state==EbCellState::regular&&!eb.cut_face_mask.empty())system.cut_face_mask[dof]|=eb.cut_face_mask[cell];}
+			for(int cell=0;cell<eb.grid.cell_count();++cell)if(level_atlas.owned_cell[cell]){const BrickLocation owner=hierarchy.locate_finest(eb.grid.cell_centroid(cell));if(!owner.found()||owner.level!=level_atlas.level)throw std::runtime_error("owned EB atlas cell has no matching AMR owner");const int dof=system.dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);cell_global[cell]=dof;if(eb.cells[cell].state==EbCellState::split||eb.cells[cell].state==EbCellState::solid){system.active[dof]=0;system.volume[dof]=0;}else if(eb.cells[cell].state==EbCellState::regular&&!eb.cut_face_mask.empty())system.cut_face_mask[dof]|=eb.cut_face_mask[cell];}
 			// Allocate one appended DOF for every owned root fragment. Volume and centroid
 			// are accumulated below from owned fragments only; using the atlas-local EB
 			// aggregates here would incorrectly include covered halo fragments.
@@ -392,12 +364,33 @@ namespace paracfd::core
 			}
 			for(const SurfacePatch& patch:eb.patches)
 			{
-				const BrickLocation owner=hierarchy.locate_finest(patch.centroid);if(!owner.found()||owner.level!=level_atlas.level)continue;const int plus=map_ref(patch.plus_fragment),minus=map_ref(patch.minus_fragment);if(plus<0||minus<0)throw std::runtime_error("owned AMR surface patch has no two-sided pressure mapping");if(patch.plus_fragment!=patch.minus_fragment&&plus==minus)throw std::runtime_error("agglomeration collapsed distinct fabric pressure sides");system.surface_patches.push_back({patch.source_triangle_id,patch.source_face_id,patch.area,patch.centroid,patch.normal,plus,minus});
+				const BrickLocation owner=hierarchy.locate_finest(patch.centroid);if(!owner.found()||owner.level!=level_atlas.level)continue;const int plus=patch.plus_fragment==invalid_fragment?-1:map_ref(patch.plus_fragment),minus=patch.minus_fragment==invalid_fragment?-1:map_ref(patch.minus_fragment);if(plus<0&&minus<0)throw std::runtime_error("owned AMR surface patch has no fluid pressure mapping");if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment&&patch.plus_fragment!=patch.minus_fragment&&plus==minus)throw std::runtime_error("agglomeration collapsed distinct fabric pressure sides");system.surface_patches.push_back({patch.source_triangle_id,patch.source_face_id,patch.area,patch.centroid,patch.normal,plus,minus});
 			}
 		}
 		for(const CoarseFinePressureConnection& connection:system.coarse_fine)if(!system.active[connection.coarse_dof]||!system.active[connection.fine_dof])throw std::runtime_error("embedded boundary intersects a 2:1 interface; aperture-aware cross-level topology is required");
-		finalize_component_gauges(system);finalize_nonorthogonal_pressure_topology(system,
-			options.unsupported_nonorthogonal_correction);return system;
+		const auto mapping_end=std::chrono::steady_clock::now();
+		finalize_component_gauges(system);const auto gauges_end=std::chrono::steady_clock::now();
+		try
+		{
+			finalize_nonorthogonal_pressure_topology(system);
+		}
+		catch(...)
+		{
+			const auto failed_end=std::chrono::steady_clock::now();
+			std::fprintf(stderr,"[grid-profile] pressure: base %.1f ms, EB mapping %.1f ms, connectivity %.1f ms, correction topology %.1f ms (failed)\n",
+				std::chrono::duration<double,std::milli>(base_end-pressure_begin).count(),
+				std::chrono::duration<double,std::milli>(mapping_end-base_end).count(),
+				std::chrono::duration<double,std::milli>(gauges_end-mapping_end).count(),
+				std::chrono::duration<double,std::milli>(failed_end-gauges_end).count());
+			std::fflush(stderr);throw;
+		}
+		const auto pressure_end=std::chrono::steady_clock::now();
+		std::fprintf(stderr,"[grid-profile] pressure: base %.1f ms, EB mapping %.1f ms, connectivity %.1f ms, correction topology %.1f ms\n",
+			std::chrono::duration<double,std::milli>(base_end-pressure_begin).count(),
+			std::chrono::duration<double,std::milli>(mapping_end-base_end).count(),
+			std::chrono::duration<double,std::milli>(gauges_end-mapping_end).count(),
+			std::chrono::duration<double,std::milli>(pressure_end-gauges_end).count());
+		std::fflush(stderr);return system;
 	}
 
 	CompositeAmrFluxes make_zero_composite_fluxes(const CompositeAmrPressureSystem& system){CompositeAmrFluxes flux;flux.coarse_fine_velocity.assign(system.coarse_fine.size(),0);flux.embedded_velocity.assign(system.embedded.size(),0);return flux;}

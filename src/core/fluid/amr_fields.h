@@ -41,6 +41,8 @@ namespace paracfd::core
 	{
 		BrickFieldLayout layout;
 		int brick_count = 0;
+		// temp is reserved for future scalar transport and remains null in the
+		// aerodynamic production path rather than consuming a full 3-D device field.
 		Real *u = nullptr, *v = nullptr, *w = nullptr, *p = nullptr, *nut = nullptr, *temp = nullptr;
 		const int* neighbors = nullptr;
 		const std::uint32_t* flags = nullptr;

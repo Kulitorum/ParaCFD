@@ -76,6 +76,39 @@ namespace paracfd::core
 		}
 	};
 
+	// Composition follows the apply() convention: composed_placement(outer, inner)
+	// maps a point through inner first and outer second.
+	inline ModelPlacement composed_placement(const ModelPlacement& outer,
+		const ModelPlacement& inner)
+	{
+		ModelPlacement result;
+		for(int row=0;row<3;++row)for(int col=0;col<3;++col)
+		{
+			result.m[3*row+col]=0.0;
+			for(int k=0;k<3;++k)result.m[3*row+col]+=outer.m[3*row+k]*inner.m[3*k+col];
+		}
+		const double inner_t[3]={inner.tx,inner.ty,inner.tz};double result_t[3]={outer.tx,outer.ty,outer.tz};
+		for(int row=0;row<3;++row)for(int k=0;k<3;++k)result_t[row]+=outer.m[3*row+k]*inner_t[k];
+		result.tx=result_t[0];result.ty=result_t[1];result.tz=result_t[2];return result;
+	}
+
+	inline bool inverse_placement(const ModelPlacement& source,ModelPlacement& result)
+	{
+		const double det=source.linear_det();if(std::abs(det)<=1e-30)return false;
+		result.m[0]=(source.m[4]*source.m[8]-source.m[5]*source.m[7])/det;
+		result.m[1]=(source.m[2]*source.m[7]-source.m[1]*source.m[8])/det;
+		result.m[2]=(source.m[1]*source.m[5]-source.m[2]*source.m[4])/det;
+		result.m[3]=(source.m[5]*source.m[6]-source.m[3]*source.m[8])/det;
+		result.m[4]=(source.m[0]*source.m[8]-source.m[2]*source.m[6])/det;
+		result.m[5]=(source.m[2]*source.m[3]-source.m[0]*source.m[5])/det;
+		result.m[6]=(source.m[3]*source.m[7]-source.m[4]*source.m[6])/det;
+		result.m[7]=(source.m[1]*source.m[6]-source.m[0]*source.m[7])/det;
+		result.m[8]=(source.m[0]*source.m[4]-source.m[1]*source.m[3])/det;
+		const double translation[3]={source.tx,source.ty,source.tz};double inverse_t[3]{};
+		for(int row=0;row<3;++row)for(int k=0;k<3;++k)inverse_t[row]-=result.m[3*row+k]*translation[k];
+		result.tx=inverse_t[0];result.ty=inverse_t[1];result.tz=inverse_t[2];return true;
+	}
+
 	// Face-only horizontal bbox inference deliberately determines axes, not polarity.
 	// ParaCFD keeps Z as up, treats the longer of X/Y as span, and maps the assumed
 	// negative leading-edge direction to upstream -X, against its fixed +X freestream.

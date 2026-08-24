@@ -70,73 +70,11 @@ namespace paracfd::core
 		std::uint32_t source_face_id = 0;
 	};
 
-	// Static topology of one tessellation edge.  `attached` includes ordinary
-	// within-face tessellation edges as well as CAD seams and non-manifold fabric
-	// junctions.  Only `confirmed_free` may be used to justify fluid connectivity
-	// around a zero-thickness sheet termination.  Geometry that falls inside the
-	// source-coordinate uncertainty band is deliberately `unknown`, never silently
-	// treated as an opening or a closed seam.
-	enum class FabricEdgeKind : std::uint8_t
+	enum class ClosedMeshPointLocation : std::uint8_t
 	{
-		attached = 0,
-		confirmed_free = 1,
-		unknown = 2
-	};
-
-	// Geometric role of one triangle half-edge.  Openness and role are deliberately
-	// separate: both an ordinary tessellation diagonal and a sewn CAD seam are
-	// `attached`, but only a junction requires general local topology.  `none` is the
-	// role of a geometrically confirmed free edge.  `unknown` is fail-closed evidence,
-	// never an opening.
-	enum class FabricEdgeRole : std::uint8_t
-	{
-		none = 0,
-		tessellation_interior = 1,
-		manifold_seam = 2,
-		junction = 3,
-		unknown = 4
-	};
-
-	// Diagnostic reason retained for fail-closed edge certificates. This is not used
-	// to relax topology; it makes imported-CAD failures reproducible without rerunning
-	// the classifier under a debugger.
-	enum class FabricEdgeUnknownReason : std::uint8_t
-	{
-		none = 0,
-		invalid_triangle = 1,
-		source_provenance = 2,
-		indexed_fan_mismatch = 3,
-		proximity_ambiguity = 4,
-		mixed_open_attachment = 5,
-		cad_fan_mismatch = 6,
-		no_geometric_evidence = 7,
-		nonreciprocal_attachment = 8
-	};
-
-	struct FabricEdgeCertificate
-	{
-		static constexpr std::uint64_t no_attachment =
-			std::numeric_limits<std::uint64_t>::max();
-
-		FabricEdgeKind kind = FabricEdgeKind::unknown;
-		FabricEdgeRole role = FabricEdgeRole::unknown;
-		FabricEdgeUnknownReason unknown_reason = FabricEdgeUnknownReason::invalid_triangle;
-		// Build-local equality token.  Every reciprocal half-edge in one certified
-		// attachment has the same value; it is not a persistent CAD identifier.
-		std::uint64_t attachment_id = no_attachment;
-		// Stable source-CAD contact curve, when OpenCascade certified that a nominally
-		// free BRep edge lies on another trimmed face. Unlike attachment_id this does
-		// not assert polygon-half-edge equality and is safe for curved/nonconforming
-		// independent tessellations.
-		std::uint64_t cad_contact_id = TriMesh::kNoCadContactId;
-		// Number of incident half-sheet sectors certified along the edge.  A free
-		// boundary has one, a manifold continuation/seam has two, and a junction has
-		// three or more.  Zero means that incidence itself is unresolved.
-		std::uint16_t incident_fan_degree = 0;
-		// Tolerance actually needed to certify this relation.  The no-argument BVH
-		// tolerance accessors remain the coordinate-precision baseline.
-		double contact_tolerance = 0.0;
-		double clearance_tolerance = 0.0;
+		outside = 0,
+		inside = 1,
+		boundary = 2
 	};
 
 	class TriangleBvh
@@ -145,42 +83,10 @@ namespace paracfd::core
 		TriangleBvh() = default;
 		explicit TriangleBvh(const TriMesh& mesh) { build(mesh); }
 
-		// Throws std::invalid_argument when one discrete topology ID names different
-		// coordinates. Edge certification relies on that identity being globally exact.
 		void build(const TriMesh& mesh, std::uint32_t leaf_size = 8);
 		bool empty() const { return triangles_.empty(); }
 		std::size_t triangle_count() const { return triangles_.size(); }
 		const BvhTriangle& triangle(std::uint32_t original_id) const { return triangles_by_id_[original_id]; }
-		FabricEdgeCertificate edge_certificate(std::uint32_t original_triangle_id,
-			int local_edge) const;
-		FabricEdgeKind edge_kind(std::uint32_t original_triangle_id, int local_edge) const;
-		FabricEdgeRole edge_role(std::uint32_t original_triangle_id, int local_edge) const
-		{
-			return edge_certificate(original_triangle_id, local_edge).role;
-		}
-		std::uint64_t edge_attachment_id(std::uint32_t original_triangle_id, int local_edge) const
-		{
-			return edge_certificate(original_triangle_id, local_edge).attachment_id;
-		}
-		std::uint16_t edge_incident_fan_degree(std::uint32_t original_triangle_id,
-			int local_edge) const
-		{
-			return edge_certificate(original_triangle_id, local_edge).incident_fan_degree;
-		}
-		double edge_contact_tolerance(std::uint32_t original_triangle_id, int local_edge) const
-		{
-			return edge_certificate(original_triangle_id, local_edge).contact_tolerance;
-		}
-		double edge_clearance_tolerance(std::uint32_t original_triangle_id, int local_edge) const
-		{
-			return edge_certificate(original_triangle_id, local_edge).clearance_tolerance;
-		}
-		// Baseline thresholds for geometry without per-edge CAD provenance. Contact is
-		// double-precision arithmetic coincidence; float-only meshes retain a separate,
-		// wider FP32 ambiguity/clearance band. Certified CAD tolerance is per edge above.
-		double edge_contact_tolerance() const { return edge_contact_tolerance_; }
-		double edge_clearance_tolerance() const { return edge_clearance_tolerance_; }
-
 		// Exact triangle/AABB overlap, not merely BVH-node candidates. Results are original mesh
 		// triangle IDs, sorted for deterministic preprocessing/tests.
 		void query_aabb(const Aabb3d& box, std::vector<std::uint32_t>& out_triangle_ids) const;
@@ -198,7 +104,12 @@ namespace paracfd::core
 		NearestSurfacePoint nearest_on_face(Vec3d p, std::uint32_t source_face_id,
 			double max_distance = std::numeric_limits<double>::infinity()) const;
 		double distance(Vec3d p, double max_distance = std::numeric_limits<double>::infinity()) const;
-
+		// Parity classification against an oriented, closed triangle shell. Three
+		// non-axis-aligned rays avoid vertex/edge degeneracies; a solid-angle fallback
+		// is used only when their votes disagree. This is intended for the small set of
+		// convex cut-cell atoms, not for scanning the full CFD volume.
+		ClosedMeshPointLocation classify_closed_point(Vec3d p,
+			double boundary_tolerance = 0.0) const;
 		static bool triangle_intersects_aabb(const BvhTriangle& tri, const Aabb3d& box);
 
 	private:
@@ -221,8 +132,5 @@ namespace paracfd::core
 		std::vector<Node> nodes_;
 		std::vector<BvhTriangle> triangles_; // reordered copy (statistics/empty)
 		std::vector<BvhTriangle> triangles_by_id_; // direct original-id lookup
-		std::vector<std::array<FabricEdgeCertificate, 3>> edge_certificate_by_triangle_;
-		double edge_contact_tolerance_ = 0.0;
-		double edge_clearance_tolerance_ = 0.0;
 	};
 }

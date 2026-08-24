@@ -708,6 +708,8 @@ namespace paracfd::gui
 					"(relative residual %.6g; requested tolerance %.6g)",
 					stats.pressure.iterations, stats.pressure.relative_residual,
 					core_->config().solver.projection_tolerance);
+				std::fprintf(stderr, "[paraglider-worker] ERROR: %s\n", message);
+				std::fflush(stderr);
 				throw std::runtime_error(message);
 			}
 			while (!stop_.load())

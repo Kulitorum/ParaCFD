@@ -33,7 +33,7 @@ namespace paracfd::core
 		int level = 0;
 		Int3 coord{};
 		Vec3d origin{};
-		float h = 0.0f;
+		double h = 0.0;
 		std::array<int, 6> same_level_neighbor{{-1, -1, -1, -1, -1, -1}};
 		int parent = -1;
 		std::array<int, 8> children{{-1, -1, -1, -1, -1, -1, -1, -1}};
@@ -52,7 +52,7 @@ namespace paracfd::core
 	struct AmrLevel
 	{
 		int level = 0;
-		float h = 0.0f;
+		double h = 0.0;
 		std::vector<BrickMetadata> bricks;
 		std::vector<BrickLookupEntry> lookup; // power-of-two open-addressed table
 		std::uint32_t lookup_mask = 0;

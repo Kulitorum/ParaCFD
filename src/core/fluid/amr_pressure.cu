@@ -8,6 +8,7 @@
 #include <thrust/transform_reduce.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -69,12 +70,13 @@ namespace paracfd::core
 		}
 		__host__ __device__ int local_index(int bs, int i, int j, int k) { return (k * bs + j) * bs + i; }
 		__global__ void structured_apply_kernel(const DeviceCompositeAmrLevelView* levels, int level, int bs,
-			bool outlet, const unsigned char* active, const std::uint8_t* cut_face_mask, const Real* pressure, Real* output)
+			bool outlet, const unsigned char* active, const std::uint8_t* cut_face_mask,
+			const PressureReal* pressure, PressureReal* output)
 		{
 			const DeviceCompositeAmrLevelView source = levels[level]; const int cells_per_brick = bs * bs * bs;
 			const int work = blockIdx.x * blockDim.x + threadIdx.x; if (work >= source.brick_count * cells_per_brick) return;
 			const int brick = work / cells_per_brick, local = work % cells_per_brick; if (source.flags[brick] & BRICK_COVERED) return;
-			const int i = local % bs, j = (local / bs) % bs, k = local / (bs * bs); const int a = source.level_offset + work;if(!active[a])return; Real value = Real(0);
+			const int i = local % bs, j = (local / bs) % bs, k = local / (bs * bs); const int a = source.level_offset + work;if(!active[a])return; PressureReal value = PressureReal(0);
 			const int coordinate[3] = {i,j,k};
 			for (int axis = 0; axis < 3; ++axis) for (int sign = -1; sign <= 1; sign += 2)
 			{
@@ -85,26 +87,28 @@ namespace paracfd::core
 					const int neighbour = source.neighbors[brick * 6 + 2 * axis + (sign > 0)];
 					if (neighbour >= 0 && !(source.flags[neighbour] & BRICK_COVERED)) { q[axis] = sign > 0 ? 0 : bs - 1; b = source.level_offset + neighbour * cells_per_brick + local_index(bs, q[0], q[1], q[2]); }
 				}
-				const int lower=sign>0?a:b;if(b>=0&&active[b]&&!(cut_face_mask[lower]&(1u<<axis))) value += Real(source.h) * (pressure[a] - pressure[b]);
+				const int lower=sign>0?a:b;if(b>=0&&active[b]&&!(cut_face_mask[lower]&(1u<<axis))) value += PressureReal(source.h) * (pressure[a] - pressure[b]);
 			}
-			if (outlet && (source.flags[brick] & BRICK_XMAX) && coordinate[0] == bs - 1) value += Real(2) * Real(source.h) * pressure[a]; output[a] = value;
+			if (outlet && (source.flags[brick] & BRICK_XMAX) && coordinate[0] == bs - 1) value += PressureReal(2) * PressureReal(source.h) * pressure[a]; output[a] = value;
 		}
 
 		__global__ void reconstruct_pressure_gradient_kernel(const int* node_dof,const int* offset,
-			const int* neighbour,const Real* weight,const Real* pressure,Real* gradient,int node_count)
+			const int* neighbour,const Real* weight,const PressureReal* pressure,
+			PressureReal* gradient,int node_count)
 		{
-			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=node_count)return;const Real centre=pressure[node_dof[node]];Real gx=0,gy=0,gz=0;for(int q=offset[node];q<offset[node+1];++q){const Real delta=pressure[neighbour[q]]-centre;gx+=weight[3*q]*delta;gy+=weight[3*q+1]*delta;gz+=weight[3*q+2]*delta;}gradient[3*node]=gx;gradient[3*node+1]=gy;gradient[3*node+2]=gz;
+			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=node_count)return;const PressureReal centre=pressure[node_dof[node]];PressureReal gx=0,gy=0,gz=0;for(int q=offset[node];q<offset[node+1];++q){const PressureReal delta=pressure[neighbour[q]]-centre;gx+=PressureReal(weight[3*q])*delta;gy+=PressureReal(weight[3*q+1])*delta;gz+=PressureReal(weight[3*q+2])*delta;}gradient[3*node]=gx;gradient[3*node+1]=gy;gradient[3*node+2]=gz;
 		}
 		// Irregular pressure edges touch only a compact subset of the grid.  A thread per
 		// edge would require unordered atomic additions at both endpoints, making the
-		// FP32 operator depend on warp scheduling.  The CPU-built incidence table gives
+		// operator depend on warp scheduling. The CPU-built incidence table gives
 		// one thread exclusive ownership of each touched DOF and a stable edge order.
 		__global__ void irregular_orthogonal_gather_kernel(
 			const int* incident_dof,const int* incident_offset,const int* incident_edge,
 			const std::int8_t* incident_sign,int incident_dof_count,int connection_count,
 			const int* connection_lower,const int* connection_upper,const Real* connection_coefficient,
 			const int* regular_lower,const int* regular_upper,const Real* regular_delta,
-			const Real* regular_area,const unsigned char* active,const Real* pressure,Real* output)
+			const Real* regular_area,const unsigned char* active,const PressureReal* pressure,
+			PressureReal* output)
 		{
 			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=incident_dof_count)return;
 			double sum=0.0;
@@ -122,11 +126,11 @@ namespace paracfd::core
 				}
 				if(active[a]&&active[b])
 				{
-					const Real flux=coefficient*(pressure[a]-pressure[b]);
-					sum+=static_cast<double>(incident_sign[q])*static_cast<double>(flux);
+					const PressureReal flux=PressureReal(coefficient)*(pressure[a]-pressure[b]);
+					sum+=static_cast<double>(incident_sign[q])*flux;
 				}
 			}
-			output[incident_dof[node]]+=static_cast<Real>(sum);
+			output[incident_dof[node]]+=static_cast<PressureReal>(sum);
 		}
 		__global__ void irregular_nonorthogonal_gather_kernel(
 			const int* incident_dof,const int* incident_offset,const int* incident_edge,
@@ -137,7 +141,7 @@ namespace paracfd::core
 			const int* regular_lower,const int* regular_upper,const int* regular_lower_node,
 			const int* regular_upper_node,const Real* regular_correction,
 			const Real* regular_upper_weight,const Real* regular_area,
-			const Real* gradient,const unsigned char* active,Real* output)
+			const PressureReal* gradient,const unsigned char* active,PressureReal* output)
 		{
 			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=incident_dof_count)return;
 			double sum=0.0;
@@ -160,55 +164,83 @@ namespace paracfd::core
 					upper_weight=regular_upper_weight[edge];area=regular_area[edge];
 				}
 				if(!active[a]||!active[b]||lower_node<0||upper_node<0)continue;
-				const Real lower_weight=Real(1)-upper_weight;Real derivative=Real(0);
+				const PressureReal lower_weight=PressureReal(1)-PressureReal(upper_weight);PressureReal derivative=PressureReal(0);
 				for(int component=0;component<3;++component)
 				{
-					const Real face_gradient=lower_weight*gradient[3*lower_node+component]+
-						upper_weight*gradient[3*upper_node+component];
-					derivative+=correction[component]*face_gradient;
+					const PressureReal face_gradient=lower_weight*gradient[3*lower_node+component]+
+						PressureReal(upper_weight)*gradient[3*upper_node+component];
+					derivative+=PressureReal(correction[component])*face_gradient;
 				}
-				const Real flux=-area*derivative;
-				sum+=static_cast<double>(incident_sign[q])*static_cast<double>(flux);
+				const PressureReal flux=-PressureReal(area)*derivative;
+				sum+=static_cast<double>(incident_sign[q])*flux;
 			}
-			output[incident_dof[node]]+=static_cast<Real>(sum);
+			output[incident_dof[node]]+=static_cast<PressureReal>(sum);
 		}
-		__global__ void gauge_apply_kernel(const int* dof,const Real* coefficient,int count,const Real* pressure,Real* output){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)output[dof[q]]+=coefficient[q]*pressure[dof[q]];}
-		__global__ void subtract_kernel(Real* residual,const Real* value,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)residual[q]=active[q]?residual[q]-value[q]:Real(0);}
-		__global__ void update_pressure_residual_kernel(Real* pressure,Real* residual,const Real* direction,const Real* Ad,Real alpha,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n&&active[q]){pressure[q]+=alpha*direction[q];residual[q]-=alpha*Ad[q];}}
-		__global__ void precondition_kernel(const Real* residual,Real* z,const Real* diagonal,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)z[q]=active[q]&&diagonal[q]>Real(0)?residual[q]/diagonal[q]:Real(0);}
-		__global__ void update_direction_kernel(const Real* z,Real* direction,Real beta,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)direction[q]=active[q]?z[q]+beta*direction[q]:Real(0);}
-		__global__ void copy_active_kernel(const Real* source,Real* destination,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)destination[q]=active[q]?source[q]:Real(0);}
-		__global__ void axpy_active_kernel(Real* value,const Real* increment,Real scale,
+		__global__ void gauge_apply_kernel(const int* dof,const Real* coefficient,int count,const PressureReal* pressure,PressureReal* output){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<count)output[dof[q]]+=PressureReal(coefficient[q])*pressure[dof[q]];}
+		__global__ void subtract_kernel(PressureReal* residual,const PressureReal* value,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)residual[q]=active[q]?residual[q]-value[q]:PressureReal(0);}
+		__global__ void update_pressure_residual_kernel(PressureReal* pressure,PressureReal* residual,const PressureReal* direction,const PressureReal* Ad,PressureReal alpha,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n&&active[q]){pressure[q]+=alpha*direction[q];residual[q]-=alpha*Ad[q];}}
+		__global__ void precondition_kernel(const PressureReal* residual,PressureReal* z,const PressureReal* diagonal,
+			const unsigned char* active,int n,PressureReal omega)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;
+			if(q<n)z[q]=active[q]&&diagonal[q]>PressureReal(0)?omega*residual[q]/diagonal[q]:PressureReal(0);
+		}
+		__global__ void jacobi_correction_kernel(const PressureReal* residual,const PressureReal* Ax,PressureReal* x,
+			const PressureReal* diagonal,const unsigned char* active,int n,PressureReal omega)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;
+			if(q<n&&active[q]&&diagonal[q]>PressureReal(0))x[q]+=omega*(residual[q]-Ax[q])/diagonal[q];
+		}
+		__global__ void update_direction_kernel(const PressureReal* z,PressureReal* direction,PressureReal beta,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)direction[q]=active[q]?z[q]+beta*direction[q]:PressureReal(0);}
+		__global__ void copy_active_kernel(const PressureReal* source,PressureReal* destination,const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)destination[q]=active[q]?source[q]:PressureReal(0);}
+		__global__ void axpy_active_kernel(PressureReal* value,const PressureReal* increment,PressureReal scale,
 			const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n&&active[q])value[q]+=scale*increment[q];}
-		__global__ void scaled_copy_active_kernel(Real* destination,const Real* source,Real scale,
-			const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)destination[q]=active[q]?scale*source[q]:Real(0);}
+		__global__ void scaled_copy_active_kernel(PressureReal* destination,const PressureReal* source,PressureReal scale,
+			const unsigned char* active,int n){const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)destination[q]=active[q]?scale*source[q]:PressureReal(0);}
 		__global__ void restrict_aggregate_gather_kernel(const int* offset,const int* dof,
-			const Real* residual,int base_cells,Real* coarse_rhs)
+			const PressureReal* residual,int base_cells,PressureReal* coarse_rhs)
 		{
 			const int coarse=blockIdx.x*blockDim.x+threadIdx.x;if(coarse>=base_cells)return;
 			double sum=0.0;for(int q=offset[coarse];q<offset[coarse+1];++q)sum+=static_cast<double>(residual[dof[q]]);
-			coarse_rhs[coarse]=static_cast<Real>(sum);
+			coarse_rhs[coarse]=static_cast<PressureReal>(sum);
 		}
-		__global__ void coarse_jacobi_kernel(const Real* rhs,const Real* x,Real* next,const Real* positive,const Real* diagonal,const int* neighbors,int bricks,int bs,Real omega)
+		__global__ void restrict_aggregate_difference_gather_kernel(const int* offset,const int* dof,
+			const PressureReal* rhs,const PressureReal* Ax,int coarse_cells,PressureReal* coarse_rhs)
 		{
-			const int cells_per_brick=bs*bs*bs,work=blockIdx.x*blockDim.x+threadIdx.x;if(work>=bricks*cells_per_brick)return;if(!(diagonal[work]>Real(0))){next[work]=Real(0);return;}const int brick=work/cells_per_brick,local=work%cells_per_brick,i=local%bs,j=(local/bs)%bs,k=local/(bs*bs);Real Ax=diagonal[work]*x[work];for(int axis=0;axis<3;++axis){int c[3]={i,j,k},other=-1;if(++c[axis]<bs)other=brick*cells_per_brick+local_index(bs,c[0],c[1],c[2]);else{const int neighbour=neighbors[brick*6+2*axis+1];if(neighbour>=0){c[axis]=0;other=neighbour*cells_per_brick+local_index(bs,c[0],c[1],c[2]);}}if(other>=0)Ax-=positive[work*3+axis]*x[other];c[0]=i;c[1]=j;c[2]=k;int lower=brick;if(--c[axis]<0){lower=neighbors[brick*6+2*axis];if(lower>=0)c[axis]=bs-1;}if(lower>=0){const int lower_cell=lower*cells_per_brick+local_index(bs,c[0],c[1],c[2]);Ax-=positive[lower_cell*3+axis]*x[lower_cell];}}next[work]=x[work]+omega*(rhs[work]-Ax)/diagonal[work];
+			const int coarse=blockIdx.x*blockDim.x+threadIdx.x;if(coarse>=coarse_cells)return;
+			double sum=0.0;for(int q=offset[coarse];q<offset[coarse+1];++q)
+				sum+=static_cast<double>(rhs[dof[q]])-static_cast<double>(Ax[dof[q]]);
+			coarse_rhs[coarse]=static_cast<PressureReal>(sum);
 		}
-		__global__ void coarse_extra_jacobi_gather_kernel(const int* incident_dof,
-			const int* incident_offset,const int* incident_edge,int incident_dof_count,
-			const int* a,const int* b,const Real* coefficient,const Real* x,
-			const Real* diagonal,Real omega,Real* next)
+		__global__ void algebraic_jacobi_kernel(const PressureReal* rhs,const PressureReal* x,PressureReal* next,
+			const int* row_offset,const int* neighbour,const PressureReal* coefficient,
+			const PressureReal* diagonal,int cells,PressureReal omega)
 		{
-			const int node=blockIdx.x*blockDim.x+threadIdx.x;if(node>=incident_dof_count)return;
-			const int cell=incident_dof[node];if(!(diagonal[cell]>Real(0)))return;double sum=0.0;
-			for(int q=incident_offset[node];q<incident_offset[node+1];++q)
-			{
-				const int edge=incident_edge[q],other=a[edge]==cell?b[edge]:a[edge];
-				const Real contribution=omega*coefficient[edge]*x[other]/diagonal[cell];
-				sum+=static_cast<double>(contribution);
-			}
-			next[cell]+=static_cast<Real>(sum);
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=cells)return;
+			if(!(diagonal[q]>PressureReal(0))){next[q]=PressureReal(0);return;}
+			double Ax=static_cast<double>(diagonal[q])*x[q];
+			for(int edge=row_offset[q];edge<row_offset[q+1];++edge)
+				Ax-=static_cast<double>(coefficient[edge])*x[neighbour[edge]];
+			next[q]=x[q]+omega*static_cast<PressureReal>((static_cast<double>(rhs[q])-Ax)/diagonal[q]);
 		}
-		__global__ void prolong_aggregate_kernel(const int* aggregate,const unsigned char* active,int n,int base_offset,int base_cells,const Real* coarse_x,Real* output)
+		__global__ void algebraic_residual_kernel(const PressureReal* rhs,const PressureReal* x,PressureReal* residual,
+			const int* row_offset,const int* neighbour,const PressureReal* coefficient,
+			const PressureReal* diagonal,int cells)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=cells)return;
+			if(!(diagonal[q]>PressureReal(0))){residual[q]=PressureReal(0);return;}
+			double Ax=static_cast<double>(diagonal[q])*x[q];
+			for(int edge=row_offset[q];edge<row_offset[q+1];++edge)
+				Ax-=static_cast<double>(coefficient[edge])*x[neighbour[edge]];
+			residual[q]=static_cast<PressureReal>(static_cast<double>(rhs[q])-Ax);
+		}
+		__global__ void algebraic_prolong_add_kernel(const int* aggregate,int cells,
+			const PressureReal* coarse_x,PressureReal* fine_x)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;
+			if(q<cells&&aggregate[q]>=0)fine_x[q]+=coarse_x[aggregate[q]];
+		}
+		__global__ void prolong_aggregate_kernel(const int* aggregate,const unsigned char* active,int n,int base_offset,int base_cells,const PressureReal* coarse_x,PressureReal* output)
 		{
 			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=n||!active[q])return;const int coarse=aggregate[q]-base_offset;if(coarse>=0&&coarse<base_cells)output[q]+=coarse_x[coarse];
 		}
@@ -246,55 +278,55 @@ namespace paracfd::core
 			integrated[incident_dof[node]]+=static_cast<Real>(sum);
 		}
 		__global__ void normalize_divergence_rhs_kernel(const Real* integrated,const Real* volume,const unsigned char* active,
-			Real rho_over_dt,Real* divergence,Real* rhs,int n)
+			PressureReal rho_over_dt,Real* divergence,PressureReal* rhs,int n)
 		{
-			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=n)return;if(active[q]&&volume[q]>Real(0)){divergence[q]=integrated[q]/volume[q];if(rhs)rhs[q]=-rho_over_dt*integrated[q];}else{divergence[q]=Real(0);if(rhs)rhs[q]=Real(0);}
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=n)return;if(active[q]&&volume[q]>Real(0)){divergence[q]=integrated[q]/volume[q];if(rhs)rhs[q]=-rho_over_dt*PressureReal(integrated[q]);}else{divergence[q]=Real(0);if(rhs)rhs[q]=PressureReal(0);}
 		}
 		__global__ void structured_flux_correction_kernel(const DeviceCompositeAmrFluxLevelView* levels,int level,int bs,bool outlet,
-			const unsigned char* active,const std::uint8_t* cut_face_mask,const Real* pressure,Real scale)
+			const unsigned char* active,const std::uint8_t* cut_face_mask,const PressureReal* pressure,PressureReal scale)
 		{
 			const DeviceCompositeAmrFluxLevelView source=levels[level];const DeviceAmrFieldLevelView fields=source.fields;const int cells_per_brick=bs*bs*bs,work=blockIdx.x*blockDim.x+threadIdx.x;if(work>=fields.brick_count*cells_per_brick)return;const int brick=work/cells_per_brick,local=work%cells_per_brick;if(fields.flags[brick]&BRICK_COVERED)return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs),a=source.level_offset+work;if(!active[a])return;
 			for(int axis=0;axis<3;++axis)
 			{
 				if(cut_face_mask[a]&(1u<<axis))continue;int q[3]={i,j,k},upper=-1,neighbour=-1;if(++q[axis]<bs)upper=source.level_offset+brick*cells_per_brick+local_index(bs,q[0],q[1],q[2]);else{neighbour=fields.neighbors[brick*6+2*axis+1];if(neighbour>=0&&!(fields.flags[neighbour]&BRICK_COVERED)){q[axis]=0;upper=source.level_offset+neighbour*cells_per_brick+local_index(bs,q[0],q[1],q[2]);}}
-				if(upper>=0&&active[upper]){const Real corrected=positive_face_value(fields,brick,axis,i,j,k)-scale*(pressure[upper]-pressure[a])/Real(source.h);set_positive_face_value(fields,brick,axis,i,j,k,corrected);if(neighbour>=0){int opposite[3]={i,j,k};opposite[axis]=-1;set_positive_face_value(fields,neighbour,axis,opposite[0],opposite[1],opposite[2],corrected);}}
+				if(upper>=0&&active[upper]){const PressureReal correction=scale*(pressure[upper]-pressure[a])/PressureReal(source.h);const Real corrected=positive_face_value(fields,brick,axis,i,j,k)-static_cast<Real>(correction);set_positive_face_value(fields,brick,axis,i,j,k,corrected);if(neighbour>=0){int opposite[3]={i,j,k};opposite[axis]=-1;set_positive_face_value(fields,neighbour,axis,opposite[0],opposite[1],opposite[2],corrected);}}
 			}
-			if(outlet&&(fields.flags[brick]&BRICK_XMAX)&&i==bs-1)fields.u[fields.layout.u_index(brick,bs,j,k)]+=scale*pressure[a]/(Real(0.5)*Real(source.h));
+			if(outlet&&(fields.flags[brick]&BRICK_XMAX)&&i==bs-1)fields.u[fields.layout.u_index(brick,bs,j,k)]+=static_cast<Real>(scale*pressure[a]/(PressureReal(0.5)*PressureReal(source.h)));
 		}
 		__global__ void special_flux_correction_kernel(const int* first,const int* second,const std::int8_t* direction,
-			const Real* gradient_factor,Real* velocity,int count,const unsigned char* active,const Real* pressure,Real scale)
+			const Real* gradient_factor,Real* velocity,int count,const unsigned char* active,const PressureReal* pressure,PressureReal scale)
 		{
-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int lower=direction[edge]>0?first[edge]:second[edge],upper=direction[edge]>0?second[edge]:first[edge];if(active[lower]&&active[upper])velocity[edge]-=scale*(pressure[upper]-pressure[lower])*gradient_factor[edge];
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int lower=direction[edge]>0?first[edge]:second[edge],upper=direction[edge]>0?second[edge]:first[edge];if(active[lower]&&active[upper])velocity[edge]-=static_cast<Real>(scale*(pressure[upper]-pressure[lower])*PressureReal(gradient_factor[edge]));
 		}
 		__global__ void special_nonorthogonal_flux_correction_kernel(const int* first,const int* second,
 			const std::int8_t* direction,const int* lower_node,const int* upper_node,const Real* correction,
-			const Real* upper_weight,const Real* gradient,Real* velocity,int count,const unsigned char* active,Real scale)
+			const Real* upper_weight,const PressureReal* gradient,Real* velocity,int count,const unsigned char* active,PressureReal scale)
 		{
-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count||lower_node[edge]<0||upper_node[edge]<0)return;const int lower=direction[edge]>0?first[edge]:second[edge],upper=direction[edge]>0?second[edge]:first[edge];if(!active[lower]||!active[upper])return;const Real w=upper_weight[edge],lw=Real(1)-w;Real derivative=0;for(int component=0;component<3;++component){const Real face_gradient=lw*gradient[3*lower_node[edge]+component]+w*gradient[3*upper_node[edge]+component];derivative+=correction[3*edge+component]*face_gradient;}velocity[edge]-=scale*derivative;
+			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count||lower_node[edge]<0||upper_node[edge]<0)return;const int lower=direction[edge]>0?first[edge]:second[edge],upper=direction[edge]>0?second[edge]:first[edge];if(!active[lower]||!active[upper])return;const PressureReal w=PressureReal(upper_weight[edge]),lw=PressureReal(1)-w;PressureReal derivative=0;for(int component=0;component<3;++component){const PressureReal face_gradient=lw*gradient[3*lower_node[edge]+component]+w*gradient[3*upper_node[edge]+component];derivative+=PressureReal(correction[3*edge+component])*face_gradient;}velocity[edge]-=static_cast<Real>(scale*derivative);
 		}
 		__global__ void regular_nonorthogonal_flux_correction_kernel(
 			const DeviceCompositeAmrFluxLevelView* levels,const int* level,
 			const std::uint64_t* index,const std::uint64_t* mirror_index,const std::int8_t* axis,
 			const int* lower,const int* upper,const int* lower_node,const int* upper_node,
 			const Real* two_point_delta,const Real* correction,const Real* upper_weight,
-			const Real* gradient,const Real* pressure,Real scale,int count)
+			const PressureReal* gradient,const PressureReal* pressure,PressureReal scale,int count)
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;
-			Real derivative=two_point_delta[edge]*(pressure[upper[edge]]-pressure[lower[edge]]);
+			PressureReal derivative=PressureReal(two_point_delta[edge])*(pressure[upper[edge]]-pressure[lower[edge]]);
 			if(lower_node[edge]>=0&&upper_node[edge]>=0)
 			{
-				const Real w=upper_weight[edge],lw=Real(1)-w;
+				const PressureReal w=PressureReal(upper_weight[edge]),lw=PressureReal(1)-w;
 				for(int component=0;component<3;++component)
 				{
-					const Real face_gradient=lw*gradient[3*lower_node[edge]+component]+
+					const PressureReal face_gradient=lw*gradient[3*lower_node[edge]+component]+
 						w*gradient[3*upper_node[edge]+component];
-					derivative+=correction[3*edge+component]*face_gradient;
+					derivative+=PressureReal(correction[3*edge+component])*face_gradient;
 				}
 			}
 			const DeviceAmrFieldLevelView view=levels[level[edge]].fields;
 			Real* values=axis[edge]==0?view.u:(axis[edge]==1?view.v:view.w);
-			values[index[edge]]-=scale*derivative;
-			if(mirror_index[edge]!=~std::uint64_t(0))values[mirror_index[edge]]-=scale*derivative;
+			values[index[edge]]-=static_cast<Real>(scale*derivative);
+			if(mirror_index[edge]!=~std::uint64_t(0))values[mirror_index[edge]]-=static_cast<Real>(scale*derivative);
 		}
 		__global__ void initialize_special_freestream_kernel(const std::int8_t* axis,Real* velocity,int count,Real speed){const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge<count)velocity[edge]=axis[edge]==0?speed:Real(0);}
 		__device__ Real indexed_face_value(const DeviceAmrFieldLevelView& fields,std::int8_t axis,std::uint64_t index)
@@ -534,29 +566,33 @@ namespace paracfd::core
 			if(lower_node[edge]>=0)atomicAdd(balance+lower_node[edge],flux);
 			if(upper_node[edge]>=0)atomicAdd(balance+upper_node[edge],-flux);
 		}
-		__global__ void scatter_regular_pressure_kernel(const DeviceCompositeAmrFluxLevelView* levels,int level,int bs,const unsigned char* active,const Real* pressure)
+		__global__ void scatter_regular_pressure_kernel(const DeviceCompositeAmrFluxLevelView* levels,int level,int bs,const unsigned char* active,const PressureReal* pressure)
 		{
-			const DeviceCompositeAmrFluxLevelView source=levels[level];const DeviceAmrFieldLevelView fields=source.fields;const int cells_per_brick=bs*bs*bs,work=blockIdx.x*blockDim.x+threadIdx.x;if(work>=fields.brick_count*cells_per_brick)return;const int brick=work/cells_per_brick,local=work%cells_per_brick,a=source.level_offset+work;if(!active[a]||(fields.flags[brick]&BRICK_COVERED))return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs);fields.p[fields.layout.cell_index(brick,i,j,k)]=pressure[a];
+			const DeviceCompositeAmrFluxLevelView source=levels[level];const DeviceAmrFieldLevelView fields=source.fields;const int cells_per_brick=bs*bs*bs,work=blockIdx.x*blockDim.x+threadIdx.x;if(work>=fields.brick_count*cells_per_brick)return;const int brick=work/cells_per_brick,local=work%cells_per_brick,a=source.level_offset+work;if(!active[a]||(fields.flags[brick]&BRICK_COVERED))return;const int i=local%bs,j=(local/bs)%bs,k=local/(bs*bs);fields.p[fields.layout.cell_index(brick,i,j,k)]=static_cast<Real>(pressure[a]);
+		}
+		__global__ void convert_pressure_kernel(const PressureReal* source,Real* destination,int n)
+		{
+			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q<n)destination[q]=static_cast<Real>(source[q]);
 		}
 		__global__ void irregular_schwarz_lu_kernel(const int* block_offset,const int* factor_offset,
-			const int* dof,const int* pivot,const Real* lu,const Real* residual,Real* scratch,
-			Real* output,int block_count)
+			const int* dof,const int* pivot,const Real* lu,const PressureReal* residual,PressureReal* scratch,
+			PressureReal* output,int block_count)
 		{
 			const int block=blockIdx.x*blockDim.x+threadIdx.x;if(block>=block_count)return;
 			const int begin=block_offset[block],end=block_offset[block+1],count=end-begin;
-			const int matrix=factor_offset[block];Real* rhs=scratch+begin;
+			const int matrix=factor_offset[block];PressureReal* rhs=scratch+begin;
 			for(int row=0;row<count;++row)rhs[row]=residual[dof[begin+row]];
 			for(int column=0;column<count;++column)
 			{
-				const int other=pivot[begin+column];if(other!=column){const Real swap=rhs[column];rhs[column]=rhs[other];rhs[other]=swap;}
+				const int other=pivot[begin+column];if(other!=column){const PressureReal swap=rhs[column];rhs[column]=rhs[other];rhs[other]=swap;}
 			}
 			for(int row=0;row<count;++row)
 			{
-				Real value=rhs[row];for(int column=0;column<row;++column)value-=lu[matrix+row*count+column]*rhs[column];rhs[row]=value;
+				PressureReal value=rhs[row];for(int column=0;column<row;++column)value-=PressureReal(lu[matrix+row*count+column])*rhs[column];rhs[row]=value;
 			}
 			for(int row=count-1;row>=0;--row)
 			{
-				Real value=rhs[row];for(int column=row+1;column<count;++column)value-=lu[matrix+row*count+column]*rhs[column];rhs[row]=value/lu[matrix+row*count+row];
+				PressureReal value=rhs[row];for(int column=row+1;column<count;++column)value-=PressureReal(lu[matrix+row*count+column])*rhs[column];rhs[row]=value/PressureReal(lu[matrix+row*count+row]);
 			}
 			for(int row=0;row<count;++row)output[dof[begin+row]]=rhs[row];
 		}
@@ -713,12 +749,15 @@ namespace paracfd::core
 			}
 			return result;
 		}
-		struct DotActive{const Real* a;const Real* b;const unsigned char* active;__host__ __device__ double operator()(int q)const{return active[q]?static_cast<double>(a[q])*static_cast<double>(b[q]):0.0;}};
-		double dot_active(const Real* a,const Real* b,const unsigned char* active,int n){auto begin=thrust::counting_iterator<int>(0);return thrust::transform_reduce(thrust::device,begin,begin+n,DotActive{a,b,active},0.0,thrust::plus<double>());}
+		struct DotActive{const PressureReal* a;const PressureReal* b;const unsigned char* active;__host__ __device__ double operator()(int q)const{return active[q]?static_cast<double>(a[q])*static_cast<double>(b[q]):0.0;}};
+		double dot_active(const PressureReal* a,const PressureReal* b,const unsigned char* active,int n){auto begin=thrust::counting_iterator<int>(0);return thrust::transform_reduce(thrust::device,begin,begin+n,DotActive{a,b,active},0.0,thrust::plus<double>());}
 	}
 
 	DeviceCompositeAmrPressureOperator::DeviceCompositeAmrPressureOperator(const CompositeAmrPressureSystem& system)
 	{
+		const auto setup_begin=std::chrono::steady_clock::now();
+		std::fprintf(stderr,"[pressure-gpu-setup] operator begin: DOFs=%d\n",system.storage_size);
+		std::fflush(stderr);
 		if (!system.hierarchy) throw std::invalid_argument("composite AMR pressure system has no hierarchy");
 		storage_size_ = system.storage_size; brick_size_ = system.brick_size; outlet_ = system.pressure_outlet_xmax; level_count_ = static_cast<int>(system.hierarchy->levels().size()); allocations_.resize(level_count_); brick_counts_.resize(level_count_); std::vector<DeviceCompositeAmrLevelView> views(level_count_);
 		for (int level = 0; level < level_count_; ++level)
@@ -726,7 +765,7 @@ namespace paracfd::core
 			const AmrLevel& source = system.hierarchy->levels()[level]; Allocation& allocation = allocations_[level]; brick_counts_[level] = static_cast<int>(source.bricks.size()); std::vector<int> neighbors(source.bricks.size() * 6); std::vector<std::uint32_t> flags(source.bricks.size());
 			for (int brick = 0; brick < static_cast<int>(source.bricks.size()); ++brick) { flags[brick] = source.bricks[brick].flags; for (int face=0;face<6;++face) neighbors[brick*6+face] = source.bricks[brick].same_level_neighbor[face]; }
 			if (!neighbors.empty()) { check(cudaMalloc(&allocation.neighbors, neighbors.size()*sizeof(int)), "cudaMalloc composite AMR neighbors"); check(cudaMemcpy(allocation.neighbors, neighbors.data(), neighbors.size()*sizeof(int), cudaMemcpyHostToDevice), "upload composite AMR neighbors"); check(cudaMalloc(&allocation.flags, flags.size()*sizeof(std::uint32_t)), "cudaMalloc composite AMR flags"); check(cudaMemcpy(allocation.flags, flags.data(), flags.size()*sizeof(std::uint32_t), cudaMemcpyHostToDevice), "upload composite AMR flags"); }
-			views[level] = {system.level_offset[level], static_cast<int>(source.bricks.size()), source.h, allocation.neighbors, allocation.flags}; bytes_ += neighbors.size()*sizeof(int)+flags.size()*sizeof(std::uint32_t);
+			views[level] = {system.level_offset[level], static_cast<int>(source.bricks.size()), static_cast<float>(source.h), allocation.neighbors, allocation.flags}; bytes_ += neighbors.size()*sizeof(int)+flags.size()*sizeof(std::uint32_t);
 		}
 		if (!views.empty()) { check(cudaMalloc(&levels_, views.size()*sizeof(DeviceCompositeAmrLevelView)), "cudaMalloc composite AMR views"); check(cudaMemcpy(levels_, views.data(), views.size()*sizeof(DeviceCompositeAmrLevelView), cudaMemcpyHostToDevice), "upload composite AMR views"); bytes_ += views.size()*sizeof(DeviceCompositeAmrLevelView); }
 		active_=upload(system.active,"upload composite AMR operator active mask");cut_face_mask_=upload(system.cut_face_mask,"upload composite AMR cut-face mask");bytes_+=system.active.size()+system.cut_face_mask.size()*sizeof(std::uint8_t);std::vector<CoarseFinePressureConnection> special=system.coarse_fine;special.insert(special.end(),system.embedded.begin(),system.embedded.end());connection_count_ = static_cast<int>(special.size()); if (connection_count_)
@@ -738,7 +777,7 @@ namespace paracfd::core
 			// base endpoint arrays only for its symmetric two-point contribution.
 			cudaFree(coarse_dof_);cudaFree(fine_dof_);coarse_dof_=upload(lower,"upload ordered pressure lower DOFs");fine_dof_=upload(upper,"upload ordered pressure upper DOFs");bytes_+=lower_node.size()*2*sizeof(int)+correction.size()*sizeof(Real)+upper_weight.size()*sizeof(Real)+area.size()*sizeof(Real);
 		}
-		gradient_node_count_=static_cast<int>(system.pressure_gradient_dof.size());if(gradient_node_count_){std::vector<Real> weight(static_cast<std::size_t>(system.pressure_gradient_weight.size())*3);for(std::size_t q=0;q<system.pressure_gradient_weight.size();++q)for(int component=0;component<3;++component)weight[3*q+component]=static_cast<Real>(system.pressure_gradient_weight[q][component]);gradient_node_dof_=upload(system.pressure_gradient_dof,"upload compact pressure-gradient DOFs");gradient_offset_=upload(system.pressure_gradient_offset,"upload compact pressure-gradient offsets");gradient_neighbour_=upload(system.pressure_gradient_neighbour,"upload compact pressure-gradient neighbours");gradient_weight_=upload(weight,"upload compact pressure-gradient weights");gradient_=allocate_zero<Real>(static_cast<std::size_t>(gradient_node_count_)*3,"allocate compact pressure gradients");bytes_+=system.pressure_gradient_dof.size()*sizeof(int)+system.pressure_gradient_offset.size()*sizeof(int)+system.pressure_gradient_neighbour.size()*sizeof(int)+weight.size()*sizeof(Real)+static_cast<std::size_t>(gradient_node_count_)*3*sizeof(Real);}
+		gradient_node_count_=static_cast<int>(system.pressure_gradient_dof.size());if(gradient_node_count_){std::vector<Real> weight(static_cast<std::size_t>(system.pressure_gradient_weight.size())*3);for(std::size_t q=0;q<system.pressure_gradient_weight.size();++q)for(int component=0;component<3;++component)weight[3*q+component]=static_cast<Real>(system.pressure_gradient_weight[q][component]);gradient_node_dof_=upload(system.pressure_gradient_dof,"upload compact pressure-gradient DOFs");gradient_offset_=upload(system.pressure_gradient_offset,"upload compact pressure-gradient offsets");gradient_neighbour_=upload(system.pressure_gradient_neighbour,"upload compact pressure-gradient neighbours");gradient_weight_=upload(weight,"upload compact pressure-gradient weights");gradient_=allocate_zero<PressureReal>(static_cast<std::size_t>(gradient_node_count_)*3,"allocate compact pressure gradients");bytes_+=system.pressure_gradient_dof.size()*sizeof(int)+system.pressure_gradient_offset.size()*sizeof(int)+system.pressure_gradient_neighbour.size()*sizeof(int)+weight.size()*sizeof(Real)+static_cast<std::size_t>(gradient_node_count_)*3*sizeof(PressureReal);}
 		regular_correction_count_=static_cast<int>(system.regular_pressure_corrections.size());if(regular_correction_count_){std::vector<int> lower(regular_correction_count_),upper(regular_correction_count_),lower_node(regular_correction_count_),upper_node(regular_correction_count_);std::vector<Real> delta(regular_correction_count_),correction(static_cast<std::size_t>(regular_correction_count_)*3),weight(regular_correction_count_),area(regular_correction_count_);for(int edge=0;edge<regular_correction_count_;++edge){const auto& source=system.regular_pressure_corrections[edge];lower[edge]=source.lower_dof;upper[edge]=source.upper_dof;lower_node[edge]=source.lower_gradient_node;upper_node[edge]=source.upper_gradient_node;delta[edge]=static_cast<Real>(source.two_point_delta);weight[edge]=static_cast<Real>(source.upper_gradient_weight);area[edge]=static_cast<Real>(source.open_area);for(int component=0;component<3;++component)correction[3*edge+component]=static_cast<Real>(source.nonorthogonal_correction[component]);}regular_correction_lower_=upload(lower,"upload regular pressure-correction lower DOFs");regular_correction_upper_=upload(upper,"upload regular pressure-correction upper DOFs");regular_correction_lower_node_=upload(lower_node,"upload regular pressure-correction lower gradient nodes");regular_correction_upper_node_=upload(upper_node,"upload regular pressure-correction upper gradient nodes");regular_correction_two_point_delta_=upload(delta,"upload regular pressure two-point deltas");regular_correction_vector_=upload(correction,"upload regular nonorthogonal pressure corrections");regular_correction_upper_weight_=upload(weight,"upload regular pressure-gradient interpolation");regular_correction_area_=upload(area,"upload regular pressure-correction areas");bytes_+=static_cast<std::size_t>(4*regular_correction_count_)*sizeof(int)+static_cast<std::size_t>(6*regular_correction_count_)*sizeof(Real);}
 		struct IrregularIncident { int dof=0,edge=0;std::int8_t sign=0; };
 		std::vector<IrregularIncident> incidents;incidents.reserve(static_cast<std::size_t>(2)*(connection_count_+regular_correction_count_));
@@ -781,6 +820,9 @@ namespace paracfd::core
 			bytes_+=dof.size()*sizeof(int)+offset.size()*sizeof(int)+edge.size()*sizeof(int)+sign.size()*sizeof(std::int8_t);
 		}
 		gauge_count_=static_cast<int>(system.gauges.size());if(gauge_count_){std::vector<int> dof(gauge_count_);std::vector<Real> coefficient(gauge_count_);for(int q=0;q<gauge_count_;++q){dof[q]=system.gauges[q].dof;coefficient[q]=static_cast<Real>(system.gauges[q].coefficient);}gauge_dof_=upload(dof,"upload composite pressure gauge DOFs");gauge_coefficient_=upload(coefficient,"upload composite pressure gauge coefficients");bytes_+=dof.size()*sizeof(int)+coefficient.size()*sizeof(Real);}
+		std::fprintf(stderr,"[pressure-gpu-setup] operator ready in %.1f ms\n",
+			std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-setup_begin).count());
+		std::fflush(stderr);
 	}
 
 	DeviceCompositeAmrPressureOperator::~DeviceCompositeAmrPressureOperator()
@@ -788,23 +830,43 @@ namespace paracfd::core
 		for (Allocation& allocation : allocations_) { if(allocation.neighbors)cudaFree(allocation.neighbors);if(allocation.flags)cudaFree(allocation.flags); }for(void* pointer:{(void*)levels_,(void*)coarse_dof_,(void*)fine_dof_,(void*)coefficient_,(void*)gradient_node_dof_,(void*)gradient_offset_,(void*)gradient_neighbour_,(void*)gradient_weight_,(void*)gradient_,(void*)connection_lower_node_,(void*)connection_upper_node_,(void*)connection_correction_,(void*)connection_upper_weight_,(void*)connection_area_,(void*)regular_correction_lower_,(void*)regular_correction_upper_,(void*)regular_correction_lower_node_,(void*)regular_correction_upper_node_,(void*)regular_correction_two_point_delta_,(void*)regular_correction_vector_,(void*)regular_correction_upper_weight_,(void*)regular_correction_area_,(void*)irregular_incident_dof_,(void*)irregular_incident_offset_,(void*)irregular_incident_edge_,(void*)irregular_incident_sign_,(void*)gauge_dof_,(void*)gauge_coefficient_,(void*)active_,(void*)cut_face_mask_})if(pointer)cudaFree(pointer);
 	}
 
-	void DeviceCompositeAmrPressureOperator::apply_orthogonal(const Real* pressure, Real* output) const
+	void DeviceCompositeAmrPressureOperator::apply_orthogonal(const PressureReal* pressure, PressureReal* output) const
 	{
-		check(cudaMemset(output,0,static_cast<std::size_t>(storage_size_)*sizeof(Real)),"clear composite AMR output");const int cells_per_brick=brick_size_*brick_size_*brick_size_;
+		check(cudaMemset(output,0,static_cast<std::size_t>(storage_size_)*sizeof(PressureReal)),"clear composite AMR output");const int cells_per_brick=brick_size_*brick_size_*brick_size_;
 		for(int level=0;level<level_count_;++level){const int work=brick_counts_[level]*cells_per_brick;if(work)structured_apply_kernel<<<(work+255)/256,256>>>(levels_,level,brick_size_,outlet_,active_,cut_face_mask_,pressure,output);}if(irregular_incident_dof_count_)irregular_orthogonal_gather_kernel<<<(irregular_incident_dof_count_+255)/256,256>>>(irregular_incident_dof_,irregular_incident_offset_,irregular_incident_edge_,irregular_incident_sign_,irregular_incident_dof_count_,connection_count_,coarse_dof_,fine_dof_,coefficient_,regular_correction_lower_,regular_correction_upper_,regular_correction_two_point_delta_,regular_correction_area_,active_,pressure,output);if(gauge_count_)gauge_apply_kernel<<<(gauge_count_+255)/256,256>>>(gauge_dof_,gauge_coefficient_,gauge_count_,pressure,output);check(cudaDeviceSynchronize(),"apply orthogonal composite AMR pressure operator");
 	}
 
-	void DeviceCompositeAmrPressureOperator::apply(const Real* pressure, Real* output) const
+	void DeviceCompositeAmrPressureOperator::apply(const PressureReal* pressure, PressureReal* output) const
 	{
 		apply_orthogonal(pressure,output);if(gradient_node_count_)reconstruct_pressure_gradient_kernel<<<(gradient_node_count_+255)/256,256>>>(gradient_node_dof_,gradient_offset_,gradient_neighbour_,gradient_weight_,pressure,gradient_,gradient_node_count_);if(irregular_incident_dof_count_&&gradient_node_count_)irregular_nonorthogonal_gather_kernel<<<(irregular_incident_dof_count_+255)/256,256>>>(irregular_incident_dof_,irregular_incident_offset_,irregular_incident_edge_,irregular_incident_sign_,irregular_incident_dof_count_,connection_count_,coarse_dof_,fine_dof_,connection_lower_node_,connection_upper_node_,connection_correction_,connection_upper_weight_,connection_area_,regular_correction_lower_,regular_correction_upper_,regular_correction_lower_node_,regular_correction_upper_node_,regular_correction_vector_,regular_correction_upper_weight_,regular_correction_area_,gradient_,active_,output);check(cudaDeviceSynchronize(),"apply nonorthogonal composite AMR pressure correction");
 	}
 
 	DeviceCompositeAmrPressureSolver::DeviceCompositeAmrPressureSolver(const CompositeAmrPressureSystem& system):op_(system),n_(system.storage_size)
 	{
+		const auto solver_begin=std::chrono::steady_clock::now();
+		full_nonorthogonal_=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
 		if(std::getenv("PARACFD_PRESSURE_TRACE"))trace_system_=&system;
-		if(!system.hierarchy||system.hierarchy->levels().empty()||system.preconditioner_aggregate.size()!=static_cast<std::size_t>(n_))throw std::invalid_argument("composite AMR solver geometric aggregation metadata");std::vector<double> diagonal_double;system.diagonal_cpu(diagonal_double);std::vector<Real> diagonal(diagonal_double.size());for(std::size_t q=0;q<diagonal.size();++q)diagonal[q]=static_cast<Real>(diagonal_double[q]);
-		r_=allocate_zero<Real>(n_,"allocate AMR residual");z_=allocate_zero<Real>(n_,"allocate AMR preconditioned direction");direction_=allocate_zero<Real>(n_,"allocate AMR Krylov direction");Ad_=allocate_zero<Real>(n_,"allocate AMR operator direction");t_=allocate_zero<Real>(n_,"allocate AMR true-residual operator value");correction_=allocate_zero<Real>(n_,"allocate AMR GMRES cycle correction");defect_rhs_=allocate_zero<Real>(n_,"allocate AMR nonorthogonal defect RHS");gmres_v_=allocate_zero<Real>(static_cast<std::size_t>(gmres_restart_+1)*n_,"allocate AMR GMRES basis");gmres_z_=allocate_zero<Real>(static_cast<std::size_t>(gmres_restart_)*n_,"allocate AMR flexible GMRES basis");gmres_recycle_u_=allocate_zero<Real>(static_cast<std::size_t>(gmres_recycle_capacity_)*n_,"allocate AMR GCRO solution recycle basis");gmres_recycle_c_=allocate_zero<Real>(static_cast<std::size_t>(gmres_recycle_capacity_)*n_,"allocate AMR GCRO image recycle basis");diagonal_=upload(diagonal,"upload AMR base diagonal");active_=upload(system.active,"upload AMR active mask");aggregate_=upload(system.preconditioner_aggregate,"upload AMR coarse aggregate map");
-		const AmrLevel& base=system.hierarchy->levels().front();brick_size_=system.brick_size;base_offset_=system.level_offset.front();base_bricks_=static_cast<int>(base.bricks.size());base_cells_=base_bricks_*brick_size_*brick_size_*brick_size_;const int cells_per_brick=brick_size_*brick_size_*brick_size_;std::vector<int> neighbors(static_cast<std::size_t>(base_bricks_)*6,-1);for(int brick=0;brick<base_bricks_;++brick)for(int face=0;face<6;++face)neighbors[brick*6+face]=base.bricks[brick].same_level_neighbor[face];std::vector<double> coarse_positive_double(static_cast<std::size_t>(base_cells_)*3,0),coarse_diagonal_double(base_cells_,0);
+		const double diagnostic_gib=static_cast<double>(static_cast<std::size_t>(
+			2*gmres_restart_+1+2*gmres_recycle_capacity_)*n_*sizeof(PressureReal))/(1024.0*1024.0*1024.0);
+		std::fprintf(stderr,"[pressure-gpu-setup] solver begin: mode=%s; %s %.2f GiB diagnostic Krylov storage and irregular Schwarz\n",
+			full_nonorthogonal_?"full-nonorthogonal-diagnostic":"orthogonal-production",
+			full_nonorthogonal_?"enabling":"skipping",diagnostic_gib);
+		std::fflush(stderr);
+		if(!system.hierarchy||system.hierarchy->levels().empty()||system.preconditioner_aggregate.size()!=static_cast<std::size_t>(n_))throw std::invalid_argument("composite AMR solver geometric aggregation metadata");std::vector<double> diagonal_double;system.diagonal_cpu(diagonal_double);std::vector<PressureReal> diagonal(diagonal_double.size());for(std::size_t q=0;q<diagonal.size();++q)diagonal[q]=static_cast<PressureReal>(diagonal_double[q]);
+		r_=allocate_zero<PressureReal>(n_,"allocate AMR residual");z_=allocate_zero<PressureReal>(n_,"allocate AMR preconditioned direction");direction_=allocate_zero<PressureReal>(n_,"allocate AMR Krylov direction");Ad_=allocate_zero<PressureReal>(n_,"allocate AMR operator direction");t_=allocate_zero<PressureReal>(n_,"allocate AMR true-residual operator value");correction_=allocate_zero<PressureReal>(n_,"allocate AMR cycle correction");defect_rhs_=allocate_zero<PressureReal>(n_,"allocate AMR refinement defect RHS");
+		if(full_nonorthogonal_)
+		{
+			gmres_v_=allocate_zero<PressureReal>(static_cast<std::size_t>(gmres_restart_+1)*n_,"allocate AMR GMRES basis");gmres_z_=allocate_zero<PressureReal>(static_cast<std::size_t>(gmres_restart_)*n_,"allocate AMR flexible GMRES basis");gmres_recycle_u_=allocate_zero<PressureReal>(static_cast<std::size_t>(gmres_recycle_capacity_)*n_,"allocate AMR GCRO solution recycle basis");gmres_recycle_c_=allocate_zero<PressureReal>(static_cast<std::size_t>(gmres_recycle_capacity_)*n_,"allocate AMR GCRO image recycle basis");
+		}
+		diagonal_=upload(diagonal,"upload AMR base diagonal");active_=upload(system.active,"upload AMR active mask");aggregate_=upload(system.preconditioner_aggregate,"upload AMR coarse aggregate map");
+		std::fprintf(stderr,"[pressure-gpu-setup] solver vectors ready in %.1f ms\n",
+			std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-solver_begin).count());
+		std::fflush(stderr);
+		const AmrLevel& base=system.hierarchy->levels().front();
+		const int brick_size=system.brick_size,base_bricks=static_cast<int>(base.bricks.size());
+		base_offset_=system.level_offset.front();base_cells_=base_bricks*brick_size*brick_size*brick_size;
+		const int cells_per_brick=brick_size*brick_size*brick_size;
+		std::vector<double> coarse_positive_double(static_cast<std::size_t>(base_cells_)*3,0),coarse_diagonal_double(base_cells_,0);
 		std::vector<int> aggregate_restrict_offset(static_cast<std::size_t>(base_cells_)+1,0);
 		for(int q=0;q<n_;++q)if(system.active[q])
 		{
@@ -818,7 +880,21 @@ namespace paracfd::core
 			const int coarse=system.preconditioner_aggregate[q]-base_offset_;
 			if(coarse>=0&&coarse<base_cells_)aggregate_restrict_dof[aggregate_cursor[coarse]++]=q;
 		}
-		const HostIrregularSchwarz schwarz=build_irregular_schwarz(system);
+		if(trace_system_)
+		{
+			int occupied_aggregates=0;
+			for(int coarse=0;coarse<base_cells_;++coarse)
+				if(aggregate_restrict_offset[coarse+1]>aggregate_restrict_offset[coarse])++occupied_aggregates;
+			std::fprintf(stderr,"[pressure-preconditioner] base-cells=%d occupied-aggregates=%d restricted-dofs=%zu\n",
+				base_cells_,occupied_aggregates,aggregate_restrict_dof.size());
+			std::fflush(stderr);
+		}
+		HostIrregularSchwarz schwarz;
+		if(full_nonorthogonal_)
+		{
+			std::fprintf(stderr,"[pressure-gpu-setup] building diagnostic irregular Schwarz factors...\n");
+			std::fflush(stderr);schwarz=build_irregular_schwarz(system);
+		}
 		schwarz_block_count_=static_cast<int>(schwarz.block_offset.size())-1;
 		schwarz_dof_count_=static_cast<int>(schwarz.dof.size());
 		for(int block=0;block<schwarz_block_count_;++block)schwarz_max_block_size_=std::max(
@@ -828,7 +904,7 @@ namespace paracfd::core
 		schwarz_dof_=upload(schwarz.dof,"upload irregular Schwarz DOFs");
 		schwarz_pivot_=upload(schwarz.pivot,"upload irregular Schwarz pivots");
 		schwarz_lu_=upload(schwarz.lu,"upload irregular Schwarz LU factors");
-		schwarz_rhs_=allocate_zero<Real>(schwarz.dof.size(),"allocate irregular Schwarz RHS");
+		schwarz_rhs_=allocate_zero<PressureReal>(schwarz.dof.size(),"allocate irregular Schwarz RHS");
 		if(trace_system_)
 		{
 			std::array<std::size_t,6> histogram{};
@@ -844,55 +920,259 @@ namespace paracfd::core
 		}
 		aggregate_restrict_offset_=upload(aggregate_restrict_offset,"upload deterministic aggregate offsets");
 		aggregate_restrict_dof_=upload(aggregate_restrict_dof,"upload deterministic aggregate DOFs");
-		std::vector<int> base_extra_a,base_extra_b;std::vector<double> base_extra_coefficient_double;auto global_coord=[&](int coarse){const int brick=coarse/cells_per_brick,local=coarse%cells_per_brick;return std::array<int,3>{base.bricks[brick].coord.x*brick_size_+local%brick_size_,base.bricks[brick].coord.y*brick_size_+(local/brick_size_)%brick_size_,base.bricks[brick].coord.z*brick_size_+local/(brick_size_*brick_size_)};};auto add_coarse_edge=[&](int a,int b,double coefficient){if(a<0||b<0||a==b||!system.active[a]||!system.active[b])return;const int ca=system.preconditioner_aggregate[a]-base_offset_,cb=system.preconditioner_aggregate[b]-base_offset_;if(ca<0||cb<0||ca>=base_cells_||cb>=base_cells_||ca==cb)return;const auto ga=global_coord(ca),gb=global_coord(cb);int axis=-1,manhattan=0;for(int d=0;d<3;++d){const int delta=gb[d]-ga[d];manhattan+=std::abs(delta);if(delta)axis=d;}if(manhattan==1&&axis>=0){const int lower=ga[axis]<gb[axis]?ca:cb;coarse_positive_double[static_cast<std::size_t>(lower)*3+axis]+=coefficient;}else{base_extra_a.push_back(ca);base_extra_b.push_back(cb);base_extra_coefficient_double.push_back(coefficient);}coarse_diagonal_double[ca]+=coefficient;coarse_diagonal_double[cb]+=coefficient;};
-		for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level){const AmrLevel& source=system.hierarchy->levels()[level];const double coefficient=source.h;for(int brick=0;brick<static_cast<int>(source.bricks.size());++brick){const BrickMetadata& meta=source.bricks[brick];if(!meta.active())continue;for(int k=0;k<brick_size_;++k)for(int j=0;j<brick_size_;++j)for(int i=0;i<brick_size_;++i){const int a=system.dof(level,brick,i,j,k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if(system.cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k},b=-1;if(++c[axis]<brick_size_)b=system.dof(level,brick,c[0],c[1],c[2]);else{const int neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&source.bricks[neighbour].active()){c[axis]=0;b=system.dof(level,neighbour,c[0],c[1],c[2]);}}add_coarse_edge(a,b,coefficient);}if(system.pressure_outlet_xmax&&(meta.flags&BRICK_XMAX)&&i==brick_size_-1){const int coarse=system.preconditioner_aggregate[a]-base_offset_;if(coarse>=0&&coarse<base_cells_)coarse_diagonal_double[coarse]+=2.0*source.h;}}}}
-		for(const CoarseFinePressureConnection& edge:system.coarse_fine)add_coarse_edge(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));for(const CoarseFinePressureConnection& edge:system.embedded)add_coarse_edge(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));for(const RegularPressureCorrection& edge:system.regular_pressure_corrections)add_coarse_edge(edge.lower_dof,edge.upper_dof,edge.open_area*edge.two_point_delta);for(const CompositePressureGauge& gauge:system.gauges){const int coarse=system.preconditioner_aggregate[gauge.dof]-base_offset_;if(coarse>=0&&coarse<base_cells_)coarse_diagonal_double[coarse]+=gauge.coefficient;}
-		struct BaseExtraIncident { int dof=0,edge=0; };
-		std::vector<BaseExtraIncident> base_extra_incidents;base_extra_incidents.reserve(2*base_extra_a.size());
-		for(int edge=0;edge<static_cast<int>(base_extra_a.size());++edge)
+		struct HostEdge { int a=0,b=0;double coefficient=0; };
+		std::vector<HostEdge> base_extra_edges;
+		auto global_coord=[&](int coarse)
 		{
-			base_extra_incidents.push_back({base_extra_a[edge],edge});
-			base_extra_incidents.push_back({base_extra_b[edge],edge});
-		}
-		std::sort(base_extra_incidents.begin(),base_extra_incidents.end(),[](const BaseExtraIncident& a,const BaseExtraIncident& b)
+			const int brick=coarse/cells_per_brick,local=coarse%cells_per_brick;
+			return std::array<int,3>{base.bricks[brick].coord.x*brick_size+local%brick_size,
+				base.bricks[brick].coord.y*brick_size+(local/brick_size)%brick_size,
+				base.bricks[brick].coord.z*brick_size+local/(brick_size*brick_size)};
+		};
+		auto add_coarse_edge=[&](int a,int b,double coefficient)
 		{
-			if(a.dof!=b.dof)return a.dof<b.dof;return a.edge<b.edge;
-		});
-		std::vector<int> base_extra_incident_dof,base_extra_incident_offset,base_extra_incident_edge;
-		for(std::size_t q=0;q<base_extra_incidents.size();++q)
-		{
-			if(q==0||base_extra_incidents[q].dof!=base_extra_incidents[q-1].dof)
+			if(a<0||b<0||a==b||!system.active[a]||!system.active[b]||!(coefficient>0))return;
+			const int ca=system.preconditioner_aggregate[a]-base_offset_,cb=system.preconditioner_aggregate[b]-base_offset_;
+			if(ca<0||cb<0||ca>=base_cells_||cb>=base_cells_||ca==cb)return;
+			const auto ga=global_coord(ca),gb=global_coord(cb);int axis=-1,manhattan=0;
+			for(int d=0;d<3;++d){const int delta=gb[d]-ga[d];manhattan+=std::abs(delta);if(delta)axis=d;}
+			if(manhattan==1&&axis>=0)
 			{
-				base_extra_incident_dof.push_back(base_extra_incidents[q].dof);
-				base_extra_incident_offset.push_back(static_cast<int>(q));
+				const int lower=ga[axis]<gb[axis]?ca:cb;
+				coarse_positive_double[static_cast<std::size_t>(lower)*3+axis]+=coefficient;
 			}
-			base_extra_incident_edge.push_back(base_extra_incidents[q].edge);
+			else base_extra_edges.push_back({ca,cb,coefficient});
+			coarse_diagonal_double[ca]+=coefficient;coarse_diagonal_double[cb]+=coefficient;
+		};
+		for(int level=0;level<static_cast<int>(system.hierarchy->levels().size());++level)
+		{
+			const AmrLevel& source=system.hierarchy->levels()[level];const double coefficient=source.h;
+			for(int brick=0;brick<static_cast<int>(source.bricks.size());++brick)
+			{
+				const BrickMetadata& meta=source.bricks[brick];if(!meta.active())continue;
+				for(int k=0;k<brick_size;++k)for(int j=0;j<brick_size;++j)for(int i=0;i<brick_size;++i)
+				{
+					const int a=system.dof(level,brick,i,j,k);if(!system.active[a])continue;
+					for(int axis=0;axis<3;++axis)
+					{
+						if(system.cut_face_mask[a]&(1u<<axis))continue;int c[3]={i,j,k},b=-1;
+						if(++c[axis]<brick_size)b=system.dof(level,brick,c[0],c[1],c[2]);
+						else{const int neighbour=meta.same_level_neighbor[2*axis+1];if(neighbour>=0&&source.bricks[neighbour].active()){c[axis]=0;b=system.dof(level,neighbour,c[0],c[1],c[2]);}}
+						add_coarse_edge(a,b,coefficient);
+					}
+					if(system.pressure_outlet_xmax&&(meta.flags&BRICK_XMAX)&&i==brick_size-1)
+					{
+						const int coarse=system.preconditioner_aggregate[a]-base_offset_;
+						if(coarse>=0&&coarse<base_cells_)coarse_diagonal_double[coarse]+=2.0*source.h;
+					}
+				}
+			}
 		}
-		if(!base_extra_incidents.empty())base_extra_incident_offset.push_back(static_cast<int>(base_extra_incidents.size()));
-		base_extra_incident_dof_count_=static_cast<int>(base_extra_incident_dof.size());
-		base_extra_incident_dof_=upload(base_extra_incident_dof,"upload deterministic base-extra DOFs");
-		base_extra_incident_offset_=upload(base_extra_incident_offset,"upload deterministic base-extra offsets");
-		base_extra_incident_edge_=upload(base_extra_incident_edge,"upload deterministic base-extra edges");
-		std::vector<Real> base_positive(coarse_positive_double.size()),base_diagonal(base_cells_),base_extra_coefficient(base_extra_coefficient_double.size());for(std::size_t q=0;q<base_positive.size();++q)base_positive[q]=static_cast<Real>(coarse_positive_double[q]);for(int q=0;q<base_cells_;++q)base_diagonal[q]=static_cast<Real>(coarse_diagonal_double[q]);for(std::size_t q=0;q<base_extra_coefficient.size();++q)base_extra_coefficient[q]=static_cast<Real>(base_extra_coefficient_double[q]);base_extra_count_=static_cast<int>(base_extra_a.size());base_neighbors_=upload(neighbors,"upload AMR base neighbors");base_positive_=upload(base_positive,"upload AMR Galerkin base faces");base_diagonal_=upload(base_diagonal,"upload AMR base diagonal");base_extra_a_=upload(base_extra_a,"upload AMR nonlocal aggregate edge A");base_extra_b_=upload(base_extra_b,"upload AMR nonlocal aggregate edge B");base_extra_coefficient_=upload(base_extra_coefficient,"upload AMR nonlocal aggregate coefficient");base_rhs_=allocate_zero<Real>(base_cells_,"allocate AMR base RHS");base_x_=allocate_zero<Real>(base_cells_,"allocate AMR base correction");base_tmp_=allocate_zero<Real>(base_cells_,"allocate AMR base temporary");const std::size_t full_vectors=static_cast<std::size_t>(2*gmres_restart_+2*gmres_recycle_capacity_+9);bytes_=op_.bytes()+full_vectors*n_*sizeof(Real)+system.active.size()+system.preconditioner_aggregate.size()*sizeof(int)+neighbors.size()*sizeof(int)+base_positive.size()*sizeof(Real)+static_cast<std::size_t>(4)*base_cells_*sizeof(Real)+base_extra_a.size()*static_cast<std::size_t>(2*sizeof(int)+sizeof(Real))+aggregate_restrict_offset.size()*sizeof(int)+aggregate_restrict_dof.size()*sizeof(int)+base_extra_incident_dof.size()*sizeof(int)+base_extra_incident_offset.size()*sizeof(int)+base_extra_incident_edge.size()*sizeof(int)+schwarz.block_offset.size()*sizeof(int)+schwarz.factor_offset.size()*sizeof(int)+schwarz.dof.size()*static_cast<std::size_t>(2*sizeof(int)+sizeof(Real))+schwarz.lu.size()*sizeof(Real);
+		for(const CoarseFinePressureConnection& edge:system.coarse_fine)add_coarse_edge(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));for(const CoarseFinePressureConnection& edge:system.embedded)add_coarse_edge(edge.coarse_dof,edge.fine_dof,edge.open_area*pressure_gradient_factor(edge));for(const RegularPressureCorrection& edge:system.regular_pressure_corrections)add_coarse_edge(edge.lower_dof,edge.upper_dof,edge.open_area*edge.two_point_delta);for(const CompositePressureGauge& gauge:system.gauges){const int coarse=system.preconditioner_aggregate[gauge.dof]-base_offset_;if(coarse>=0&&coarse<base_cells_)coarse_diagonal_double[coarse]+=gauge.coefficient;}
+
+		struct HostMgLevel
+		{
+			int cells=0;
+			std::vector<std::array<int,3>> coordinate;
+			std::vector<double> diagonal;
+			std::vector<HostEdge> edges;
+			std::vector<int> aggregate,restrict_offset,restrict_dof,row_offset,neighbour;
+			std::vector<PressureReal> coefficient,diagonal_real;
+		};
+		HostMgLevel first;first.cells=base_cells_;first.diagonal=std::move(coarse_diagonal_double);
+		first.coordinate.resize(base_cells_);for(int q=0;q<base_cells_;++q)first.coordinate[q]=global_coord(q);
+		first.edges.reserve(static_cast<std::size_t>(3)*base_cells_+base_extra_edges.size());
+		for(int q=0;q<base_cells_;++q)
+		{
+			const int brick=q/cells_per_brick,local=q%cells_per_brick,i=local%brick_size,
+				j=(local/brick_size)%brick_size,k=local/(brick_size*brick_size);
+			for(int axis=0;axis<3;++axis)
+			{
+				const double coefficient=coarse_positive_double[static_cast<std::size_t>(q)*3+axis];
+				if(!(coefficient>0))continue;int c[3]={i,j,k},other=-1;
+				if(++c[axis]<brick_size)other=brick*cells_per_brick+(c[2]*brick_size+c[1])*brick_size+c[0];
+				else{const int neighbour=base.bricks[brick].same_level_neighbor[2*axis+1];if(neighbour>=0){c[axis]=0;other=neighbour*cells_per_brick+(c[2]*brick_size+c[1])*brick_size+c[0];}}
+				if(other<0)throw std::runtime_error("AMR base Galerkin face has no geometric neighbour");
+				first.edges.push_back({q,other,coefficient});
+			}
+		}
+		first.edges.insert(first.edges.end(),base_extra_edges.begin(),base_extra_edges.end());
+
+		auto finalize_host_level=[](HostMgLevel& level)
+		{
+			if(level.edges.size()>static_cast<std::size_t>(std::numeric_limits<int>::max()/2))throw std::runtime_error("AMR pressure multigrid graph exceeds 32-bit CSR capacity");
+			level.row_offset.assign(static_cast<std::size_t>(level.cells)+1,0);
+			for(const HostEdge& edge:level.edges){++level.row_offset[edge.a+1];++level.row_offset[edge.b+1];}
+			for(int q=0;q<level.cells;++q)level.row_offset[q+1]+=level.row_offset[q];
+			level.neighbour.resize(level.row_offset.back());level.coefficient.resize(level.row_offset.back());
+			std::vector<int> cursor=level.row_offset;
+			for(const HostEdge& edge:level.edges)
+			{
+				int slot=cursor[edge.a]++;level.neighbour[slot]=edge.b;level.coefficient[slot]=static_cast<PressureReal>(edge.coefficient);
+				slot=cursor[edge.b]++;level.neighbour[slot]=edge.a;level.coefficient[slot]=static_cast<PressureReal>(edge.coefficient);
+			}
+			level.diagonal_real.resize(level.cells);for(int q=0;q<level.cells;++q)level.diagonal_real[q]=static_cast<PressureReal>(level.diagonal[q]);
+		};
+		std::vector<HostMgLevel> host_levels;HostMgLevel current=std::move(first);
+		for(;;)
+		{
+			int active_cells=0;for(double value:current.diagonal)if(value>0)++active_cells;
+			if(active_cells<=512||host_levels.size()>=8)
+			{
+				finalize_host_level(current);host_levels.push_back(std::move(current));break;
+			}
+			std::vector<int> parent(current.cells,-1);
+			for(int q=0;q<current.cells;++q)if(current.diagonal[q]>0)parent[q]=q;
+			auto root=[&](int q)
+			{
+				int r=q;while(parent[r]!=r)r=parent[r];
+				while(parent[q]!=q){const int next=parent[q];parent[q]=r;q=next;}return r;
+			};
+			for(const HostEdge& edge:current.edges)
+			{
+				const auto& a=current.coordinate[edge.a];const auto& b=current.coordinate[edge.b];
+				if(a[0]/2!=b[0]/2||a[1]/2!=b[1]/2||a[2]/2!=b[2]/2)continue;
+				int ra=root(edge.a),rb=root(edge.b);if(ra!=rb)parent[std::max(ra,rb)]=std::min(ra,rb);
+			}
+			current.aggregate.assign(current.cells,-1);std::vector<int> root_index(current.cells,-1);
+			HostMgLevel coarse;
+			for(int q=0;q<current.cells;++q)if(parent[q]>=0)
+			{
+				const int r=root(q);if(root_index[r]<0)
+				{
+					root_index[r]=coarse.cells++;
+					coarse.coordinate.push_back({current.coordinate[q][0]/2,current.coordinate[q][1]/2,current.coordinate[q][2]/2});
+				}
+				current.aggregate[q]=root_index[r];
+			}
+			if(coarse.cells<=0||coarse.cells>=active_cells)
+			{
+				finalize_host_level(current);host_levels.push_back(std::move(current));break;
+			}
+			current.restrict_offset.assign(static_cast<std::size_t>(coarse.cells)+1,0);
+			for(int q=0;q<current.cells;++q)if(current.aggregate[q]>=0)++current.restrict_offset[current.aggregate[q]+1];
+			for(int q=0;q<coarse.cells;++q)current.restrict_offset[q+1]+=current.restrict_offset[q];
+			current.restrict_dof.resize(current.restrict_offset.back());std::vector<int> restrict_cursor=current.restrict_offset;
+			for(int q=0;q<current.cells;++q)if(current.aggregate[q]>=0)current.restrict_dof[restrict_cursor[current.aggregate[q]]++]=q;
+			std::vector<double> incident(current.cells,0),ground(current.cells,0),coarse_ground(coarse.cells,0);
+			for(const HostEdge& edge:current.edges){incident[edge.a]+=edge.coefficient;incident[edge.b]+=edge.coefficient;}
+			for(int q=0;q<current.cells;++q)if(current.diagonal[q]>0)
+			{
+				const double scale=std::max(1.0,std::abs(current.diagonal[q]));
+				ground[q]=current.diagonal[q]-incident[q];
+				if(ground[q]<-1e-9*scale)throw std::runtime_error("AMR pressure multigrid Galerkin diagonal is inconsistent with its edges");
+				coarse_ground[current.aggregate[q]]+=std::max(0.0,ground[q]);
+			}
+			std::unordered_map<std::uint64_t,double> edge_weight;edge_weight.reserve(current.edges.size()/4+1);
+			for(const HostEdge& edge:current.edges)
+			{
+				int a=current.aggregate[edge.a],b=current.aggregate[edge.b];if(a==b)continue;if(a>b)std::swap(a,b);
+				const std::uint64_t key=(static_cast<std::uint64_t>(static_cast<std::uint32_t>(a))<<32)|static_cast<std::uint32_t>(b);
+				edge_weight[key]+=edge.coefficient;
+			}
+			coarse.edges.reserve(edge_weight.size());for(const auto& item:edge_weight)coarse.edges.push_back({static_cast<int>(item.first>>32),static_cast<int>(item.first&0xffffffffu),item.second});
+			std::sort(coarse.edges.begin(),coarse.edges.end(),[](const HostEdge& a,const HostEdge& b){return a.a<b.a||(a.a==b.a&&a.b<b.b);});
+			coarse.diagonal=std::move(coarse_ground);for(const HostEdge& edge:coarse.edges){coarse.diagonal[edge.a]+=edge.coefficient;coarse.diagonal[edge.b]+=edge.coefficient;}
+			finalize_host_level(current);host_levels.push_back(std::move(current));current=std::move(coarse);
+		}
+
+		const std::size_t full_vectors=static_cast<std::size_t>(8+(full_nonorthogonal_?2*gmres_restart_+1+2*gmres_recycle_capacity_:0));
+		bytes_=op_.bytes()+full_vectors*n_*sizeof(PressureReal)+system.active.size()+system.preconditioner_aggregate.size()*sizeof(int)+aggregate_restrict_offset.size()*sizeof(int)+aggregate_restrict_dof.size()*sizeof(int)+schwarz.block_offset.size()*sizeof(int)+schwarz.factor_offset.size()*sizeof(int)+schwarz.dof.size()*static_cast<std::size_t>(2*sizeof(int)+sizeof(PressureReal))+schwarz.lu.size()*sizeof(Real);
+		mg_levels_.reserve(host_levels.size());std::fprintf(stderr,"[pressure-mg] Galerkin levels=%zu",host_levels.size());
+		for(std::size_t index=0;index<host_levels.size();++index)
+		{
+			HostMgLevel& host=host_levels[index];AlgebraicMgLevel device;device.cells=host.cells;
+			device.row_offset=upload(host.row_offset,"upload pressure MG CSR offsets");device.neighbour=upload(host.neighbour,"upload pressure MG CSR neighbours");device.coefficient=upload(host.coefficient,"upload pressure MG CSR coefficients");device.diagonal=upload(host.diagonal_real,"upload pressure MG diagonal");
+			device.rhs=allocate_zero<PressureReal>(host.cells,"allocate pressure MG RHS");device.x=allocate_zero<PressureReal>(host.cells,"allocate pressure MG correction");device.temporary=allocate_zero<PressureReal>(host.cells,"allocate pressure MG temporary");device.residual=allocate_zero<PressureReal>(host.cells,"allocate pressure MG residual");
+			device.aggregate=upload(host.aggregate,"upload pressure MG aggregate map");device.restrict_offset=upload(host.restrict_offset,"upload pressure MG restriction offsets");device.restrict_dof=upload(host.restrict_dof,"upload pressure MG restriction DOFs");mg_levels_.push_back(device);
+			bytes_+=host.row_offset.size()*sizeof(int)+host.neighbour.size()*sizeof(int)+host.coefficient.size()*sizeof(PressureReal)+host.diagonal_real.size()*sizeof(PressureReal)+static_cast<std::size_t>(4)*host.cells*sizeof(PressureReal)+host.aggregate.size()*sizeof(int)+host.restrict_offset.size()*sizeof(int)+host.restrict_dof.size()*sizeof(int);
+			std::fprintf(stderr,"%s%d/%zu",index?" -> ":" ",host.cells,host.neighbour.size()/2);
+		}
+		std::fprintf(stderr," cells/edges\n");std::fflush(stderr);
+		std::fprintf(stderr,"[pressure-gpu-setup] solver ready in %.1f ms; device estimate %.2f GiB\n",
+			std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-solver_begin).count(),
+			static_cast<double>(bytes_)/(1024.0*1024.0*1024.0));
+		std::fflush(stderr);
 	}
-	DeviceCompositeAmrPressureSolver::~DeviceCompositeAmrPressureSolver(){for(void* pointer:{(void*)r_,(void*)z_,(void*)direction_,(void*)Ad_,(void*)t_,(void*)correction_,(void*)defect_rhs_,(void*)gmres_v_,(void*)gmres_z_,(void*)gmres_recycle_u_,(void*)gmres_recycle_c_,(void*)diagonal_,(void*)active_,(void*)aggregate_,(void*)aggregate_restrict_offset_,(void*)aggregate_restrict_dof_,(void*)base_neighbors_,(void*)base_extra_a_,(void*)base_extra_b_,(void*)base_extra_incident_dof_,(void*)base_extra_incident_offset_,(void*)base_extra_incident_edge_,(void*)base_positive_,(void*)base_diagonal_,(void*)base_extra_coefficient_,(void*)base_rhs_,(void*)base_x_,(void*)base_tmp_,(void*)schwarz_block_offset_,(void*)schwarz_factor_offset_,(void*)schwarz_dof_,(void*)schwarz_pivot_,(void*)schwarz_lu_,(void*)schwarz_rhs_})if(pointer)cudaFree(pointer);}
-	void DeviceCompositeAmrPressureSolver::apply_preconditioner(const Real* residual,Real* output)
+	DeviceCompositeAmrPressureSolver::~DeviceCompositeAmrPressureSolver()
 	{
-		precondition_kernel<<<(n_+255)/256,256>>>(residual,output,diagonal_,active_,n_);check(cudaMemset(base_x_,0,static_cast<std::size_t>(base_cells_)*sizeof(Real)),"clear AMR base correction");restrict_aggregate_gather_kernel<<<(base_cells_+255)/256,256>>>(aggregate_restrict_offset_,aggregate_restrict_dof_,residual,base_cells_,base_rhs_);Real* current=base_x_;Real* next=base_tmp_;constexpr int sweeps=16;for(int sweep=0;sweep<sweeps;++sweep){coarse_jacobi_kernel<<<(base_cells_+255)/256,256>>>(base_rhs_,current,next,base_positive_,base_diagonal_,base_neighbors_,base_bricks_,brick_size_,Real(0.7));if(base_extra_incident_dof_count_)coarse_extra_jacobi_gather_kernel<<<(base_extra_incident_dof_count_+255)/256,256>>>(base_extra_incident_dof_,base_extra_incident_offset_,base_extra_incident_edge_,base_extra_incident_dof_count_,base_extra_a_,base_extra_b_,base_extra_coefficient_,current,base_diagonal_,Real(0.7),next);Real* swap=current;current=next;next=swap;}prolong_aggregate_kernel<<<(n_+255)/256,256>>>(aggregate_,active_,n_,base_offset_,base_cells_,current,output);
+		for(AlgebraicMgLevel& level:mg_levels_)
+			for(void* pointer:{(void*)level.row_offset,(void*)level.neighbour,(void*)level.coefficient,
+				(void*)level.diagonal,(void*)level.rhs,(void*)level.x,(void*)level.temporary,
+				(void*)level.residual,(void*)level.aggregate,(void*)level.restrict_offset,
+				(void*)level.restrict_dof})if(pointer)cudaFree(pointer);
+		for(void* pointer:{(void*)r_,(void*)z_,(void*)direction_,(void*)Ad_,(void*)t_,
+			(void*)correction_,(void*)defect_rhs_,(void*)gmres_v_,(void*)gmres_z_,
+			(void*)gmres_recycle_u_,(void*)gmres_recycle_c_,(void*)diagonal_,(void*)active_,
+			(void*)aggregate_,(void*)aggregate_restrict_offset_,(void*)aggregate_restrict_dof_,
+			(void*)schwarz_block_offset_,(void*)schwarz_factor_offset_,(void*)schwarz_dof_,
+			(void*)schwarz_pivot_,(void*)schwarz_lu_,(void*)schwarz_rhs_})if(pointer)cudaFree(pointer);
 	}
-	void DeviceCompositeAmrPressureSolver::apply_irregular_schwarz(const Real* residual,Real* output)
+	void DeviceCompositeAmrPressureSolver::apply_mg_level(int level_index)
 	{
-		check(cudaMemset(output,0,static_cast<std::size_t>(n_)*sizeof(Real)),"clear irregular Schwarz correction");
+		AlgebraicMgLevel& level=mg_levels_[level_index];
+		auto smooth=[&](int sweeps)
+		{
+			for(int sweep=0;sweep<sweeps;++sweep)
+			{
+				algebraic_jacobi_kernel<<<(level.cells+255)/256,256>>>(level.rhs,level.x,
+					level.temporary,level.row_offset,level.neighbour,level.coefficient,
+					level.diagonal,level.cells,PressureReal(2.0/3.0));
+				std::swap(level.x,level.temporary);
+			}
+		};
+		if(level_index+1==static_cast<int>(mg_levels_.size())){smooth(96);return;}
+		smooth(2);
+		algebraic_residual_kernel<<<(level.cells+255)/256,256>>>(level.rhs,level.x,
+			level.residual,level.row_offset,level.neighbour,level.coefficient,level.diagonal,level.cells);
+		AlgebraicMgLevel& coarse=mg_levels_[level_index+1];
+		restrict_aggregate_gather_kernel<<<(coarse.cells+255)/256,256>>>(level.restrict_offset,
+			level.restrict_dof,level.residual,coarse.cells,coarse.rhs);
+		check(cudaMemset(coarse.x,0,static_cast<std::size_t>(coarse.cells)*sizeof(PressureReal)),
+			"clear pressure MG coarse correction");
+		apply_mg_level(level_index+1);
+		algebraic_prolong_add_kernel<<<(level.cells+255)/256,256>>>(level.aggregate,level.cells,
+			coarse.x,level.x);
+		smooth(2);
+	}
+	void DeviceCompositeAmrPressureSolver::apply_preconditioner(const PressureReal* residual,PressureReal* output)
+	{
+		constexpr PressureReal omega=PressureReal(2.0/3.0);
+		// Symmetric fine-grid smoothing around the Galerkin coarse correction. This is
+		// the missing top stage of the V-cycle: a direct jump from finest AMR cells to
+		// level 0 cannot represent the intermediate wavelengths.
+		precondition_kernel<<<(n_+255)/256,256>>>(residual,output,diagonal_,active_,n_,omega);
+		op_.apply_orthogonal(output,t_);
+		jacobi_correction_kernel<<<(n_+255)/256,256>>>(residual,t_,output,diagonal_,active_,n_,omega);
+		if(mg_levels_.empty())return;
+		AlgebraicMgLevel& base=mg_levels_.front();
+		check(cudaMemset(base.x,0,static_cast<std::size_t>(base.cells)*sizeof(PressureReal)),
+			"clear AMR base multigrid correction");
+		op_.apply_orthogonal(output,t_);
+		restrict_aggregate_difference_gather_kernel<<<(base.cells+255)/256,256>>>(
+			aggregate_restrict_offset_,aggregate_restrict_dof_,residual,t_,base.cells,base.rhs);
+		apply_mg_level(0);
+		prolong_aggregate_kernel<<<(n_+255)/256,256>>>(aggregate_,active_,n_,base_offset_,
+			base_cells_,base.x,output);
+		for(int sweep=0;sweep<2;++sweep)
+		{
+			op_.apply_orthogonal(output,t_);
+			jacobi_correction_kernel<<<(n_+255)/256,256>>>(residual,t_,output,diagonal_,active_,n_,omega);
+		}
+	}
+	void DeviceCompositeAmrPressureSolver::apply_irregular_schwarz(const PressureReal* residual,PressureReal* output)
+	{
+		check(cudaMemset(output,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),"clear irregular Schwarz correction");
 		if(schwarz_block_count_)irregular_schwarz_lu_kernel<<<(schwarz_block_count_+127)/128,128>>>(
 			schwarz_block_offset_,schwarz_factor_offset_,schwarz_dof_,schwarz_pivot_,schwarz_lu_,
 			residual,schwarz_rhs_,output,schwarz_block_count_);
 	}
-	void DeviceCompositeAmrPressureSolver::trace_failure_residual(const Real* residual) const
+	void DeviceCompositeAmrPressureSolver::trace_failure_residual(const PressureReal* residual) const
 	{
 		if(!trace_system_)return;
 		const CompositeAmrPressureSystem& system=*trace_system_;
-		std::vector<Real> host(n_);check(cudaMemcpy(host.data(),residual,
-			static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToHost),
+		std::vector<PressureReal> host(n_);check(cudaMemcpy(host.data(),residual,
+			static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToHost),
 			"download failed pressure residual diagnostic");
 		std::vector<unsigned char> eb(n_,0),gauge(n_,0);
 		for(const CoarseFinePressureConnection& edge:system.embedded)
@@ -992,21 +1272,24 @@ namespace paracfd::core
 				(q<static_cast<int>(system.freestream_connected.size())&&system.freestream_connected[q])?1:0,component_of[q]);
 		}
 	}
-	AmrGpuSolveResult DeviceCompositeAmrPressureSolver::solve_orthogonal(Real* pressure,const Real* rhs,double tolerance,int max_iterations,bool warm_start)
+	AmrGpuSolveResult DeviceCompositeAmrPressureSolver::solve_orthogonal(PressureReal* pressure,const PressureReal* rhs,double tolerance,int max_iterations,bool warm_start)
 	{
 		AmrGpuSolveResult result;
-		if(!warm_start)check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(Real)),"clear composite AMR pressure");
+		const bool trace=std::getenv("PARACFD_PRESSURE_TRACE")!=nullptr;
+		static thread_local int trace_solve_counter=0;
+		const int trace_solve=trace?++trace_solve_counter:0;
+		if(!warm_start)check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),"clear composite AMR pressure");
 		const double rhs2=dot_active(rhs,rhs,active_,n_);
 		if(rhs2==0)
 		{
-			check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(Real)),"clear zero-RHS composite AMR pressure");
+			check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),"clear zero-RHS composite AMR pressure");
 			result.relative_residual=0;result.converged=true;return result;
 		}
 		if(!std::isfinite(rhs2)||rhs2<0){result.relative_residual=std::numeric_limits<double>::infinity();return result;}
 		auto true_residual=[&]()
 		{
 			op_.apply_orthogonal(pressure,t_);
-			check(cudaMemcpy(r_,rhs,static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),"reset true composite residual");
+			check(cudaMemcpy(r_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"reset true composite residual");
 			subtract_kernel<<<(n_+255)/256,256>>>(r_,t_,active_,n_);
 			return dot_active(r_,r_,active_,n_);
 		};
@@ -1014,7 +1297,7 @@ namespace paracfd::core
 		if(warm_start)residual2=true_residual();
 		else
 		{
-			check(cudaMemcpy(r_,rhs,static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),"initial orthogonal AMR residual");
+			check(cudaMemcpy(r_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"initial orthogonal AMR residual");
 			residual2=rhs2;
 		}
 		result.relative_residual=std::sqrt(residual2/rhs2);if(!std::isfinite(result.relative_residual))return result;if(result.relative_residual<=tolerance){result.converged=true;return result;}
@@ -1022,7 +1305,7 @@ namespace paracfd::core
 		// The orthogonal finite-volume operator is SPD.  Keep its inner inverse on
 		// PCG: the full affine-corrected operator is handled by the outer flexible
 		// GMRES, so exposing PCG to that nonsymmetric correction is neither required
-		// nor mathematically valid.  Periodic true-residual restarts bound FP32
+		// nor mathematically valid. Periodic true-residual restarts bound recurrence
 		// recurrence drift without interpreting a small positive p.A.p as breakdown.
 		auto restart=[&]()->double
 		{
@@ -1030,32 +1313,90 @@ namespace paracfd::core
 			copy_active_kernel<<<(n_+255)/256,256>>>(z_,direction_,active_,n_);
 			return dot_active(r_,z_,active_,n_);
 		};
-		double rz=restart();if(!(rz>0)||!std::isfinite(rz))return result;
-		constexpr int reliable_update_interval=32;
+		double rz=restart();
+		if(!(rz>0)||!std::isfinite(rz))
+		{
+			if(trace)std::fprintf(stderr,"[pressure-pcg] solve=%d stopped before iteration: r.z=%.9e\n",trace_solve,rz);
+			return result;
+		}
+		// A multilevel V-cycle removes the long-wavelength modes that previously made
+		// frequent recurrence replacement necessary. Restarting every 32 iterations
+		// now discards useful conjugacy before the remaining cut-cell modes converge.
+		// The true residual is still checked immediately whenever the recurrence reaches
+		// the target, and periodically here to keep roundoff drift bounded.
+		constexpr int reliable_update_interval=128;
+		const char* stop_reason="maximum iterations";
 		for(int iteration=0;iteration<max_iterations;++iteration)
 		{
-			op_.apply_orthogonal(direction_,Ad_);const double pAp=dot_active(direction_,Ad_,active_,n_);if(!(pAp>0)||!std::isfinite(pAp))break;const double alpha=rz/pAp;if(!std::isfinite(alpha)||!std::isfinite(static_cast<Real>(alpha)))break;update_pressure_residual_kernel<<<(n_+255)/256,256>>>(pressure,r_,direction_,Ad_,static_cast<Real>(alpha),active_,n_);
+			op_.apply_orthogonal(direction_,Ad_);
+			const double pAp=dot_active(direction_,Ad_,active_,n_);
+			if(!(pAp>0)||!std::isfinite(pAp)){stop_reason="non-positive p.A.p";break;}
+			const double alpha=rz/pAp;
+			if(!std::isfinite(alpha)||!std::isfinite(static_cast<PressureReal>(alpha))){stop_reason="unrepresentable alpha";break;}
+			update_pressure_residual_kernel<<<(n_+255)/256,256>>>(pressure,r_,direction_,Ad_,static_cast<PressureReal>(alpha),active_,n_);
 			residual2=dot_active(r_,r_,active_,n_);
-			result.iterations=iteration+1;result.relative_residual=std::sqrt(residual2/rhs2);if(!std::isfinite(result.relative_residual))break;const bool reliable=(iteration+1)%reliable_update_interval==0;
+			result.iterations=iteration+1;result.relative_residual=std::sqrt(residual2/rhs2);
+			if(!std::isfinite(result.relative_residual)){stop_reason="non-finite recurrence residual";break;}
+			const bool reliable=(iteration+1)%reliable_update_interval==0;
 			if(result.relative_residual<=tolerance||reliable)
 			{
 				residual2=true_residual();result.relative_residual=std::sqrt(residual2/rhs2);
-				if(result.relative_residual<=tolerance){result.converged=true;break;}
-				rz=restart();if(!(rz>0)||!std::isfinite(rz))break;continue;
+				if(trace&&reliable)std::fprintf(stderr,"[pressure-pcg] solve=%d iteration=%d true-residual=%.9e target=%.9e\n",trace_solve,result.iterations,result.relative_residual,tolerance);
+				if(result.relative_residual<=tolerance){result.converged=true;stop_reason="target reached";break;}
+				rz=restart();if(!(rz>0)||!std::isfinite(rz)){stop_reason="invalid reliable-update r.z";break;}continue;
 			}
-			apply_preconditioner(r_,z_);const double next_rz=dot_active(r_,z_,active_,n_);if(!(next_rz>0)||!std::isfinite(next_rz))break;const double beta=next_rz/rz;if(!std::isfinite(beta)||!std::isfinite(static_cast<Real>(beta)))break;update_direction_kernel<<<(n_+255)/256,256>>>(z_,direction_,static_cast<Real>(beta),active_,n_);rz=next_rz;
+			apply_preconditioner(r_,z_);const double next_rz=dot_active(r_,z_,active_,n_);
+			if(!(next_rz>0)||!std::isfinite(next_rz)){stop_reason="invalid r.z";break;}
+			const double beta=next_rz/rz;
+			if(!std::isfinite(beta)||!std::isfinite(static_cast<PressureReal>(beta))){stop_reason="unrepresentable beta";break;}
+			update_direction_kernel<<<(n_+255)/256,256>>>(z_,direction_,static_cast<PressureReal>(beta),active_,n_);rz=next_rz;
 		}
 		if(!result.converged)
 		{
 			residual2=true_residual();result.relative_residual=std::sqrt(residual2/rhs2);
 			result.converged=std::isfinite(result.relative_residual)&&result.relative_residual<=tolerance;
 		}
+		if(trace)std::fprintf(stderr,"[pressure-pcg] solve=%d finished iterations=%d true-residual=%.9e converged=%d reason=%s\n",trace_solve,result.iterations,result.relative_residual,result.converged?1:0,stop_reason);
 		check(cudaDeviceSynchronize(),"solve orthogonal composite AMR pressure with PCG");return result;
 	}
 
-	AmrGpuSolveResult DeviceCompositeAmrPressureSolver::solve(Real* pressure,const Real* rhs,
+	AmrGpuSolveResult DeviceCompositeAmrPressureSolver::solve(PressureReal* pressure,const PressureReal* rhs,
 		double tolerance,int max_iterations,bool warm_start)
 	{
+		// Production uses the symmetric two-point finite-volume operator.  The former
+		// full non-orthogonal path nested an iterative PCG solve inside every flexible
+		// GMRES basis vector, making one projection thousands of full-grid GPU passes.
+		// Keep that path available only for diagnostics while the production solve and
+		// flux update use the same conservative orthogonal discretization.
+		if(!full_nonorthogonal_)
+		{
+			// The historical implementation split the configured work into one solve plus
+			// four defect corrections. On large FP32 grids those small corrections rounded
+			// away when added to the much larger impulse-pressure field. Preserve the same
+			// total work budget in one continuous multigrid-PCG solve instead.
+			(void)warm_start;
+			const bool trace=std::getenv("PARACFD_PRESSURE_TRACE")!=nullptr;
+			const double rhs2=dot_active(rhs,rhs,active_,n_);
+			const int total_budget=max_iterations>std::numeric_limits<int>::max()/5?
+				max_iterations:5*max_iterations;
+			AmrGpuSolveResult result=solve_orthogonal(
+				pressure,rhs,std::max(tolerance,1e-4),total_budget,false);
+			if(!(rhs2>0)||!std::isfinite(rhs2))return result;
+			op_.apply_orthogonal(pressure,Ad_);
+			check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),
+				cudaMemcpyDeviceToDevice),"copy final orthogonal pressure defect");
+			subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
+			result.relative_residual=std::sqrt(dot_active(defect_rhs_,defect_rhs_,active_,n_)/rhs2);
+			result.converged=std::isfinite(result.relative_residual)&&result.relative_residual<=tolerance;
+			if(trace&&!result.converged)trace_failure_residual(defect_rhs_);
+			if(trace)
+			{
+				std::fprintf(stderr,"[pressure-solver] production final converged=%d iterations=%d residual=%.9e target=%.9e\n",
+					result.converged?1:0,result.iterations,result.relative_residual,tolerance);
+				std::fflush(stderr);
+			}
+			return result;
+		}
 		// Flexible right-preconditioned GCRO/LGMRES. U contains realized solution-space
 		// corrections and C=A*U contains their orthonormal images. Keeping both is what
 		// makes recycling valid even though the inner A0 solve is a variable/nonlinear
@@ -1069,14 +1410,14 @@ namespace paracfd::core
 		if(!warm_start)
 		{
 			gmres_recycle_count_=0;
-			if(max_iterations>0)check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(Real)),
+			if(max_iterations>0)check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),
 				"clear GCRO composite pressure");
 		}
 		if(max_iterations<=0)return result;
 		const double rhs2=dot_active(rhs,rhs,active_,n_);
 		if(rhs2==0)
 		{
-			check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(Real)),
+			check(cudaMemset(pressure,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),
 				"clear zero-RHS GCRO pressure");
 			result.converged=true;
 			return result;
@@ -1089,14 +1430,14 @@ namespace paracfd::core
 		auto true_residual=[&]()
 		{
 			op_.apply(pressure,Ad_);
-			check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(Real),
+			check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),
 				cudaMemcpyDeviceToDevice),"copy GCRO true residual");
 			subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
 			return dot_active(defect_rhs_,defect_rhs_,active_,n_);
 		};
 		auto finite_real=[](double value)
 		{
-			return std::isfinite(value)&&std::isfinite(static_cast<Real>(value));
+			return std::isfinite(value)&&std::isfinite(static_cast<PressureReal>(value));
 		};
 		auto recycle_u=[&](int column)
 		{
@@ -1114,7 +1455,7 @@ namespace paracfd::core
 		{
 			++restart_index;
 			// Minimize over the retained space first. The paired U/C updates preserve
-			// r=b-Ax in exact arithmetic.  In FP32, however, adding a small U update to
+			// r=b-Ax in exact arithmetic. In finite precision, however, adding a small U update to
 			// an already large pressure can round differently from subtracting the paired
 			// C update from the residual.  Always measure that consistency against the
 			// true operator before trusting the recycled residual.  A pair whose gap is
@@ -1134,9 +1475,9 @@ namespace paracfd::core
 					const double value=dot_active(recycle_c(column),defect_rhs_,active_,n_);
 					if(!finite_real(value)){recycle_valid=false;break;}
 					axpy_active_kernel<<<(n_+255)/256,256>>>(correction_,recycle_u(column),
-						static_cast<Real>(value),active_,n_);
+					static_cast<PressureReal>(value),active_,n_);
 					axpy_active_kernel<<<(n_+255)/256,256>>>(defect_rhs_,recycle_c(column),
-						static_cast<Real>(-value),active_,n_);
+					static_cast<PressureReal>(-value),active_,n_);
 				}
 			const double predicted_residual2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
 			double recycle_gap2=0,true_recycled2=residual_before_recycle2;
@@ -1144,13 +1485,13 @@ namespace paracfd::core
 			{
 				copy_active_kernel<<<(n_+255)/256,256>>>(defect_rhs_,r_,active_,n_);
 				op_.apply(correction_,Ad_);
-				check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),"copy transactional recycled true residual");
+				check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"copy transactional recycled true residual");
 				subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
 				true_recycled2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
-				axpy_active_kernel<<<(n_+255)/256,256>>>(r_,defect_rhs_,Real(-1),active_,n_);
+				axpy_active_kernel<<<(n_+255)/256,256>>>(r_,defect_rhs_,PressureReal(-1),active_,n_);
 				recycle_gap2=dot_active(r_,r_,active_,n_);
 			}
-			const double requested_gap=Real(0.25)*tolerance*std::sqrt(rhs2);
+			const double requested_gap=PressureReal(0.25)*tolerance*std::sqrt(rhs2);
 			const bool recycle_accurate=!recycle_attempted||
 				(std::isfinite(recycle_gap2)&&std::sqrt(recycle_gap2)<=requested_gap&&
 				 true_recycled2<residual_before_recycle2);
@@ -1188,12 +1529,12 @@ namespace paracfd::core
 				cosine(cycle),sine(cycle),g(cycle+1),y(cycle);
 			g[0]=beta;
 			scaled_copy_active_kernel<<<(n_+255)/256,256>>>(gmres_v_,defect_rhs_,
-				static_cast<Real>(1.0/beta),active_,n_);
+				static_cast<PressureReal>(1.0/beta),active_,n_);
 			int used=0;
 			for(int column=0;column<cycle;++column)
 			{
-				Real* const v=gmres_v_+static_cast<std::size_t>(column)*n_;
-				Real* const z=gmres_z_+static_cast<std::size_t>(column)*n_;
+				PressureReal* const v=gmres_v_+static_cast<std::size_t>(column)*n_;
+				PressureReal* const z=gmres_z_+static_cast<std::size_t>(column)*n_;
 				// The orthogonal finite-volume operator is the coercive part of the full
 				// non-orthogonal system.  Approximately invert it for each outer basis
 				// vector; retaining z_j makes this a flexible right-preconditioner even
@@ -1208,7 +1549,7 @@ namespace paracfd::core
 				};
 				const AmrGpuSolveResult inner=solve_orthogonal(z,v,2e-2,80,false);record_inner(inner);
 				op_.apply(z,Ad_);
-				check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(Real),
+				check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),
 					cudaMemcpyDeviceToDevice),"copy first-stage full-operator defect");
 				subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
 				const double source2=dot_active(v,v,active_,n_);
@@ -1225,9 +1566,9 @@ namespace paracfd::core
 					{
 						schwarz_omega=numerator/image2;
 						copy_active_kernel<<<(n_+255)/256,256>>>(z,direction_,active_,n_);
-						axpy_active_kernel<<<(n_+255)/256,256>>>(direction_,correction_,static_cast<Real>(schwarz_omega),active_,n_);
+						axpy_active_kernel<<<(n_+255)/256,256>>>(direction_,correction_,static_cast<PressureReal>(schwarz_omega),active_,n_);
 						op_.apply(direction_,Ad_);
-						check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),"copy Schwarz-corrected full-operator defect");
+						check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"copy Schwarz-corrected full-operator defect");
 						subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
 						const double corrected2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
 						++result.irregular_schwarz_applications;
@@ -1236,7 +1577,7 @@ namespace paracfd::core
 						if(corrected2<defect2){copy_active_kernel<<<(n_+255)/256,256>>>(direction_,z,active_,n_);defect2=corrected2;}
 						else
 						{
-							op_.apply(z,Ad_);check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),"restore pre-Schwarz full-operator defect");subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);schwarz_omega=0;schwarz_ratio=1;
+							op_.apply(z,Ad_);check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"restore pre-Schwarz full-operator defect");subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);schwarz_omega=0;schwarz_ratio=1;
 						}
 					}
 				}
@@ -1250,7 +1591,7 @@ namespace paracfd::core
 				const double post_schwarz_eta=source2>0?std::sqrt(defect2/source2):std::numeric_limits<double>::infinity();
 				if(std::isfinite(post_schwarz_eta)&&post_schwarz_eta>0.25&&defect2>0)
 				{
-					Real* const defect_correction=gmres_v_+static_cast<std::size_t>(column+1)*n_;
+					PressureReal* const defect_correction=gmres_v_+static_cast<std::size_t>(column+1)*n_;
 					const AmrGpuSolveResult second=solve_orthogonal(
 						defect_correction,defect_rhs_,2e-2,80,false);record_inner(second);
 					second_iterations=second.iterations;second_residual=second.relative_residual;
@@ -1261,12 +1602,12 @@ namespace paracfd::core
 						finite_real(numerator/image2))defect_omega=numerator/image2;
 					if(defect_omega!=0)
 						axpy_active_kernel<<<(n_+255)/256,256>>>(z,defect_correction,
-							static_cast<Real>(defect_omega),active_,n_);
-					// Flexible Arnoldi must use the true image of the FP32 vector actually
+							static_cast<PressureReal>(defect_omega),active_,n_);
+					// Flexible Arnoldi must use the true image of the vector actually
 					// stored in z. q1+omega*q2 is only the nominal image: the rounded z update
 					// can differ by pressure-vector ULPs and would violate A*z=Ad.
 					op_.apply(z,Ad_);
-					check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(Real),
+					check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),
 						cudaMemcpyDeviceToDevice),"copy corrected full-operator defect");
 					subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
 					defect2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
@@ -1291,16 +1632,16 @@ namespace paracfd::core
 						const double value=dot_active(recycle_c(recycled),Ad_,active_,n_);
 						if(!finite_real(value)){column_valid=false;break;}
 						axpy_active_kernel<<<(n_+255)/256,256>>>(Ad_,recycle_c(recycled),
-							static_cast<Real>(-value),active_,n_);
+							static_cast<PressureReal>(-value),active_,n_);
 						axpy_active_kernel<<<(n_+255)/256,256>>>(z,recycle_u(recycled),
-							static_cast<Real>(-value),active_,n_);
+							static_cast<PressureReal>(-value),active_,n_);
 					}
 				if(trace&&gmres_recycle_count_&&(column==0||column+1==cycle))
 				{
 					op_.apply(z,t_);
-					check(cudaMemcpy(r_,t_,static_cast<std::size_t>(n_)*sizeof(Real),
+					check(cudaMemcpy(r_,t_,static_cast<std::size_t>(n_)*sizeof(PressureReal),
 						cudaMemcpyDeviceToDevice),"copy traced recycled direction image");
-					axpy_active_kernel<<<(n_+255)/256,256>>>(r_,Ad_,Real(-1),active_,n_);
+					axpy_active_kernel<<<(n_+255)/256,256>>>(r_,Ad_,PressureReal(-1),active_,n_);
 					const double gap2=dot_active(r_,r_,active_,n_),image2=dot_active(t_,t_,active_,n_);
 					std::fprintf(stderr,"[pressure-gcro] restart=%d column=%d recycled A*z gap=%.9e\n",
 						restart_index,column+1,image2>0?std::sqrt(gap2/image2):0);
@@ -1309,26 +1650,26 @@ namespace paracfd::core
 				const double arnoldi_scale=std::sqrt(std::max(0.0,
 					dot_active(Ad_,Ad_,active_,n_)));
 				if(!(arnoldi_scale>0)||!std::isfinite(arnoldi_scale))break;
-				// Twice-modified Gram-Schmidt keeps an FP32 basis usable while all scalar
+				// Twice-modified Gram-Schmidt keeps the device basis usable while all scalar
 				// orthogonalization and the small Hessenberg solve remain FP64 on the host.
 				for(int pass=0;pass<2&&column_valid;++pass)
 					for(int row=0;row<=column;++row)
 					{
-						Real* const basis=gmres_v_+static_cast<std::size_t>(row)*n_;
+						PressureReal* const basis=gmres_v_+static_cast<std::size_t>(row)*n_;
 						const double value=dot_active(basis,Ad_,active_,n_);
 						if(!finite_real(value)){column_valid=false;break;}
 						h[static_cast<std::size_t>(row)*cycle+column]+=value;
 						axpy_active_kernel<<<(n_+255)/256,256>>>(Ad_,basis,
-							static_cast<Real>(-value),active_,n_);
+							static_cast<PressureReal>(-value),active_,n_);
 					}
 				if(!column_valid)break;
 				double next_norm=std::sqrt(std::max(0.0,dot_active(Ad_,Ad_,active_,n_)));
-				const double basis_floor=64*static_cast<double>(std::numeric_limits<Real>::epsilon())*
+				const double basis_floor=64*static_cast<double>(std::numeric_limits<PressureReal>::epsilon())*
 					arnoldi_scale;
 				if(next_norm>basis_floor&&finite_real(1.0/next_norm))
 					scaled_copy_active_kernel<<<(n_+255)/256,256>>>(
 						gmres_v_+static_cast<std::size_t>(column+1)*n_,Ad_,
-						static_cast<Real>(1.0/next_norm),active_,n_);
+						static_cast<PressureReal>(1.0/next_norm),active_,n_);
 				else next_norm=0;
 				h[static_cast<std::size_t>(column+1)*cycle+column]=next_norm;
 				for(int row=0;row<column;++row)
@@ -1362,13 +1703,13 @@ namespace paracfd::core
 			}
 			if(used==0)break;
 
-			check(cudaMemset(correction_,0,static_cast<std::size_t>(n_)*sizeof(Real)),
+			check(cudaMemset(correction_,0,static_cast<std::size_t>(n_)*sizeof(PressureReal)),
 				"clear GCRO cycle correction");
 			for(int column=0;column<used;++column)
 				axpy_active_kernel<<<(n_+255)/256,256>>>(correction_,
-					gmres_z_+static_cast<std::size_t>(column)*n_,static_cast<Real>(y[column]),
+					gmres_z_+static_cast<std::size_t>(column)*n_,static_cast<PressureReal>(y[column]),
 					active_,n_);
-			axpy_active_kernel<<<(n_+255)/256,256>>>(pressure,correction_,Real(1),active_,n_);
+			axpy_active_kernel<<<(n_+255)/256,256>>>(pressure,correction_,PressureReal(1),active_,n_);
 			residual2=true_residual();result.relative_residual=std::sqrt(residual2/rhs2);
 			const double estimated_relative_residual=std::abs(g[used])/std::sqrt(rhs2);
 			if(trace)std::fprintf(stderr,"[pressure-gcro] restart=%d used=%d end-it=%d estimated=%.9e true=%.9e recycle-before=%d\n",
@@ -1388,14 +1729,14 @@ namespace paracfd::core
 					const double value=dot_active(recycle_c(recycled),Ad_,active_,n_);
 					if(!finite_real(value)){candidate_valid=false;break;}
 					axpy_active_kernel<<<(n_+255)/256,256>>>(Ad_,recycle_c(recycled),
-						static_cast<Real>(-value),active_,n_);
+						static_cast<PressureReal>(-value),active_,n_);
 					axpy_active_kernel<<<(n_+255)/256,256>>>(correction_,recycle_u(recycled),
-						static_cast<Real>(-value),active_,n_);
+						static_cast<PressureReal>(-value),active_,n_);
 				}
 			const double candidate_after=candidate_valid?
 				std::sqrt(std::max(0.0,dot_active(Ad_,Ad_,active_,n_))):0;
-			const double novelty_floor=sizeof(Real)==4?
-				std::max(1e-5,256*static_cast<double>(std::numeric_limits<Real>::epsilon())):1e-12;
+			const double novelty_floor=sizeof(PressureReal)==4?
+				std::max(1e-5,256*static_cast<double>(std::numeric_limits<PressureReal>::epsilon())):1e-12;
 			candidate_valid=candidate_valid&&std::isfinite(candidate_after)&&
 				candidate_after>novelty_floor*candidate_before&&finite_real(1.0/candidate_after);
 			if(candidate_valid&&recycle_enabled)
@@ -1405,25 +1746,25 @@ namespace paracfd::core
 					for(int recycled=1;recycled<gmres_recycle_capacity_;++recycled)
 					{
 						check(cudaMemcpy(recycle_u(recycled-1),recycle_u(recycled),
-							static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),
+						static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),
 							"shift GCRO solution recycle basis");
 						check(cudaMemcpy(recycle_c(recycled-1),recycle_c(recycled),
-							static_cast<std::size_t>(n_)*sizeof(Real),cudaMemcpyDeviceToDevice),
+						static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),
 							"shift GCRO image recycle basis");
 					}
 					--gmres_recycle_count_;
 				}
 				scaled_copy_active_kernel<<<(n_+255)/256,256>>>(recycle_u(gmres_recycle_count_),
-					correction_,static_cast<Real>(1.0/candidate_after),active_,n_);
+					correction_,static_cast<PressureReal>(1.0/candidate_after),active_,n_);
 				scaled_copy_active_kernel<<<(n_+255)/256,256>>>(recycle_c(gmres_recycle_count_),
-					Ad_,static_cast<Real>(1.0/candidate_after),active_,n_);
+					Ad_,static_cast<PressureReal>(1.0/candidate_after),active_,n_);
 				++gmres_recycle_count_;
 				if(trace)
 				{
 					op_.apply(recycle_u(gmres_recycle_count_-1),t_);
-					check(cudaMemcpy(r_,t_,static_cast<std::size_t>(n_)*sizeof(Real),
+					check(cudaMemcpy(r_,t_,static_cast<std::size_t>(n_)*sizeof(PressureReal),
 						cudaMemcpyDeviceToDevice),"copy traced stored recycle image");
-					axpy_active_kernel<<<(n_+255)/256,256>>>(r_,recycle_c(gmres_recycle_count_-1),Real(-1),active_,n_);
+					axpy_active_kernel<<<(n_+255)/256,256>>>(r_,recycle_c(gmres_recycle_count_-1),PressureReal(-1),active_,n_);
 					const double gap2=dot_active(r_,r_,active_,n_),image2=dot_active(t_,t_,active_,n_);
 					std::fprintf(stderr,"[pressure-gcro] restart=%d stored A*U-C gap=%.9e\n",
 						restart_index,image2>0?std::sqrt(gap2/image2):0);
@@ -1451,12 +1792,20 @@ namespace paracfd::core
 	DeviceCompositeAmrProjection::DeviceCompositeAmrProjection(const CompositeAmrPressureSystem& system,DeviceAmrFields& fields)
 		:solver_(system),fields_(&fields)
 	{
+		const auto bridge_begin=std::chrono::steady_clock::now();
+		const bool bridge_trace=std::getenv("PARACFD_GPU_SETUP_TRACE")!=nullptr;
+		auto trace_bridge=[&](const char* stage){if(bridge_trace){std::fprintf(stderr,"[pressure-gpu-setup] projection bridge: %s\n",stage);std::fflush(stderr);}};
+		std::fprintf(stderr,"[pressure-gpu-setup] projection bridge begin\n");
+		std::fflush(stderr);
 		if(!system.hierarchy)throw std::invalid_argument("composite AMR projection has no hierarchy");level_count_=static_cast<int>(system.hierarchy->levels().size());if(fields.level_count()!=level_count_)throw std::invalid_argument("composite AMR projection field hierarchy mismatch");storage_size_=system.storage_size;brick_size_=system.brick_size;outlet_=system.pressure_outlet_xmax;coarse_fine_count_=static_cast<int>(system.coarse_fine.size());embedded_count_=static_cast<int>(system.embedded.size());special_count_=coarse_fine_count_+embedded_count_;
-		std::vector<DeviceCompositeAmrFluxLevelView> views(level_count_);brick_counts_.resize(level_count_);for(int level=0;level<level_count_;++level){const DeviceAmrFieldLevelView field_view=fields.level_view(level);views[level]={system.level_offset[level],system.hierarchy->levels()[level].h,field_view};brick_counts_[level]=field_view.brick_count;}levels_=upload(views,"upload composite AMR flux level views");
+		std::vector<DeviceCompositeAmrFluxLevelView> views(level_count_);brick_counts_.resize(level_count_);for(int level=0;level<level_count_;++level){const DeviceAmrFieldLevelView field_view=fields.level_view(level);views[level]={system.level_offset[level],static_cast<float>(system.hierarchy->levels()[level].h),field_view};brick_counts_[level]=field_view.brick_count;}levels_=upload(views,"upload composite AMR flux level views");
+		trace_bridge("level views");
 		active_=upload(system.active,"upload composite AMR projection active mask");cut_face_mask_=upload(system.cut_face_mask,"upload composite AMR projection cut-face mask");std::vector<Real> volume(system.volume.size());for(std::size_t q=0;q<volume.size();++q){volume[q]=static_cast<Real>(system.volume[q]);if(system.active[q]&&(!(system.volume[q]>0)||!std::isfinite(system.volume[q])||!std::isfinite(volume[q])||volume[q]<std::numeric_limits<Real>::min()))throw std::invalid_argument("active composite AMR projection volume is not representable as a positive normal production Real");}volume_=upload(volume,"upload composite AMR projection volumes");
+		trace_bridge("cell metadata");
 		std::vector<CoarseFinePressureConnection> special=system.coarse_fine;special.insert(special.end(),system.embedded.begin(),system.embedded.end());std::vector<int> first(special_count_),second(special_count_),lower_gradient_node(special_count_),upper_gradient_node(special_count_);std::vector<std::int8_t> direction(special_count_),axis(special_count_);std::vector<Real> area(special_count_),distance(special_count_),gradient_factor(special_count_),nonorthogonal_correction(static_cast<std::size_t>(special_count_)*3),upper_gradient_weight(special_count_);for(int edge=0;edge<special_count_;++edge){first[edge]=special[edge].coarse_dof;second[edge]=special[edge].fine_dof;direction[edge]=special[edge].direction;axis[edge]=special[edge].axis;area[edge]=static_cast<Real>(special[edge].open_area);distance[edge]=static_cast<Real>(special[edge].centre_distance);gradient_factor[edge]=static_cast<Real>(pressure_gradient_factor(special[edge]));lower_gradient_node[edge]=special[edge].lower_gradient_node;upper_gradient_node[edge]=special[edge].upper_gradient_node;for(int component=0;component<3;++component)nonorthogonal_correction[3*edge+component]=static_cast<Real>(special[edge].nonorthogonal_correction[component]);upper_gradient_weight[edge]=static_cast<Real>(special[edge].upper_gradient_weight);}first_dof_=upload(first,"upload composite flux first DOFs");second_dof_=upload(second,"upload composite flux second DOFs");direction_=upload(direction,"upload composite flux direction");axis_=upload(axis,"upload composite flux axes");open_area_=upload(area,"upload composite flux areas");centre_distance_=upload(distance,"upload composite flux distances");pressure_gradient_factor_=upload(gradient_factor,"upload composite flux pressure-gradient factors");special_lower_gradient_node_=upload(lower_gradient_node,"upload special lower pressure-gradient nodes");special_upper_gradient_node_=upload(upper_gradient_node,"upload special upper pressure-gradient nodes");special_nonorthogonal_correction_=upload(nonorthogonal_correction,"upload special nonorthogonal corrections");special_upper_gradient_weight_=upload(upper_gradient_weight,"upload special pressure-gradient interpolation weights");special_velocity_=allocate_zero<Real>(special_count_,"allocate composite special velocity");max_abs_scratch_=allocate_zero<Real>(1,"allocate special-velocity maximum");
 		struct SpecialIncident { int dof=0,edge=0;std::int8_t sign=0; };
 		std::vector<SpecialIncident> special_incidents;special_incidents.reserve(static_cast<std::size_t>(2)*special_count_);
+		trace_bridge("special flux arrays");
 		for(int edge=0;edge<special_count_;++edge)
 		{
 			const int lower=direction[edge]>0?first[edge]:second[edge],upper=direction[edge]>0?second[edge]:first[edge];
@@ -1488,8 +1837,10 @@ namespace paracfd::core
 		special_incident_sign_=upload(special_incident_sign,"upload deterministic special-flux signs");
 		bytes_+=special_incident_dof.size()*sizeof(int)+special_incident_offset.size()*sizeof(int)+
 			special_incident_edge.size()*sizeof(int)+special_incident_sign.size()*sizeof(std::int8_t);
-		pressure_gradient_node_count_=static_cast<int>(system.pressure_gradient_dof.size());if(pressure_gradient_node_count_){std::vector<Real> weight(static_cast<std::size_t>(system.pressure_gradient_weight.size())*3);for(std::size_t q=0;q<system.pressure_gradient_weight.size();++q)for(int component=0;component<3;++component)weight[3*q+component]=static_cast<Real>(system.pressure_gradient_weight[q][component]);pressure_gradient_node_dof_=upload(system.pressure_gradient_dof,"upload projection pressure-gradient DOFs");pressure_gradient_offset_=upload(system.pressure_gradient_offset,"upload projection pressure-gradient offsets");pressure_gradient_neighbour_=upload(system.pressure_gradient_neighbour,"upload projection pressure-gradient neighbours");pressure_gradient_weight_=upload(weight,"upload projection pressure-gradient weights");pressure_gradient_=allocate_zero<Real>(static_cast<std::size_t>(pressure_gradient_node_count_)*3,"allocate projection pressure gradients");bytes_+=system.pressure_gradient_dof.size()*sizeof(int)+system.pressure_gradient_offset.size()*sizeof(int)+system.pressure_gradient_neighbour.size()*sizeof(int)+weight.size()*sizeof(Real)+static_cast<std::size_t>(pressure_gradient_node_count_)*3*sizeof(Real);}
+		pressure_gradient_node_count_=static_cast<int>(system.pressure_gradient_dof.size());if(pressure_gradient_node_count_){std::vector<Real> weight(static_cast<std::size_t>(system.pressure_gradient_weight.size())*3);for(std::size_t q=0;q<system.pressure_gradient_weight.size();++q)for(int component=0;component<3;++component)weight[3*q+component]=static_cast<Real>(system.pressure_gradient_weight[q][component]);pressure_gradient_node_dof_=upload(system.pressure_gradient_dof,"upload projection pressure-gradient DOFs");pressure_gradient_offset_=upload(system.pressure_gradient_offset,"upload projection pressure-gradient offsets");pressure_gradient_neighbour_=upload(system.pressure_gradient_neighbour,"upload projection pressure-gradient neighbours");pressure_gradient_weight_=upload(weight,"upload projection pressure-gradient weights");pressure_gradient_=allocate_zero<PressureReal>(static_cast<std::size_t>(pressure_gradient_node_count_)*3,"allocate projection pressure gradients");bytes_+=system.pressure_gradient_dof.size()*sizeof(int)+system.pressure_gradient_offset.size()*sizeof(int)+system.pressure_gradient_neighbour.size()*sizeof(int)+weight.size()*sizeof(Real)+static_cast<std::size_t>(pressure_gradient_node_count_)*3*sizeof(PressureReal);}
+		trace_bridge("pressure-gradient arrays");
 		regular_pressure_correction_count_=static_cast<int>(system.regular_pressure_corrections.size());if(regular_pressure_correction_count_){std::vector<int> lower(regular_pressure_correction_count_),upper(regular_pressure_correction_count_),lower_node(regular_pressure_correction_count_),upper_node(regular_pressure_correction_count_),level(regular_pressure_correction_count_);std::vector<std::uint64_t> index(regular_pressure_correction_count_),mirror(regular_pressure_correction_count_,~std::uint64_t(0));std::vector<std::int8_t> correction_axis(regular_pressure_correction_count_);std::vector<Real> delta(regular_pressure_correction_count_),correction(static_cast<std::size_t>(regular_pressure_correction_count_)*3),weight(regular_pressure_correction_count_);for(int edge=0;edge<regular_pressure_correction_count_;++edge){const auto& source=system.regular_pressure_corrections[edge];lower[edge]=source.lower_dof;upper[edge]=source.upper_dof;lower_node[edge]=source.lower_gradient_node;upper_node[edge]=source.upper_gradient_node;level[edge]=source.level;correction_axis[edge]=source.axis;delta[edge]=static_cast<Real>(source.two_point_delta);weight[edge]=static_cast<Real>(source.upper_gradient_weight);for(int component=0;component<3;++component)correction[3*edge+component]=static_cast<Real>(source.nonorthogonal_correction[component]);const BrickFieldLayout layout=views[source.level].fields.layout;index[edge]=source.axis==0?layout.u_index(source.brick,source.i,source.j,source.k):(source.axis==1?layout.v_index(source.brick,source.i,source.j,source.k):layout.w_index(source.brick,source.i,source.j,source.k));const int face_coordinate=source.axis==0?source.i:(source.axis==1?source.j:source.k);if(face_coordinate==brick_size_){const int neighbour=system.hierarchy->levels()[source.level].bricks[source.brick].same_level_neighbor[2*source.axis+1];if(neighbour>=0){if(source.axis==0)mirror[edge]=layout.u_index(neighbour,0,source.j,source.k);else if(source.axis==1)mirror[edge]=layout.v_index(neighbour,source.i,0,source.k);else mirror[edge]=layout.w_index(neighbour,source.i,source.j,0);}}}regular_correction_lower_=upload(lower,"upload projection regular-correction lower DOFs");regular_correction_upper_=upload(upper,"upload projection regular-correction upper DOFs");regular_correction_lower_node_=upload(lower_node,"upload projection regular-correction lower gradient nodes");regular_correction_upper_node_=upload(upper_node,"upload projection regular-correction upper gradient nodes");regular_correction_level_=upload(level,"upload projection regular-correction levels");regular_correction_index_=upload(index,"upload projection regular-correction face indices");regular_correction_mirror_index_=upload(mirror,"upload projection regular-correction mirror indices");regular_correction_axis_=upload(correction_axis,"upload projection regular-correction axes");regular_correction_two_point_delta_=upload(delta,"upload projection regular two-point deltas");regular_correction_vector_=upload(correction,"upload projection regular nonorthogonal corrections");regular_correction_upper_weight_=upload(weight,"upload projection regular pressure-gradient interpolation");bytes_+=static_cast<std::size_t>(5*regular_pressure_correction_count_)*sizeof(int)+static_cast<std::size_t>(2*regular_pressure_correction_count_)*sizeof(std::uint64_t)+static_cast<std::size_t>(regular_pressure_correction_count_)*sizeof(std::int8_t)+static_cast<std::size_t>(5*regular_pressure_correction_count_)*sizeof(Real);}
+		trace_bridge("regular correction arrays");
 		// A coarse/fine connection is collocated with one unique fine MAC face. Keep
 		// that compact flux state synchronized with transport, then scatter the four
 		// corrected fine tiles back to their fine faces and their area-mean coarse face.
@@ -1506,6 +1857,7 @@ namespace paracfd::core
 			}
 			coarse_fine_group_count_=static_cast<int>(group_level.size());cf_fine_level_=upload(fine_level,"upload coarse/fine fine levels");cf_fine_index_=upload(fine_index,"upload coarse/fine fine face indices");cf_group_=upload(group,"upload coarse/fine group IDs");cf_group_level_=upload(group_level,"upload coarse/fine coarse levels");cf_group_index_=upload(group_index,"upload coarse/fine coarse face indices");cf_group_axis_=upload(group_axis,"upload coarse/fine group axes");cf_group_area_=upload(group_area,"upload coarse/fine group areas");cf_group_sum_=allocate_zero<Real>(coarse_fine_group_count_,"allocate coarse/fine group flux sums");bytes_+=fine_level.size()*sizeof(int)+fine_index.size()*sizeof(std::uint64_t)+group.size()*sizeof(int)+group_level.size()*sizeof(int)+group_index.size()*sizeof(std::uint64_t)+group_axis.size()*sizeof(std::int8_t)+2*group_area.size()*sizeof(Real);
 		}
+		trace_bridge("coarse/fine arrays");
 		if(embedded_count_)
 		{
 			std::unordered_map<int,int> node_map;std::vector<int> node_dof,node_a(embedded_count_),node_b(embedded_count_);std::vector<Real> transport_length(embedded_count_);auto node=[&](int dof){auto found=node_map.find(dof);if(found!=node_map.end())return found->second;const int id=static_cast<int>(node_dof.size());node_map.emplace(dof,id);node_dof.push_back(dof);return id;};for(int edge=0;edge<embedded_count_;++edge){const auto& connection=system.embedded[edge];node_a[edge]=node(connection.coarse_dof);node_b[edge]=node(connection.fine_dof);const double a_scale=std::cbrt(std::max(0.0,system.volume[connection.coarse_dof])),b_scale=std::cbrt(std::max(0.0,system.volume[connection.fine_dof]));transport_length[edge]=static_cast<Real>(std::max(connection.centre_distance,0.5*(a_scale+b_scale)));}embedded_node_count_=static_cast<int>(node_dof.size());
@@ -1531,6 +1883,7 @@ namespace paracfd::core
 			embedded_carrier_count_=static_cast<int>(carrier_node.size());eb_node_a_=upload(node_a,"upload EB transport first nodes");eb_node_b_=upload(node_b,"upload EB transport second nodes");eb_negative_edge_=upload(negative_edge,"upload EB negative graph neighbours");eb_positive_edge_=upload(positive_edge,"upload EB positive graph neighbours");eb_carrier_node_=upload(carrier_node,"upload EB transport carrier nodes");eb_carrier_level_=upload(carrier_level,"upload EB transport carrier levels");eb_carrier_index_=upload(carrier_index,"upload EB transport carrier indices");eb_carrier_axis_=upload(carrier_axis,"upload EB transport carrier axes");eb_carrier_area_=upload(carrier_area,"upload EB transport carrier areas");eb_carrier_mass_=upload(carrier_mass,"upload EB transport carrier masses");eb_node_axis_sum_=allocate_zero<Real>(static_cast<std::size_t>(embedded_node_count_)*3,"allocate EB node component sums");eb_node_axis_weight_=allocate_zero<Real>(static_cast<std::size_t>(embedded_node_count_)*3,"allocate EB node component weights");eb_node_gradient_sum_=allocate_zero<Real>(static_cast<std::size_t>(embedded_node_count_)*9,"allocate EB node gradient sums");eb_node_gradient_inverse_=upload(node_gradient_inverse,"upload EB least-squares gradient inverses");eb_edge_ls_displacement_=upload(edge_ls_displacement,"upload EB least-squares displacements");eb_edge_ls_weight_=upload(edge_ls_weight,"upload EB least-squares weights");eb_transport_length_=upload(transport_length,"upload EB aperture transport lengths");eb_transport_scratch_=allocate_zero<Real>(embedded_count_,"allocate EB aperture transport scratch");eb_diffusion_rate_=allocate_zero<Real>(embedded_count_,"allocate EB aperture diffusion rates");eb_node_diffusion_sum_=allocate_zero<Real>(static_cast<std::size_t>(embedded_node_count_)*3,"allocate EB node diffusion sums");eb_node_neighbor_count_=allocate_zero<Real>(static_cast<std::size_t>(embedded_node_count_)*3,"allocate EB node neighbour counts");eb_diffusion_scratch_=allocate_zero<Real>(embedded_count_,"allocate conservative EB diffusion scratch");bytes_+=4*node_a.size()*sizeof(int)+2*carrier_node.size()*sizeof(int)+carrier_index.size()*sizeof(std::uint64_t)+carrier_axis.size()*sizeof(std::int8_t)+2*carrier_area.size()*sizeof(Real)+static_cast<std::size_t>(embedded_node_count_)*48*sizeof(Real)+static_cast<std::size_t>(embedded_count_)*16*sizeof(Real);
 			eb_carrier_unmapped_mass_=upload(carrier_unmapped_mass,"upload EB unmapped carrier masses");bytes_+=carrier_unmapped_mass.size()*sizeof(Real);
 		}
+		trace_bridge("embedded transport arrays");
 		if(!system.surface_patches.empty())
 		{
 			std::unordered_map<int,int> wall_node_map;std::vector<int> wall_node_dof;auto wall_node=[&](int dof){if(dof<0||dof>=storage_size_||!system.active[dof])return -1;auto found=wall_node_map.find(dof);if(found!=wall_node_map.end())return found->second;const int id=static_cast<int>(wall_node_dof.size());wall_node_map.emplace(dof,id);wall_node_dof.push_back(dof);return id;};for(const auto& patch:system.surface_patches){wall_node(patch.plus_dof);wall_node(patch.minus_dof);}fabric_wall_node_count_=static_cast<int>(wall_node_dof.size());
@@ -1582,15 +1935,20 @@ namespace paracfd::core
 				unique_carrier_index.size()*sizeof(std::uint64_t)+
 				unique_carrier_axis.size()*sizeof(std::int8_t)+unique_carrier_mass.size()*sizeof(Real);
 		}
-		integrated_=allocate_zero<Real>(storage_size_,"allocate composite integrated flux");divergence_=allocate_zero<Real>(storage_size_,"allocate composite divergence");rhs_=allocate_zero<Real>(storage_size_,"allocate composite RHS");pressure_=allocate_zero<Real>(storage_size_,"allocate composite pressure");
-		bytes_+=solver_.bytes()+views.size()*sizeof(DeviceCompositeAmrFluxLevelView)+system.active.size()+system.cut_face_mask.size()*sizeof(std::uint8_t)+volume.size()*sizeof(Real)+static_cast<std::size_t>(special_count_)*(2*sizeof(int)+2*sizeof(std::int8_t)+4*sizeof(Real))+static_cast<std::size_t>(4)*storage_size_*sizeof(Real)+sizeof(Real);
+		trace_bridge("fabric wall arrays");
+		integrated_=allocate_zero<Real>(storage_size_,"allocate composite integrated flux");divergence_=allocate_zero<Real>(storage_size_,"allocate composite divergence");rhs_=allocate_zero<PressureReal>(storage_size_,"allocate composite RHS");pressure_solve_=allocate_zero<PressureReal>(storage_size_,"allocate composite pressure solve");pressure_=allocate_zero<Real>(storage_size_,"allocate composite pressure shadow");
+		bytes_+=solver_.bytes()+views.size()*sizeof(DeviceCompositeAmrFluxLevelView)+system.active.size()+system.cut_face_mask.size()*sizeof(std::uint8_t)+volume.size()*sizeof(Real)+static_cast<std::size_t>(special_count_)*(2*sizeof(int)+2*sizeof(std::int8_t)+4*sizeof(Real))+static_cast<std::size_t>(3)*storage_size_*sizeof(Real)+static_cast<std::size_t>(2)*storage_size_*sizeof(PressureReal)+sizeof(Real);
+		std::fprintf(stderr,"[pressure-gpu-setup] projection bridge ready in %.1f ms; total projection estimate %.2f GiB\n",
+			std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-bridge_begin).count(),
+			static_cast<double>(bytes_)/(1024.0*1024.0*1024.0));
+		std::fflush(stderr);
 	}
 
 	DeviceCompositeAmrProjection::~DeviceCompositeAmrProjection()
 	{
 		if(eb_carrier_unmapped_mass_)cudaFree(eb_carrier_unmapped_mass_);
 		for(void* pointer:{(void*)pressure_gradient_node_dof_,(void*)pressure_gradient_offset_,(void*)pressure_gradient_neighbour_,(void*)pressure_gradient_weight_,(void*)pressure_gradient_,(void*)special_lower_gradient_node_,(void*)special_upper_gradient_node_,(void*)special_nonorthogonal_correction_,(void*)special_upper_gradient_weight_,(void*)regular_correction_lower_,(void*)regular_correction_upper_,(void*)regular_correction_lower_node_,(void*)regular_correction_upper_node_,(void*)regular_correction_level_,(void*)regular_correction_index_,(void*)regular_correction_mirror_index_,(void*)regular_correction_axis_,(void*)regular_correction_two_point_delta_,(void*)regular_correction_vector_,(void*)regular_correction_upper_weight_})if(pointer)cudaFree(pointer);
-		for(void* pointer:{(void*)levels_,(void*)active_,(void*)cut_face_mask_,(void*)volume_,(void*)integrated_,(void*)divergence_,(void*)rhs_,(void*)pressure_,(void*)first_dof_,(void*)second_dof_,(void*)special_incident_dof_,(void*)special_incident_offset_,(void*)special_incident_edge_,(void*)special_incident_sign_,(void*)direction_,(void*)axis_,(void*)open_area_,(void*)centre_distance_,(void*)pressure_gradient_factor_,(void*)special_velocity_,(void*)max_abs_scratch_,(void*)cf_fine_level_,(void*)cf_fine_index_,(void*)cf_group_,(void*)cf_group_level_,(void*)cf_group_index_,(void*)cf_group_axis_,(void*)cf_group_area_,(void*)cf_group_sum_,(void*)eb_node_a_,(void*)eb_node_b_,(void*)eb_negative_edge_,(void*)eb_positive_edge_,(void*)eb_carrier_node_,(void*)eb_carrier_level_,(void*)eb_carrier_index_,(void*)eb_carrier_axis_,(void*)eb_carrier_area_,(void*)eb_carrier_mass_,(void*)eb_regular_lower_node_,(void*)eb_regular_upper_node_,(void*)eb_regular_level_,(void*)eb_regular_index_,(void*)eb_regular_axis_,(void*)eb_regular_area_,(void*)eb_node_flux_balance_,(void*)eb_node_axis_sum_,(void*)eb_node_axis_weight_,(void*)eb_node_gradient_sum_,(void*)eb_node_gradient_inverse_,(void*)eb_edge_ls_displacement_,(void*)eb_edge_ls_weight_,(void*)eb_transport_length_,(void*)eb_transport_scratch_,(void*)eb_diffusion_rate_,(void*)eb_node_diffusion_sum_,(void*)eb_node_neighbor_count_,(void*)eb_diffusion_scratch_,(void*)wall_edge_node_a_,(void*)wall_edge_node_b_,(void*)wall_patch_node_,(void*)wall_patch_normal_,(void*)wall_patch_area_,(void*)wall_patch_distance_,(void*)wall_patch_coefficient_,(void*)wall_patch_force_per_density_,(void*)wall_carrier_node_,(void*)wall_carrier_level_,(void*)wall_carrier_index_,(void*)wall_carrier_axis_,(void*)wall_carrier_mass_,(void*)wall_unique_carrier_level_,(void*)wall_unique_carrier_index_,(void*)wall_unique_carrier_axis_,(void*)wall_unique_carrier_mass_,(void*)wall_momentum_scratch_,(void*)wall_node_rate_,(void*)wall_node_axis_sum_,(void*)wall_node_axis_weight_,(void*)wall_node_velocity_delta_,(void*)wall_node_matrix_})if(pointer)cudaFree(pointer);
+		for(void* pointer:{(void*)levels_,(void*)active_,(void*)cut_face_mask_,(void*)volume_,(void*)integrated_,(void*)divergence_,(void*)rhs_,(void*)pressure_solve_,(void*)pressure_,(void*)first_dof_,(void*)second_dof_,(void*)special_incident_dof_,(void*)special_incident_offset_,(void*)special_incident_edge_,(void*)special_incident_sign_,(void*)direction_,(void*)axis_,(void*)open_area_,(void*)centre_distance_,(void*)pressure_gradient_factor_,(void*)special_velocity_,(void*)max_abs_scratch_,(void*)cf_fine_level_,(void*)cf_fine_index_,(void*)cf_group_,(void*)cf_group_level_,(void*)cf_group_index_,(void*)cf_group_axis_,(void*)cf_group_area_,(void*)cf_group_sum_,(void*)eb_node_a_,(void*)eb_node_b_,(void*)eb_negative_edge_,(void*)eb_positive_edge_,(void*)eb_carrier_node_,(void*)eb_carrier_level_,(void*)eb_carrier_index_,(void*)eb_carrier_axis_,(void*)eb_carrier_area_,(void*)eb_carrier_mass_,(void*)eb_regular_lower_node_,(void*)eb_regular_upper_node_,(void*)eb_regular_level_,(void*)eb_regular_index_,(void*)eb_regular_axis_,(void*)eb_regular_area_,(void*)eb_node_flux_balance_,(void*)eb_node_axis_sum_,(void*)eb_node_axis_weight_,(void*)eb_node_gradient_sum_,(void*)eb_node_gradient_inverse_,(void*)eb_edge_ls_displacement_,(void*)eb_edge_ls_weight_,(void*)eb_transport_length_,(void*)eb_transport_scratch_,(void*)eb_diffusion_rate_,(void*)eb_node_diffusion_sum_,(void*)eb_node_neighbor_count_,(void*)eb_diffusion_scratch_,(void*)wall_edge_node_a_,(void*)wall_edge_node_b_,(void*)wall_patch_node_,(void*)wall_patch_normal_,(void*)wall_patch_area_,(void*)wall_patch_distance_,(void*)wall_patch_coefficient_,(void*)wall_patch_force_per_density_,(void*)wall_carrier_node_,(void*)wall_carrier_level_,(void*)wall_carrier_index_,(void*)wall_carrier_axis_,(void*)wall_carrier_mass_,(void*)wall_unique_carrier_level_,(void*)wall_unique_carrier_index_,(void*)wall_unique_carrier_axis_,(void*)wall_unique_carrier_mass_,(void*)wall_momentum_scratch_,(void*)wall_node_rate_,(void*)wall_node_axis_sum_,(void*)wall_node_axis_weight_,(void*)wall_node_velocity_delta_,(void*)wall_node_matrix_})if(pointer)cudaFree(pointer);
 	}
 
 	void DeviceCompositeAmrProjection::clear_special_fluxes(){if(special_count_)check(cudaMemset(special_velocity_,0,static_cast<std::size_t>(special_count_)*sizeof(Real)),"clear composite special fluxes");}
@@ -1763,19 +2121,72 @@ namespace paracfd::core
 
 	void DeviceCompositeAmrProjection::compute_divergence()
 	{
-		launch_integrated_flux(levels_,brick_counts_,level_count_,brick_size_,active_,cut_face_mask_,storage_size_,special_incident_dof_,special_incident_offset_,special_incident_edge_,special_incident_sign_,special_incident_dof_count_,open_area_,special_velocity_,integrated_);normalize_divergence_rhs_kernel<<<(storage_size_+255)/256,256>>>(integrated_,volume_,active_,Real(0),divergence_,nullptr,storage_size_);check(cudaDeviceSynchronize(),"compute composite AMR divergence");
+		launch_integrated_flux(levels_,brick_counts_,level_count_,brick_size_,active_,cut_face_mask_,storage_size_,special_incident_dof_,special_incident_offset_,special_incident_edge_,special_incident_sign_,special_incident_dof_count_,open_area_,special_velocity_,integrated_);normalize_divergence_rhs_kernel<<<(storage_size_+255)/256,256>>>(integrated_,volume_,active_,PressureReal(0),divergence_,nullptr,storage_size_);check(cudaDeviceSynchronize(),"compute composite AMR divergence");
 	}
 	void DeviceCompositeAmrProjection::build_projection_rhs(Real rho,Real dt)
 	{
-		if(!(rho>Real(0))||!(dt>Real(0)))throw std::invalid_argument("composite projection rho/dt");launch_integrated_flux(levels_,brick_counts_,level_count_,brick_size_,active_,cut_face_mask_,storage_size_,special_incident_dof_,special_incident_offset_,special_incident_edge_,special_incident_sign_,special_incident_dof_count_,open_area_,special_velocity_,integrated_);normalize_divergence_rhs_kernel<<<(storage_size_+255)/256,256>>>(integrated_,volume_,active_,rho/dt,divergence_,rhs_,storage_size_);check(cudaDeviceSynchronize(),"build composite AMR projection RHS");
+		if(!(rho>Real(0))||!(dt>Real(0)))throw std::invalid_argument("composite projection rho/dt");launch_integrated_flux(levels_,brick_counts_,level_count_,brick_size_,active_,cut_face_mask_,storage_size_,special_incident_dof_,special_incident_offset_,special_incident_edge_,special_incident_sign_,special_incident_dof_count_,open_area_,special_velocity_,integrated_);normalize_divergence_rhs_kernel<<<(storage_size_+255)/256,256>>>(integrated_,volume_,active_,PressureReal(rho)/PressureReal(dt),divergence_,rhs_,storage_size_);check(cudaDeviceSynchronize(),"build composite AMR projection RHS");
 	}
 	void DeviceCompositeAmrProjection::correct_fluxes(Real rho,Real dt)
 	{
-		if(!(rho>Real(0))||!(dt>Real(0)))throw std::invalid_argument("composite projection correction rho/dt");const Real scale=dt/rho;for(int level=0;level<level_count_;++level){const int work=brick_counts_[level]*brick_size_*brick_size_*brick_size_;if(work)structured_flux_correction_kernel<<<(work+255)/256,256>>>(levels_,level,brick_size_,outlet_,active_,cut_face_mask_,pressure_,scale);}if(pressure_gradient_node_count_)reconstruct_pressure_gradient_kernel<<<(pressure_gradient_node_count_+255)/256,256>>>(pressure_gradient_node_dof_,pressure_gradient_offset_,pressure_gradient_neighbour_,pressure_gradient_weight_,pressure_,pressure_gradient_,pressure_gradient_node_count_);if(regular_pressure_correction_count_)regular_nonorthogonal_flux_correction_kernel<<<(regular_pressure_correction_count_+255)/256,256>>>(levels_,regular_correction_level_,regular_correction_index_,regular_correction_mirror_index_,regular_correction_axis_,regular_correction_lower_,regular_correction_upper_,regular_correction_lower_node_,regular_correction_upper_node_,regular_correction_two_point_delta_,regular_correction_vector_,regular_correction_upper_weight_,pressure_gradient_,pressure_,scale,regular_pressure_correction_count_);if(special_count_){special_flux_correction_kernel<<<(special_count_+255)/256,256>>>(first_dof_,second_dof_,direction_,pressure_gradient_factor_,special_velocity_,special_count_,active_,pressure_,scale);if(pressure_gradient_node_count_)special_nonorthogonal_flux_correction_kernel<<<(special_count_+255)/256,256>>>(first_dof_,second_dof_,direction_,special_lower_gradient_node_,special_upper_gradient_node_,special_nonorthogonal_correction_,special_upper_gradient_weight_,pressure_gradient_,special_velocity_,special_count_,active_,scale);}if(coarse_fine_count_){check(cudaMemset(cf_group_sum_,0,static_cast<std::size_t>(coarse_fine_group_count_)*sizeof(Real)),"clear coarse/fine group flux sums");scatter_coarse_fine_tiles_kernel<<<(coarse_fine_count_+255)/256,256>>>(levels_,cf_fine_level_,cf_fine_index_,axis_,cf_group_,open_area_,special_velocity_,cf_group_sum_,coarse_fine_count_);scatter_coarse_fine_groups_kernel<<<(coarse_fine_group_count_+255)/256,256>>>(levels_,cf_group_level_,cf_group_index_,cf_group_axis_,cf_group_area_,cf_group_sum_,coarse_fine_group_count_);}for(int level=0;level<level_count_;++level){const int work=brick_counts_[level]*brick_size_*brick_size_*brick_size_;if(work)scatter_regular_pressure_kernel<<<(work+255)/256,256>>>(levels_,level,brick_size_,active_,pressure_);}check(cudaDeviceSynchronize(),"correct composite AMR fluxes");
+		if(!(rho>Real(0))||!(dt>Real(0)))
+			throw std::invalid_argument("composite projection correction rho/dt");
+		const PressureReal scale=PressureReal(dt)/PressureReal(rho);
+		const bool full_nonorthogonal=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		for(int level=0;level<level_count_;++level)
+		{
+			const int work=brick_counts_[level]*brick_size_*brick_size_*brick_size_;
+			if(work)structured_flux_correction_kernel<<<(work+255)/256,256>>>(levels_,level,
+				brick_size_,outlet_,active_,cut_face_mask_,pressure_solve_,scale);
+		}
+		if(full_nonorthogonal&&pressure_gradient_node_count_)
+			reconstruct_pressure_gradient_kernel<<<(pressure_gradient_node_count_+255)/256,256>>>(
+				pressure_gradient_node_dof_,pressure_gradient_offset_,pressure_gradient_neighbour_,
+				pressure_gradient_weight_,pressure_solve_,pressure_gradient_,pressure_gradient_node_count_);
+		if(full_nonorthogonal&&regular_pressure_correction_count_)
+			regular_nonorthogonal_flux_correction_kernel<<<(regular_pressure_correction_count_+255)/256,256>>>(
+				levels_,regular_correction_level_,regular_correction_index_,regular_correction_mirror_index_,
+				regular_correction_axis_,regular_correction_lower_,regular_correction_upper_,
+				regular_correction_lower_node_,regular_correction_upper_node_,
+				regular_correction_two_point_delta_,regular_correction_vector_,
+				regular_correction_upper_weight_,pressure_gradient_,pressure_solve_,scale,
+				regular_pressure_correction_count_);
+		if(special_count_)
+		{
+			special_flux_correction_kernel<<<(special_count_+255)/256,256>>>(first_dof_,second_dof_,
+				direction_,pressure_gradient_factor_,special_velocity_,special_count_,active_,
+				pressure_solve_,scale);
+			if(full_nonorthogonal&&pressure_gradient_node_count_)
+				special_nonorthogonal_flux_correction_kernel<<<(special_count_+255)/256,256>>>(
+					first_dof_,second_dof_,direction_,special_lower_gradient_node_,
+					special_upper_gradient_node_,special_nonorthogonal_correction_,
+					special_upper_gradient_weight_,pressure_gradient_,special_velocity_,special_count_,
+					active_,scale);
+		}
+		if(coarse_fine_count_)
+		{
+			check(cudaMemset(cf_group_sum_,0,static_cast<std::size_t>(coarse_fine_group_count_)*sizeof(Real)),"clear coarse/fine group flux sums");
+			scatter_coarse_fine_tiles_kernel<<<(coarse_fine_count_+255)/256,256>>>(levels_,cf_fine_level_,cf_fine_index_,axis_,cf_group_,open_area_,special_velocity_,cf_group_sum_,coarse_fine_count_);
+			scatter_coarse_fine_groups_kernel<<<(coarse_fine_group_count_+255)/256,256>>>(levels_,cf_group_level_,cf_group_index_,cf_group_axis_,cf_group_area_,cf_group_sum_,coarse_fine_group_count_);
+		}
+		for(int level=0;level<level_count_;++level)
+		{
+			const int work=brick_counts_[level]*brick_size_*brick_size_*brick_size_;
+			if(work)scatter_regular_pressure_kernel<<<(work+255)/256,256>>>(levels_,level,
+				brick_size_,active_,pressure_solve_);
+		}
+		check(cudaDeviceSynchronize(),"correct composite AMR fluxes");
 	}
 	AmrGpuSolveResult DeviceCompositeAmrProjection::project(Real rho,Real dt,double tolerance,int max_iterations,bool warm_start)
 	{
-		build_projection_rhs(rho,dt);AmrGpuSolveResult result=solver_.solve(pressure_,rhs_,tolerance,max_iterations,warm_start);if(result.converged){correct_fluxes(rho,dt);compute_divergence();}return result;
+		build_projection_rhs(rho,dt);
+		AmrGpuSolveResult result=solver_.solve(pressure_solve_,rhs_,tolerance,max_iterations,warm_start);
+		if(result.converged)
+		{
+			convert_pressure_kernel<<<(storage_size_+255)/256,256>>>(pressure_solve_,pressure_,storage_size_);
+			correct_fluxes(rho,dt);compute_divergence();
+		}
+		return result;
 	}
 	void DeviceCompositeAmrProjection::download_divergence(std::vector<Real>& host)const{host.resize(storage_size_);check(cudaMemcpy(host.data(),divergence_,host.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite divergence");}
 	void DeviceCompositeAmrProjection::download_pressure(std::vector<Real>& host)const{host.resize(storage_size_);check(cudaMemcpy(host.data(),pressure_,host.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite pressure");}

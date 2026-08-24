@@ -5,11 +5,23 @@
 // (mandated for every kernel, CLAUDE.md) exists from day one.
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
 namespace paracfd::core
 {
+	struct CudaMemoryInfo
+	{
+		std::size_t free_bytes = 0;
+		std::size_t total_bytes = 0;
+	};
+
+	// Current memory visible to CUDA on the selected device.  This is the same
+	// allocator budget used by the solver and is therefore more useful for grid
+	// planning than display-adapter memory reported by the window system.
+	bool cuda_memory_info(CudaMemoryInfo& info, std::string* err = nullptr);
+
 	// out[i] = a*x[i] + y[i], CPU reference.
 	void saxpy_cpu(float a, const std::vector<float>& x, const std::vector<float>& y, std::vector<float>& out);
 
