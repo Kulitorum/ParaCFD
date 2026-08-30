@@ -20,11 +20,14 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -262,13 +265,56 @@ namespace paracfd::gui
 	ParagliderWindow::ParagliderWindow(QWidget* parent):QMainWindow(parent)
 	{
 		setWindowTitle("ParaCFD — GPU paraglider aerodynamics");resize(1320,820);
-		viewer_=new SliceViewer(this);setCentralWidget(viewer_);
+		auto* viewport_stack=new QWidget(this);auto* viewport_layout=new QGridLayout(viewport_stack);
+		viewport_layout->setContentsMargins(0,0,0,0);viewer_=new SliceViewer(viewport_stack);
+		viewport_layout->addWidget(viewer_,0,0);
+		playback_panel_=new QFrame(viewport_stack);playback_panel_->setObjectName("playbackPanel");
+		playback_panel_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Maximum);
+		playback_panel_->setMinimumWidth(540);playback_panel_->setMaximumWidth(980);
+		playback_panel_->setStyleSheet(
+			"QFrame#playbackPanel{background:rgba(16,22,28,238);border:1px solid #48616d;border-radius:8px;}"
+			"QLabel{color:#dce8ec;background:transparent;border:0;}"
+			"QPushButton{color:#dce8ec;background:#26343c;border:1px solid #48616d;border-radius:4px;min-width:30px;min-height:28px;font-weight:700;}"
+			"QPushButton:hover{background:#31505a;border-color:#3dcde0;}QPushButton:pressed{background:#183039;}"
+			"QPushButton:disabled{color:#6c7b82;background:#20292e;border-color:#34434a;}"
+			"QSlider::groove:horizontal{height:5px;background:#34464f;border-radius:2px;}"
+			"QSlider::sub-page:horizontal{background:#3dcde0;border-radius:2px;}"
+			"QSlider::handle:horizontal{width:13px;margin:-5px 0;background:#eaf8fa;border:2px solid #3dcde0;border-radius:7px;}"
+			"QSlider::tick-mark:horizontal{color:#68808a;}");
+		auto* playback_layout=new QHBoxLayout(playback_panel_);playback_layout->setContentsMargins(12,8,12,8);playback_layout->setSpacing(7);
+		playback_dataset_label_=new QLabel("RECORDED");playback_dataset_label_->setStyleSheet("color:#3dcde0;font-family:Consolas;font-weight:700;letter-spacing:1px;");
+		playback_rewind_button_=new QPushButton(QString::fromUtf8("◀◀"));playback_rewind_button_->setToolTip("Play the recording backward at real time");playback_rewind_button_->setAccessibleName("Play backward");
+		playback_play_button_=new QPushButton(QString::fromUtf8("▶"));playback_play_button_->setToolTip("Play the recording forward at real time");playback_play_button_->setAccessibleName("Play forward");
+		playback_stop_button_=new QPushButton(QString::fromUtf8("■"));playback_stop_button_->setToolTip("Stop playback on the current frame");playback_stop_button_->setAccessibleName("Stop playback");
+		playback_slider_=new ScrollSafeSlider(Qt::Horizontal);playback_slider_->setMinimumWidth(180);playback_slider_->setRange(0,0);playback_slider_->setTickPosition(QSlider::TicksBelow);playback_slider_->setToolTip("Scrub through recorded simulation time");
+		playback_time_label_=new QLabel("t 0.000 s");playback_time_label_->setMinimumWidth(155);playback_time_label_->setAlignment(Qt::AlignRight|Qt::AlignVCenter);playback_time_label_->setStyleSheet("font-family:Consolas;color:#eef8fa;");
+		playback_layout->addWidget(playback_dataset_label_);playback_layout->addWidget(playback_rewind_button_);playback_layout->addWidget(playback_play_button_);playback_layout->addWidget(playback_stop_button_);playback_layout->addWidget(playback_slider_,1);playback_layout->addWidget(playback_time_label_);
+		viewport_layout->addWidget(playback_panel_,0,0,Qt::AlignHCenter|Qt::AlignBottom);playback_panel_->hide();setCentralWidget(viewport_stack);
 		SimInfo initial;initial.nx=initial.ny=initial.nz=32;initial.h=0.5;initial.coarse_h=0.5;initial.finest_h=0.5;initial.Lx=initial.Ly=initial.Lz=16;initial.U=config_.freestream.speed;initial.rho=config_.freestream.rho;initial.nu=config_.freestream.nu;initial.name="paraglider";viewer_->setInfo(initial);
 		viewer_->setShowSlice(true);viewer_->setShowModel(true);viewer_->setShowArrows(true);viewer_->setArrowMode3D(true);viewer_->setArrowDensity(400);viewer_->setArrowSpeedMult(0.1f);viewer_->setArrowSizeMult(0.5f);viewer_->setShowTracers(true);viewer_->setTracerMode3D(true);viewer_->setTracerGridDensity(7);
 		buildMenus();buildControls();configToUi(config_);
 		// Start with a modest grid; geometry topology always comes from the closed solid.
 		levels_->setValue(2);
 		min_volume_fraction_->setValue(0.005);
+		connect(playback_rewind_button_,&QPushButton::clicked,this,[this]{startPlayback(-1);});
+		connect(playback_play_button_,&QPushButton::clicked,this,[this]{startPlayback(1);});
+		connect(playback_stop_button_,&QPushButton::clicked,this,&ParagliderWindow::stopPlayback);
+		connect(playback_slider_,&QSlider::valueChanged,this,[this](int frame)
+		{
+			stopPlayback();setPlaybackFrame(frame,true);
+		});
+		playback_timer_=new QTimer(this);playback_timer_->setTimerType(Qt::PreciseTimer);playback_timer_->setInterval(16);
+		connect(playback_timer_,&QTimer::timeout,this,[this]
+		{
+			const int count=playback_slider_->maximum()+1;if(count<=1){stopPlayback();return;}
+			const PlaybackDatasetInfo info=worker_->playbackDatasetInfo();
+			const double requested=playback_anchor_time_+
+				playback_direction_*playback_clock_.elapsed()/1000.0;
+			const int next=static_cast<int>(worker_->playbackFrameAtTime(requested,playback_direction_));
+			if(next!=playback_frame_)setPlaybackFrame(next,false);
+			if((playback_direction_<0&&requested<=info.first_time)||
+				(playback_direction_>0&&requested>=info.last_time))stopPlayback();
+		});
 		repaint_timer_=new QTimer(this);connect(repaint_timer_,&QTimer::timeout,this,[this]{updateSnapshot();viewer_->update();});repaint_timer_->start(16);
 		statusBar()->showMessage("Open a STEP wing, inspect its orientation, then Build CFD Grid.");
 	}
@@ -283,6 +329,173 @@ namespace paracfd::gui
 		auto* save_config=file->addAction("Save paraglider config as...");connect(save_config,&QAction::triggered,this,[this]{QString path=QFileDialog::getSaveFileName(this,"Save ParaCFD config",config_path_,"JSON files (*.json)");if(!path.isEmpty()){if(!path.endsWith(".json",Qt::CaseInsensitive))path+=".json";saveConfigFile(path);}});
 		recent_files_menu_=file->addMenu("Recent files");refreshRecentFiles();
 		file->addSeparator();auto* quit=file->addAction("Exit");connect(quit,&QAction::triggered,this,&QWidget::close);
+	}
+
+	void ParagliderWindow::showRecordingDialog()
+	{
+		QDialog dialog(this);dialog.setWindowTitle("Playback recording channels");dialog.setModal(true);
+		dialog.setMinimumWidth(510);auto* layout=new QVBoxLayout(&dialog);layout->setSpacing(12);
+		auto* heading=new QLabel("Record the views you need");heading->setStyleSheet("font-size:14pt;font-weight:700;color:#17313a;");layout->addWidget(heading);
+		auto* explanation=new QLabel(QString::fromUtf8(
+			"Choose the recording cadence and source channels. Source channels are stored as 32-bit data and zlib-compressed in memory; derived views are rebuilt during playback."));
+		explanation->setWordWrap(true);layout->addWidget(explanation);
+		auto* every_step=new QCheckBox("Record every step");every_step->setChecked(recording_options_.every_step);
+		every_step->setMinimumHeight(30);every_step->setToolTip(
+			"Record the initialized state and every completed solver step instead of sampling at 30 Hz of simulated time.");
+		layout->addWidget(every_step);
+		auto* velocity=new QCheckBox(QString::fromUtf8("Velocity volume  —  |u|, u/v/w, vorticity, Q, arrows and tracers"));
+		auto* pressure=new QCheckBox(QString::fromUtf8("Pressure volume  —  Δp, Cp, pressure gradient and Cp volume"));
+		auto* surface=new QCheckBox(QString::fromUtf8("Surface pressure  —  Cp+/Cp−, ΔCp and pressure-force arrows"));
+		velocity->setChecked(recording_options_.velocity);pressure->setChecked(recording_options_.pressure);
+		surface->setChecked(recording_options_.surface_pressure);
+		for(auto* check:{velocity,pressure,surface}){check->setMinimumHeight(30);layout->addWidget(check);}
+		auto* note=new QLabel(worker_?"A CFD dataset already exists. These choices take effect on the next grid build.":
+			"The recording is available as soon as the simulation pauses or stops.");
+		note->setWordWrap(true);note->setStyleSheet("color:#52646b;background:#eef3f4;padding:8px;border-radius:4px;");layout->addWidget(note);
+		auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel);
+		buttons->button(QDialogButtonBox::Save)->setText("Use for next run");layout->addWidget(buttons);
+		auto validate=[=]
+		{
+			const bool any=velocity->isChecked()||pressure->isChecked()||surface->isChecked();
+			buttons->button(QDialogButtonBox::Save)->setEnabled(any);
+			const QString cadence=every_step->isChecked()?QString(
+				" Every-step capture uses more memory and can make the simulation slower."):QString();
+			note->setText(any?(worker_?"A CFD dataset already exists. These choices take effect on the next grid build."+cadence:
+				"The recording is available as soon as the simulation pauses or stops."+cadence):
+				"Select at least one channel to create a playback dataset.");
+		};
+		connect(velocity,&QCheckBox::toggled,&dialog,validate);connect(pressure,&QCheckBox::toggled,&dialog,validate);
+		connect(surface,&QCheckBox::toggled,&dialog,validate);connect(every_step,&QCheckBox::toggled,&dialog,validate);
+		connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+		connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);validate();
+		if(dialog.exec()!=QDialog::Accepted)return;
+		recording_options_={velocity->isChecked(),pressure->isChecked(),surface->isChecked(),
+			every_step->isChecked()};updateRecordingButton();
+	}
+
+	void ParagliderWindow::updateRecordingButton()
+	{
+		if(!recording_button_)return;QStringList channels;
+		if(recording_options_.velocity)channels<<"VEL";if(recording_options_.pressure)channels<<"P";
+		if(recording_options_.surface_pressure)channels<<"SURF";
+		const QString cadence=recording_options_.every_step?"EVERY STEP":"30 Hz";
+		recording_button_->setText(QString("Record · %1 · %2").arg(cadence,channels.join(" + ")));
+	}
+
+	void ParagliderWindow::applyPlaybackSurface(const PlaybackFrameSnapshot& frame)
+	{
+		if(!frame.has_surface_pressure)
+		{
+			viewer_->setTriangleSurfaceProbeData({}, {}, {});viewer_->clearTriangleSurfaceColouring();
+			viewer_->clearTrianglePressureForces();return;
+		}
+		viewer_->setTriangleSurfaceProbeData(frame.cp_plus,frame.cp_minus,frame.delta_cp);
+		viewer_->setTrianglePressureForces(frame.triangle_pressure_force_xyz);
+		const float delta_range=std::max(std::abs(frame.cp_min),std::abs(frame.cp_max));
+		const float side_range=std::max(std::abs(frame.side_cp_min),std::abs(frame.side_cp_max));
+		const int mode=surface_colour_->currentIndex();
+		if(mode==0)viewer_->setTriangleSurfaceCp(frame.cp_plus,frame.cp_minus,-side_range,side_range);
+		else if(mode==2)viewer_->setTriangleSurfaceCp(frame.cp_plus,frame.cp_plus,-side_range,side_range);
+		else if(mode==3)viewer_->setTriangleSurfaceCp(frame.cp_minus,frame.cp_minus,-side_range,side_range);
+		else viewer_->setTriangleSurfaceCp(frame.delta_cp,frame.delta_cp,-delta_range,delta_range);
+	}
+
+	void ParagliderWindow::setPlaybackFrame(int frame,bool discontinuity)
+	{
+		if(!worker_)return;const PlaybackDatasetInfo info=worker_->playbackDatasetInfo();
+		if(!info.frame_count)return;frame=std::clamp(frame,0,static_cast<int>(info.frame_count-1));
+		const int field_index=field_?field_->currentIndex():0;
+		const bool velocity_field=field_index<=3||field_index>=7;
+		if(velocity_field&&!info.channels.velocity)
+		{
+			if(info.channels.pressure)field_->setCurrentIndex(5);
+			else{show_slice_->setChecked(false);show_model_->setChecked(true);}
+		}
+		else if(!velocity_field&&!info.channels.pressure)
+		{
+			if(info.channels.velocity)field_->setCurrentIndex(0);
+			else{show_slice_->setChecked(false);show_model_->setChecked(true);}
+		}
+		PlaybackFrameSnapshot snapshot;if(!worker_->setPlaybackFrame(static_cast<std::size_t>(frame),snapshot))return;
+		playback_frame_=frame;playback_frame_time_=snapshot.physical_time;
+		{const QSignalBlocker blocker(playback_slider_);playback_slider_->setValue(frame);}
+		playback_time_label_->setText(QString("t %1 s  ·  %2/%3").arg(snapshot.physical_time,0,'f',3)
+			.arg(frame+1).arg(info.frame_count));
+		viewer_->setSimulationProgress(snapshot.steps,snapshot.physical_time,simulation_running_?0.0:
+			(paused_wall_ms_>=0?paused_wall_ms_/1000.0:0.0));
+		viewer_->setPlaybackState(true,static_cast<std::size_t>(frame),info.frame_count,
+			snapshot.physical_time,discontinuity);applyPlaybackSurface(snapshot);
+	}
+
+	void ParagliderWindow::startPlayback(int direction)
+	{
+		if(!worker_||simulation_running_)return;const auto info=worker_->playbackDatasetInfo();if(info.frame_count<2)return;
+		playback_direction_=direction<0?-1:1;
+		if((playback_direction_>0&&playback_frame_>=static_cast<int>(info.frame_count-1))||
+			(playback_direction_<0&&playback_frame_<=0))
+			setPlaybackFrame(playback_direction_>0?0:static_cast<int>(info.frame_count-1),true);
+		else if(!worker_->playbackActive())setPlaybackFrame(playback_frame_,true);
+		playback_anchor_time_=playback_frame_time_;playback_clock_.restart();playback_timer_->start();
+	}
+
+	void ParagliderWindow::stopPlayback()
+	{
+		playback_direction_=0;if(playback_timer_)playback_timer_->stop();
+	}
+
+	void ParagliderWindow::resetPlaybackSession()
+	{
+		stopPlayback();if(worker_)worker_->endPlayback();
+		playback_known_frames_=0;playback_frame_=0;playback_frame_time_=playback_anchor_time_=0;
+		if(playback_slider_)
+		{
+			const QSignalBlocker blocker(playback_slider_);
+			playback_slider_->setRange(0,0);playback_slider_->setValue(0);
+		}
+		if(playback_dataset_label_)playback_dataset_label_->setText("RECORDED");
+		if(playback_time_label_)playback_time_label_->setText("t 0.000 s");
+		if(playback_panel_)playback_panel_->hide();
+		if(viewer_)
+		{
+			viewer_->setPlaybackState(false,0,0,0,true);
+			viewer_->resetFlowAnimation();viewer_->setSimulationProgress(0,0,0);
+		}
+	}
+
+	void ParagliderWindow::leavePlayback()
+	{
+		stopPlayback();if(worker_)worker_->endPlayback();
+		if(viewer_)viewer_->setPlaybackState(false,0,0,0,true);
+		if(!cp_plus_.empty())applySurfaceColour();
+		if(playback_panel_)playback_panel_->hide();
+	}
+
+	void ParagliderWindow::updatePlaybackPanel()
+	{
+		if(!worker_||simulation_running_||aoa_sweep_active_)
+		{
+			if(playback_panel_)playback_panel_->hide();return;
+		}
+		const PlaybackDatasetInfo info=worker_->playbackDatasetInfo();
+		if(!info.frame_count){playback_panel_->hide();return;}
+		const int last=static_cast<int>(info.frame_count-1);
+		if(playback_known_frames_!=info.frame_count)
+		{
+			playback_known_frames_=info.frame_count;const QSignalBlocker blocker(playback_slider_);
+			playback_slider_->setRange(0,last);playback_slider_->setTickInterval(std::max(1,last/8));
+			if(!worker_->playbackActive()){playback_frame_=last;playback_slider_->setValue(last);}
+		}
+		QStringList channels;if(info.channels.velocity)channels<<"VEL";if(info.channels.pressure)channels<<"PRESS";
+		if(info.channels.surface_pressure)channels<<"SURFACE";
+		const double mib=info.compressed_bytes/(1024.0*1024.0);
+		const QString cadence=info.channels.every_step?"EVERY STEP":"30 Hz";
+		playback_dataset_label_->setText(QString("RECORDED  %1  ·  %2  ·  %3f  ·  %4 MiB")
+			.arg(channels.join("+"),cadence).arg(info.frame_count).arg(mib,0,'f',1));
+		if(!worker_->playbackActive())playback_time_label_->setText(QString("t %1 s  ·  %2/%3")
+			.arg(info.last_time,0,'f',3).arg(info.frame_count).arg(info.frame_count));
+		const bool playable=info.frame_count>1;playback_rewind_button_->setEnabled(playable);
+		playback_play_button_->setEnabled(playable);playback_stop_button_->setEnabled(playable);
+		playback_slider_->setEnabled(playable);playback_panel_->show();playback_panel_->raise();
 	}
 
 	void ParagliderWindow::rememberRecentFile(const QString& path)
@@ -350,6 +563,9 @@ namespace paracfd::gui
 
 		auto* run_group=new QGroupBox("Run");
 		auto* run_column=new QVBoxLayout(run_group);
+		recording_button_=new QPushButton;
+		recording_button_->setToolTip("Choose the recording cadence and simulation channels used for real-time playback.");
+		updateRecordingButton();
 		build_button_=new QPushButton("Build CFD Grid + Run");
 		build_button_->setToolTip("Build the static AMR/embedded-boundary grid, initialize the pressure field, and immediately run the CFD simulation.");
 		play_button_=new QPushButton("Play");play_button_->setCheckable(true);
@@ -364,14 +580,15 @@ namespace paracfd::gui
 		auto_pause_sensitivity_=new ScrollSafeSlider(Qt::Horizontal);auto_pause_sensitivity_->setRange(0,100);auto_pause_sensitivity_->setValue(65);
 		auto_pause_sensitivity_->setToolTip("Left is cautious (requires a nearly steady field); right pauses earlier and tolerates more fluctuation.");
 		connect(build_button_,&QPushButton::clicked,this,[this]{buildGrid();});
-		connect(play_button_,&QPushButton::toggled,this,[this](bool on){play_button_->setText(on?"Pause":"Play");step_button_->setEnabled(worker_&&!on);if(worker_)worker_->setPlaying(on);});
-		connect(step_button_,&QPushButton::clicked,this,[this]{if(worker_)worker_->stepOnce();});
+		connect(recording_button_,&QPushButton::clicked,this,&ParagliderWindow::showRecordingDialog);
+		connect(play_button_,&QPushButton::toggled,this,[this](bool on){play_button_->setText(on?"Pause":"Play");step_button_->setEnabled(worker_&&!on);if(on){simulation_running_=true;leavePlayback();}if(worker_)worker_->setPlaying(on);});
+		connect(step_button_,&QPushButton::clicked,this,[this]{if(worker_){leavePlayback();worker_->stepOnce();}});
 		connect(auto_pause_,&QCheckBox::toggled,this,[this](bool){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});
 		connect(auto_pause_sensitivity_,&QSlider::valueChanged,this,[this](int){if(worker_)worker_->configureAutoPause(auto_pause_->isChecked(),auto_pause_sensitivity_->value()/100.0);});
 		connect(half_wing_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&thin_y_debug_->isChecked())thin_y_debug_->setChecked(false);auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
 		auto* run_row=new QHBoxLayout;run_row->addWidget(play_button_);run_row->addWidget(step_button_);
 		auto* sensitivity_form=new QFormLayout;sensitivity_form->addRow("Settle sensitivity",auto_pause_sensitivity_);
-		run_column->addWidget(build_button_);run_column->addLayout(run_row);run_column->addWidget(conservative_momentum_);run_column->addWidget(half_wing_);run_column->addWidget(auto_pause_);run_column->addLayout(sensitivity_form);column->addWidget(run_group);
+		run_column->addWidget(recording_button_);run_column->addWidget(build_button_);run_column->addLayout(run_row);run_column->addWidget(conservative_momentum_);run_column->addWidget(half_wing_);run_column->addWidget(auto_pause_);run_column->addLayout(sensitivity_form);column->addWidget(run_group);
 		auto* thin_group=new QGroupBox("Cropped Y-span diagnosis");auto* thin_form=new QFormLayout(thin_group);thin_y_debug_=new QCheckBox("Run cropped Y volume");thin_y_debug_->setToolTip("Crop the oriented wing and CFD domain to a configurable Y width at one span station. This uses the real uniform EB solver but is a diagnostic case, not a physical whole-wing result.");thin_y_fraction_=real_spin(0.05,0.95,0.5,3);thin_y_fraction_->setSingleStep(0.025);thin_y_fraction_->setToolTip("Span station through the oriented wing bbox: 0 is one tip, 0.5 is centre, 1 is the other tip.");thin_y_width_=real_spin(0.001,100.0,0.125,4," m");thin_y_width_->setSingleStep(0.125);thin_y_width_->setToolTip("Requested physical Y width. It is rounded upward to an integer number of configured finest cells; the actual width is shown below.");thin_form->addRow(thin_y_debug_);thin_form->addRow("Span station",thin_y_fraction_);thin_form->addRow("Y volume width",thin_y_width_);column->addWidget(thin_group);connect(thin_y_debug_,&QCheckBox::toggled,this,[this](bool enabled){if(enabled&&half_wing_->isChecked())half_wing_->setChecked(false);auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(thin_y_fraction_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(thin_y_width_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
 
 		auto* physics=new QGroupBox("Freestream / solver (Build resets)");auto* form=new QFormLayout(physics);
@@ -411,7 +628,7 @@ namespace paracfd::gui
 		connect(field_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){static constexpr Field fields[]={Field::SpeedMag,Field::VelU,Field::VelV,Field::VelW,Field::PressureDelta,Field::PressureCoefficient,Field::PressureGradient,Field::VorticityMagnitude,Field::QCriterion};viewer_->setField(fields[std::clamp(index,0,8)]);});
 		connect(slice_axis_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){viewer_->setAxis(static_cast<Axis>(index));slice_position_->setValue(500);});connect(slice_position_,&QSlider::valueChanged,this,[this](int value){viewer_->setPlaneFraction(value/1000.0f);});connect(viewer_,&SliceViewer::planeFractionChanged,this,[this](float fraction){QSignalBlocker blocker(slice_position_);slice_position_->setValue(static_cast<int>(std::lround(fraction*1000.0f)));});
 		connect(auto_range_,&QCheckBox::toggled,viewer_,&SliceViewer::setAutoRange);connect(fit_wing,&QPushButton::clicked,viewer_,&SliceViewer::frameWingView);connect(fit_domain,&QPushButton::clicked,viewer_,&SliceViewer::frameDomainView);
-		connect(show_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowSlice);connect(show_model_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowModel);connect(show_iso_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowIsoSurface);connect(show_volume_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowVolume);connect(show_pressure_forces_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowPressureForces);connect(show_amr_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_eb_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_geometry_issues_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowGeometryIssues);connect(show_arrows_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowArrows);connect(show_tracers_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowTracers);connect(clip_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setClipAtSlice);connect(surface_colour_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{applySurfaceColour();});
+		connect(show_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowSlice);connect(show_model_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowModel);connect(show_iso_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowIsoSurface);connect(show_volume_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowVolume);connect(show_pressure_forces_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowPressureForces);connect(show_amr_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_eb_,&QCheckBox::toggled,this,[this]{updateDebugBoxes();});connect(show_geometry_issues_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowGeometryIssues);connect(show_arrows_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowArrows);connect(show_tracers_,&QCheckBox::toggled,viewer_,&SliceViewer::setShowTracers);connect(clip_slice_,&QCheckBox::toggled,viewer_,&SliceViewer::setClipAtSlice);connect(surface_colour_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{if(worker_&&worker_->playbackActive())setPlaybackFrame(playback_frame_,false);else applySurfaceColour();});
 		connect(pressure_preset,&QPushButton::clicked,this,[this]{setVisualizationPreset("pressure");});
 		connect(section_preset,&QPushButton::clicked,this,[this]{setVisualizationPreset("section");});
 		connect(wake_preset,&QPushButton::clicked,this,[this]{setVisualizationPreset("wake");});
@@ -1145,12 +1362,20 @@ namespace paracfd::gui
 
 	void ParagliderWindow::spawnWorker(std::unique_ptr<ExternalAeroCore> core)
 	{
-		shutdownWorker();snapshot_generation_=surface_generation_=0;worker_=new ParagliderSimWorker(std::move(core));worker_->configureAutoPause(auto_pause_&&auto_pause_->isChecked(),auto_pause_sensitivity_?auto_pause_sensitivity_->value()/100.0:0.65);worker_->configureConvergenceExit(aoa_mean_tolerance_?aoa_mean_tolerance_->value()/100.0:0.02,aoa_max_flow_throughs_?aoa_max_flow_throughs_->value():2.5);worker_->setPlaying(true);viewer_->setParagliderWorker(worker_);worker_thread_=new QThread(this);worker_->moveToThread(worker_thread_);connect(worker_thread_,&QThread::started,worker_,&ParagliderSimWorker::run);connect(worker_,&ParagliderSimWorker::finished,worker_thread_,&QThread::quit);worker_thread_->start();
+		shutdownWorker();last_steps_=0;last_time_=0;snapshot_generation_=surface_generation_=0;
+		worker_=new ParagliderSimWorker(std::move(core));worker_->configureRecording(recording_options_);
+		worker_->configureAutoPause(auto_pause_&&auto_pause_->isChecked(),auto_pause_sensitivity_?auto_pause_sensitivity_->value()/100.0:0.65);
+		worker_->configureConvergenceExit(aoa_mean_tolerance_?aoa_mean_tolerance_->value()/100.0:0.02,aoa_max_flow_throughs_?aoa_max_flow_throughs_->value():2.5);
+		worker_->setPlaying(true);viewer_->setParagliderWorker(worker_);worker_thread_=new QThread(this);
+		worker_->moveToThread(worker_thread_);connect(worker_thread_,&QThread::started,worker_,&ParagliderSimWorker::run);
+		connect(worker_,&ParagliderSimWorker::finished,worker_thread_,&QThread::quit);worker_thread_->start();
 	}
 
 	void ParagliderWindow::shutdownWorker()
 	{
-		if(viewer_)viewer_->setParagliderWorker(nullptr);if(worker_)worker_->stop();if(worker_thread_){worker_thread_->quit();worker_thread_->wait();}delete worker_;worker_=nullptr;delete worker_thread_;worker_thread_=nullptr;snapshot_generation_=surface_generation_=0;
+		resetPlaybackSession();if(viewer_)viewer_->setParagliderWorker(nullptr);
+		if(worker_)worker_->stop();if(worker_thread_){worker_thread_->quit();worker_thread_->wait();}
+		delete worker_;worker_=nullptr;delete worker_thread_;worker_thread_=nullptr;snapshot_generation_=surface_generation_=0;
 	}
 
 	void ParagliderWindow::applySurfaceColour()
@@ -1163,6 +1388,7 @@ namespace paracfd::gui
 	void ParagliderWindow::updateSnapshot()
 	{
 		if(!worker_)return;
+		updatePlaybackPanel();
 		ParagliderDisplaySnapshot s;if(!worker_->latestSnapshot(snapshot_generation_,surface_generation_,s))return;
 		if(!s.error.empty())
 		{

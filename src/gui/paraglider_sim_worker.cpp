@@ -1,11 +1,14 @@
 #include "gui/paraglider_sim_worker.h"
+#include "core/fluid/amr_sampling.h"
 
 #include <QThread>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 
@@ -51,6 +54,272 @@ namespace
 		std::nth_element(positive.begin(),positive.begin()+index,positive.end());
 		return std::max(positive[index],1e-8f);
 	}
+
+	QByteArray compress_as_float(const std::vector<double>& values)
+	{
+		if(values.empty())return {};
+		std::vector<float> packed(values.size());
+		std::transform(values.begin(),values.end(),packed.begin(),[](double value)
+		{
+			return std::isfinite(value)?static_cast<float>(value):0.0f;
+		});
+		return qCompress(reinterpret_cast<const uchar*>(packed.data()),
+			static_cast<qsizetype>(packed.size()*sizeof(float)),1);
+	}
+
+	QByteArray compress_as_float_blocks(
+		std::initializer_list<const std::vector<double>*> blocks)
+	{
+		std::size_t count=0;for(const auto* block:blocks)count+=block->size();
+		if(!count)return {};
+		std::vector<float> packed;packed.reserve(count);
+		for(const auto* block:blocks)for(double value:*block)
+			packed.push_back(std::isfinite(value)?static_cast<float>(value):0.0f);
+		return qCompress(reinterpret_cast<const uchar*>(packed.data()),
+			static_cast<qsizetype>(packed.size()*sizeof(float)),1);
+	}
+
+	QByteArray compress_float_blocks(
+		std::initializer_list<const std::vector<float>*> blocks)
+	{
+		std::size_t count=0;for(const auto* block:blocks)count+=block->size();
+		if(!count)return {};
+		QByteArray raw;raw.resize(static_cast<qsizetype>(count*sizeof(float)));
+		char* destination=raw.data();
+		for(const auto* block:blocks)
+		{
+			const auto bytes=static_cast<qsizetype>(block->size()*sizeof(float));
+			if(bytes){std::memcpy(destination,block->data(),static_cast<std::size_t>(bytes));destination+=bytes;}
+		}
+		return qCompress(raw,1);
+	}
+
+	bool decompress_floats(const QByteArray& compressed,std::size_t count,
+		std::vector<double>& values)
+	{
+		values.clear();if(compressed.isEmpty()||!count)return false;
+		const QByteArray raw=qUncompress(compressed);
+		if(raw.size()!=static_cast<qsizetype>(count*sizeof(float)))return false;
+		values.resize(count);const float* source=reinterpret_cast<const float*>(raw.constData());
+		std::transform(source,source+count,values.begin(),[](float value)
+		{
+			return std::isfinite(value)?static_cast<double>(value):0.0;
+		});
+		return true;
+	}
+
+	bool decompress_surface(const QByteArray& compressed,std::size_t triangles,
+		std::vector<float>& plus,std::vector<float>& minus,std::vector<float>& delta,
+		std::vector<float>& forces)
+	{
+		plus.clear();minus.clear();delta.clear();forces.clear();
+		if(compressed.isEmpty()||!triangles)return false;
+		const std::size_t count=6*triangles;const QByteArray raw=qUncompress(compressed);
+		if(raw.size()!=static_cast<qsizetype>(count*sizeof(float)))return false;
+		const float* source=reinterpret_cast<const float*>(raw.constData());
+		plus.assign(source,source+triangles);source+=triangles;
+		minus.assign(source,source+triangles);source+=triangles;
+		delta.assign(source,source+triangles);source+=triangles;
+		forces.assign(source,source+3*triangles);return true;
+	}
+
+	bool field_needs_pressure(paracfd::gui::Field field)
+	{
+		using paracfd::gui::Field;
+		return field==Field::PressureDelta||field==Field::PressureCoefficient||
+			field==Field::PressureGradient;
+	}
+
+	double coarse_velocity_component(const paracfd::core::MacGrid& grid,
+		const std::vector<double>& u,const std::vector<double>& v,
+		const std::vector<double>& w,int component,int i,int j,int k)
+	{
+		i=std::clamp(i,0,grid.nx-1);j=std::clamp(j,0,grid.ny-1);k=std::clamp(k,0,grid.nz-1);
+		if(component==0)return 0.5*(u[grid.uidx(i,j,k)]+u[grid.uidx(i+1,j,k)]);
+		if(component==1)return 0.5*(v[grid.vidx(i,j,k)]+v[grid.vidx(i,j+1,k)]);
+		return 0.5*(w[grid.widx(i,j,k)]+w[grid.widx(i,j,k+1)]);
+	}
+
+	double coarse_face_sample(const paracfd::core::MacGrid& grid,
+		const std::vector<double>& values,int component,double x,double y,double z)
+	{
+		double coordinate[3]={x/grid.h-(component==0?0.0:0.5),
+			y/grid.h-(component==1?0.0:0.5),z/grid.h-(component==2?0.0:0.5)};
+		int base[3];double fraction[3];
+		for(int axis=0;axis<3;++axis)
+		{
+			base[axis]=static_cast<int>(std::floor(coordinate[axis]));
+			fraction[axis]=coordinate[axis]-base[axis];
+		}
+		const int count[3]={component==0?grid.nx+1:grid.nx,
+			component==1?grid.ny+1:grid.ny,component==2?grid.nz+1:grid.nz};
+		double result=0;
+		for(int dz=0;dz<2;++dz)for(int dy=0;dy<2;++dy)for(int dx=0;dx<2;++dx)
+		{
+			const int i=std::clamp(base[0]+dx,0,count[0]-1);
+			const int j=std::clamp(base[1]+dy,0,count[1]-1);
+			const int k=std::clamp(base[2]+dz,0,count[2]-1);
+			const double weight=(dx?fraction[0]:1-fraction[0])*
+				(dy?fraction[1]:1-fraction[1])*(dz?fraction[2]:1-fraction[2]);
+			const std::size_t index=component==0?grid.uidx(i,j,k):
+				(component==1?grid.vidx(i,j,k):grid.widx(i,j,k));
+			result+=weight*values[index];
+		}
+		return result;
+	}
+
+	double coarse_cell_sample(const paracfd::core::MacGrid& grid,
+		const std::vector<double>& values,double x,double y,double z)
+	{
+		double coordinate[3]={x/grid.h-0.5,y/grid.h-0.5,z/grid.h-0.5};
+		int base[3];double fraction[3];
+		for(int axis=0;axis<3;++axis)
+		{
+			base[axis]=static_cast<int>(std::floor(coordinate[axis]));
+			fraction[axis]=coordinate[axis]-base[axis];
+		}
+		double result=0;
+		for(int dz=0;dz<2;++dz)for(int dy=0;dy<2;++dy)for(int dx=0;dx<2;++dx)
+		{
+			const int i=std::clamp(base[0]+dx,0,grid.nx-1);
+			const int j=std::clamp(base[1]+dy,0,grid.ny-1);
+			const int k=std::clamp(base[2]+dz,0,grid.nz-1);
+			const double weight=(dx?fraction[0]:1-fraction[0])*
+				(dy?fraction[1]:1-fraction[1])*(dz?fraction[2]:1-fraction[2]);
+			result+=weight*values[grid.pidx(i,j,k)];
+		}
+		return result;
+	}
+
+	float coarse_scalar_at_point(const paracfd::core::MacGrid& grid,
+		const std::vector<double>& u,const std::vector<double>& v,const std::vector<double>& w,
+		const std::vector<double>& pressure,bool have_velocity,bool have_pressure,
+		paracfd::gui::Field field,double x,double y,double z,double rho,double reference_speed)
+	{
+		using paracfd::gui::Field;
+		if(field_needs_pressure(field)&&!have_pressure)return std::numeric_limits<float>::quiet_NaN();
+		if(!field_needs_pressure(field)&&!have_velocity)return std::numeric_limits<float>::quiet_NaN();
+		auto velocity=[&](int component,double px,double py,double pz)
+		{
+			return coarse_face_sample(grid,component==0?u:(component==1?v:w),component,px,py,pz);
+		};
+		auto derivative=[&](int component,int axis)
+		{
+			double lo[3]={x,y,z},hi[3]={x,y,z};const double extent[3]={grid.nx*grid.h,grid.ny*grid.h,grid.nz*grid.h};
+			lo[axis]=std::max(0.0,lo[axis]-grid.h);hi[axis]=std::min(extent[axis],hi[axis]+grid.h);
+			if(!(hi[axis]>lo[axis]))return 0.0;
+			return(velocity(component,hi[0],hi[1],hi[2])-velocity(component,lo[0],lo[1],lo[2]))/
+				(hi[axis]-lo[axis]);
+		};
+		if(field==Field::PressureDelta)return static_cast<float>(coarse_cell_sample(grid,pressure,x,y,z));
+		if(field==Field::PressureCoefficient)
+		{
+			const double dynamic_pressure=0.5*rho*reference_speed*reference_speed;
+			return dynamic_pressure>0?static_cast<float>(coarse_cell_sample(grid,pressure,x,y,z)/dynamic_pressure):0.0f;
+		}
+		if(field==Field::PressureGradient)
+		{
+			double gradient[3]{};const double extent[3]={grid.nx*grid.h,grid.ny*grid.h,grid.nz*grid.h};
+			for(int axis=0;axis<3;++axis)
+			{
+				double lo[3]={x,y,z},hi[3]={x,y,z};lo[axis]=std::max(0.0,lo[axis]-grid.h);
+				hi[axis]=std::min(extent[axis],hi[axis]+grid.h);
+				if(hi[axis]>lo[axis])gradient[axis]=
+					(coarse_cell_sample(grid,pressure,hi[0],hi[1],hi[2])-
+					coarse_cell_sample(grid,pressure,lo[0],lo[1],lo[2]))/(hi[axis]-lo[axis]);
+			}
+			return static_cast<float>(std::sqrt(gradient[0]*gradient[0]+
+				gradient[1]*gradient[1]+gradient[2]*gradient[2]));
+		}
+		const double components[3]={velocity(0,x,y,z),velocity(1,x,y,z),velocity(2,x,y,z)};
+		if(field==Field::VelU)return static_cast<float>(components[0]);
+		if(field==Field::VelV)return static_cast<float>(components[1]);
+		if(field==Field::VelW)return static_cast<float>(components[2]);
+		if(field==Field::SpeedMag)return static_cast<float>(std::sqrt(components[0]*components[0]+
+			components[1]*components[1]+components[2]*components[2]));
+		double gradient[3][3];
+		for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+			gradient[row][column]=derivative(row,column);
+		if(field==Field::VorticityMagnitude)
+		{
+			const double ox=gradient[2][1]-gradient[1][2],oy=gradient[0][2]-gradient[2][0],
+				oz=gradient[1][0]-gradient[0][1];
+			return static_cast<float>(std::sqrt(ox*ox+oy*oy+oz*oz));
+		}
+		double strain2=0,rotation2=0;
+		for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+		{
+			const double strain=0.5*(gradient[row][column]+gradient[column][row]);
+			const double rotation=0.5*(gradient[row][column]-gradient[column][row]);
+			strain2+=strain*strain;rotation2+=rotation*rotation;
+		}
+		return static_cast<float>(0.5*(rotation2-strain2));
+	}
+
+	float coarse_scalar(const paracfd::core::MacGrid& grid,
+		const std::vector<double>& u,const std::vector<double>& v,const std::vector<double>& w,
+		const std::vector<double>& pressure,bool have_velocity,bool have_pressure,
+		paracfd::gui::Field field,int i,int j,int k,double rho,double reference_speed)
+	{
+		using paracfd::gui::Field;
+		if(field_needs_pressure(field)&&!have_pressure)return std::numeric_limits<float>::quiet_NaN();
+		if(!field_needs_pressure(field)&&!have_velocity)return std::numeric_limits<float>::quiet_NaN();
+		auto component=[&](int c,int ii,int jj,int kk)
+		{
+			return coarse_velocity_component(grid,u,v,w,c,ii,jj,kk);
+		};
+		auto derivative=[&](int component_index,int axis)
+		{
+			const int coordinate=axis==0?i:axis==1?j:k;
+			const int count=axis==0?grid.nx:axis==1?grid.ny:grid.nz;
+			const int a=std::clamp(coordinate-1,0,count-1),b=std::clamp(coordinate+1,0,count-1);
+			if(a==b)return 0.0;
+			int ia=i,ja=j,ka=k,ib=i,jb=j,kb=k;
+			if(axis==0){ia=a;ib=b;}else if(axis==1){ja=a;jb=b;}else{ka=a;kb=b;}
+			return(component(component_index,ib,jb,kb)-component(component_index,ia,ja,ka))/((b-a)*grid.h);
+		};
+		if(field==Field::PressureDelta)return static_cast<float>(pressure[grid.pidx(i,j,k)]);
+		if(field==Field::PressureCoefficient)
+		{
+			const double dynamic_pressure=0.5*rho*reference_speed*reference_speed;
+			return dynamic_pressure>0?static_cast<float>(pressure[grid.pidx(i,j,k)]/dynamic_pressure):0.0f;
+		}
+		if(field==Field::PressureGradient)
+		{
+			auto pd=[&](int axis)
+			{
+				const int coordinate=axis==0?i:axis==1?j:k;
+				const int count=axis==0?grid.nx:axis==1?grid.ny:grid.nz;
+				const int a=std::clamp(coordinate-1,0,count-1),b=std::clamp(coordinate+1,0,count-1);
+				if(a==b)return 0.0;
+				int ia=i,ja=j,ka=k,ib=i,jb=j,kb=k;
+				if(axis==0){ia=a;ib=b;}else if(axis==1){ja=a;jb=b;}else{ka=a;kb=b;}
+				return(pressure[grid.pidx(ib,jb,kb)]-pressure[grid.pidx(ia,ja,ka)])/((b-a)*grid.h);
+			};
+			const double x=pd(0),y=pd(1),z=pd(2);return static_cast<float>(std::sqrt(x*x+y*y+z*z));
+		}
+		const double x=component(0,i,j,k),y=component(1,i,j,k),z=component(2,i,j,k);
+		if(field==Field::VelU)return static_cast<float>(x);
+		if(field==Field::VelV)return static_cast<float>(y);
+		if(field==Field::VelW)return static_cast<float>(z);
+		if(field==Field::SpeedMag)return static_cast<float>(std::sqrt(x*x+y*y+z*z));
+		double gradient[3][3];
+		for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+			gradient[row][column]=derivative(row,column);
+		if(field==Field::VorticityMagnitude)
+		{
+			const double ox=gradient[2][1]-gradient[1][2],oy=gradient[0][2]-gradient[2][0],oz=gradient[1][0]-gradient[0][1];
+			return static_cast<float>(std::sqrt(ox*ox+oy*oy+oz*oz));
+		}
+		double strain2=0,rotation2=0;
+		for(int row=0;row<3;++row)for(int column=0;column<3;++column)
+		{
+			const double strain=0.5*(gradient[row][column]+gradient[column][row]);
+			const double rotation=0.5*(gradient[row][column]-gradient[column][row]);
+			strain2+=strain*strain;rotation2+=rotation*rotation;
+		}
+		return static_cast<float>(0.5*(rotation2-strain2));
+	}
 }
 
 namespace paracfd::gui
@@ -67,6 +336,7 @@ namespace paracfd::gui
 	{
 		if(playing)
 		{
+			endPlayback();
 			// Publish the reset before releasing the worker loop. Otherwise the worker can
 			// observe playing=true and evaluate one sample against the previous run's
 			// convergence history. A queued manual step must not survive into Play either.
@@ -123,19 +393,114 @@ namespace paracfd::gui
 		settling_reset_.store(true);
 	}
 
+	void ParagliderSimWorker::configureRecording(const RecordingOptions& options)
+	{
+		// Configuration is normally supplied before the worker thread starts. Keeping the
+		// mutation locked also makes a late UI change deterministic: it starts a fresh dataset.
+		endPlayback();
+		std::lock_guard lock(recording_mutex_);
+		recording_options_=options;recorded_frames_.clear();recorded_compressed_bytes_=0;
+		++recording_epoch_;next_recording_time_=0;recording_started_.store(false);
+	}
+
+	PlaybackDatasetInfo ParagliderSimWorker::playbackDatasetInfo() const
+	{
+		std::lock_guard lock(recording_mutex_);PlaybackDatasetInfo info;
+		info.channels=recording_options_;info.frame_count=recorded_frames_.size();
+		info.compressed_bytes=recorded_compressed_bytes_;
+		if(!recorded_frames_.empty())
+		{
+			info.first_time=recorded_frames_.front().physical_time;
+			info.last_time=recorded_frames_.back().physical_time;
+		}
+		info.recording=recording_started_.load()&&!stop_.load();return info;
+	}
+
+	std::size_t ParagliderSimWorker::playbackFrameAtTime(double physical_time,int direction) const
+	{
+		std::lock_guard lock(recording_mutex_);if(recorded_frames_.empty())return 0;
+		if(direction<0)
+		{
+			const auto frame=std::lower_bound(recorded_frames_.begin(),recorded_frames_.end(),physical_time,
+				[](const RecordedFrame& candidate,double time){return candidate.physical_time<time;});
+			return frame==recorded_frames_.end()?recorded_frames_.size()-1:
+				static_cast<std::size_t>(std::distance(recorded_frames_.begin(),frame));
+		}
+		const auto frame=std::upper_bound(recorded_frames_.begin(),recorded_frames_.end(),physical_time,
+			[](double time,const RecordedFrame& candidate){return time<candidate.physical_time;});
+		return frame==recorded_frames_.begin()?0:
+			static_cast<std::size_t>(std::distance(recorded_frames_.begin(),frame)-1);
+	}
+
+	void ParagliderSimWorker::endPlayback()
+	{
+		std::lock_guard lock(flow_mutex_);playback_active_.store(false);
+		playback_u_.clear();playback_v_.clear();playback_w_.clear();playback_p_.clear();
+		playback_has_velocity_=playback_has_pressure_=false;++playback_generation_;
+	}
+
+	bool ParagliderSimWorker::setPlaybackFrame(std::size_t index,PlaybackFrameSnapshot& snapshot)
+	{
+		if(playing_.load())return false;
+		RecordedFrame frame;std::size_t frame_count=0;
+		{
+			std::lock_guard lock(recording_mutex_);frame_count=recorded_frames_.size();
+			if(index>=frame_count)return false;frame=recorded_frames_[index];
+		}
+		std::vector<double> u,v,w,p;bool have_velocity=false,have_pressure=false;
+		const std::size_t u_count=static_cast<std::size_t>(frame.grid.u_count());
+		const std::size_t v_count=static_cast<std::size_t>(frame.grid.v_count());
+		const std::size_t w_count=static_cast<std::size_t>(frame.grid.w_count());
+		if(!frame.velocity.isEmpty())
+		{
+			std::vector<double> packed;
+			if(decompress_floats(frame.velocity,u_count+v_count+w_count,packed))
+			{
+				u.assign(packed.begin(),packed.begin()+static_cast<std::ptrdiff_t>(u_count));
+				v.assign(packed.begin()+static_cast<std::ptrdiff_t>(u_count),
+					packed.begin()+static_cast<std::ptrdiff_t>(u_count+v_count));
+				w.assign(packed.begin()+static_cast<std::ptrdiff_t>(u_count+v_count),packed.end());
+				have_velocity=true;
+			}
+		}
+		if(!frame.pressure.isEmpty())have_pressure=decompress_floats(
+			frame.pressure,static_cast<std::size_t>(frame.grid.p_count()),p);
+		{
+			std::lock_guard lock(flow_mutex_);playback_grid_=frame.grid;
+			playback_u_=std::move(u);playback_v_=std::move(v);playback_w_=std::move(w);playback_p_=std::move(p);
+			playback_has_velocity_=have_velocity;playback_has_pressure_=have_pressure;
+			++playback_generation_;playback_active_.store(true);
+		}
+		snapshot={};snapshot.frame_index=index;snapshot.frame_count=frame_count;
+		snapshot.steps=frame.steps;snapshot.physical_time=frame.physical_time;
+		snapshot.cp_min=frame.cp_min;snapshot.cp_max=frame.cp_max;
+		snapshot.side_cp_min=frame.side_cp_min;snapshot.side_cp_max=frame.side_cp_max;
+		snapshot.has_surface_pressure=decompress_surface(frame.surface_pressure,frame.surface_triangles,
+			snapshot.cp_plus,snapshot.cp_minus,snapshot.delta_cp,
+			snapshot.triangle_pressure_force_xyz);
+		return true;
+	}
+
 	bool ParagliderSimWorker::withFlowField(
 		const std::function<void(const FlowField&)>& fn) const
 	{
 		std::lock_guard lock(flow_mutex_);
-		if (!flow_ready_ || flow_u_.empty()) return false;
+		const bool playback=playback_active_.load();
+		const auto& u=playback?playback_u_:flow_u_;
+		const auto& v=playback?playback_v_:flow_v_;
+		const auto& w=playback?playback_w_:flow_w_;
+		const auto& p=playback?playback_p_:flow_p_;
+		if(playback?!playback_has_velocity_:(!flow_ready_||u.empty()))return false;
 		FlowField field;
-		field.u = flow_u_.data(); field.v = flow_v_.data(); field.w = flow_w_.data();
-		field.p = flow_p_.data(); field.grid = flow_grid_; field.generation = flow_generation_;
+		field.u=u.data();field.v=v.data();field.w=w.data();field.p=p.empty()?nullptr:p.data();
+		field.grid=playback?playback_grid_:flow_grid_;
+		field.generation=playback?playback_generation_:flow_generation_;
 		fn(field);
 		return true;
 	}
 
-	bool ParagliderSimWorker::sampleStateLocked(const paracfd::core::Vec3d& world,StateSample& sample) const
+	bool ParagliderSimWorker::sampleStateLocked(const paracfd::core::Vec3d& world,
+		StateSample& sample,bool need_pressure) const
 	{
 		using namespace paracfd::core;
 		sample={};
@@ -143,18 +508,15 @@ namespace paracfd::gui
 		const AmrHierarchy& hierarchy = core_->hierarchy();
 		const BrickLocation location=hierarchy.locate_finest(world);
 		if(!location.found())return false;
-		const AmrHostLevelFields& level=display_amr_->levels()[location.level];
-		const BrickFieldLayout& layout=level.layout;
-		const int brick=location.brick,i=location.cell.x,j=location.cell.y,k=location.cell.z;
-		sample.u=0.5*(static_cast<double>(level.u[layout.u_index(brick,i,j,k)])
-			+static_cast<double>(level.u[layout.u_index(brick,i+1,j,k)]));
-		sample.v=0.5*(static_cast<double>(level.v[layout.v_index(brick,i,j,k)])
-			+static_cast<double>(level.v[layout.v_index(brick,i,j+1,k)]));
-		sample.w=0.5*(static_cast<double>(level.w[layout.w_index(brick,i,j,k)])
-			+static_cast<double>(level.w[layout.w_index(brick,i,j,k+1)]));
-		const int pressure_dof=core_->pressure_system().pressure_dof_at_point(core_->embedded_boundary(),world);
-		sample.p=pressure_dof>=0&&pressure_dof<static_cast<int>(display_pressure_.size())
-			?display_pressure_[pressure_dof]:0.0;
+		const Vec3d velocity=sample_amr_velocity(hierarchy,*display_amr_,world);
+		sample.u=velocity.x;sample.v=velocity.y;sample.w=velocity.z;
+		if(need_pressure)
+		{
+			const int pressure_dof=core_->pressure_system().pressure_dof_at_point(
+				core_->embedded_boundary(),world);
+			sample.p=pressure_dof>=0&&pressure_dof<static_cast<int>(display_pressure_.size())
+				?display_pressure_[pressure_dof]:0.0;
+		}
 		sample.h=hierarchy.levels()[location.level].h;
 		sample.valid=std::isfinite(sample.u)&&std::isfinite(sample.v)&&std::isfinite(sample.w)&&std::isfinite(sample.p);
 		return sample.valid;
@@ -164,8 +526,10 @@ namespace paracfd::gui
 		FieldProbeSample& sample,bool all_derived) const
 	{
 		using namespace paracfd::core;
+		const bool sample_pressure=all_derived||field==Field::PressureDelta||
+			field==Field::PressureCoefficient||field==Field::PressureGradient;
 		StateSample centre;
-		if(!sampleStateLocked(world,centre))return false;
+		if(!sampleStateLocked(world,centre,sample_pressure))return false;
 		sample={};sample.valid=true;sample.x=world.x;sample.y=world.y;sample.z=world.z;
 		sample.u=centre.u;sample.v=centre.v;sample.w=centre.w;sample.pressure_delta=centre.p;
 		const auto& freestream=core_->config().freestream;
@@ -183,8 +547,8 @@ namespace paracfd::gui
 			lo[axis]=std::max(domain.lo[axis],world[axis]-centre.h);
 			hi[axis]=std::min(std::nextafter(domain.hi[axis],domain.lo[axis]),world[axis]+centre.h);
 			StateSample a,b;
-			if(!sampleStateLocked(lo,a))a=centre;
-			if(!sampleStateLocked(hi,b))b=centre;
+			if(!sampleStateLocked(lo,a,need_pressure))a=centre;
+			if(!sampleStateLocked(hi,b,need_pressure))b=centre;
 			const double distance=hi[axis]-lo[axis];
 			if(!(distance>0))continue;
 			if(need_velocity)
@@ -217,6 +581,7 @@ namespace paracfd::gui
 	bool ParagliderSimWorker::sampleAmrSlice(
 		const SliceParams& params, std::vector<float>& values, FieldRange& range) const
 	{
+		if(playback_active_.load())return samplePlaybackSlice(params,values,range);
 		using namespace paracfd::core;
 		std::lock_guard lock(display_amr_mutex_);
 		if (!display_amr_ready_ || params.nu <= 0 || params.nv <= 0) return false;
@@ -269,6 +634,7 @@ namespace paracfd::gui
 
 	bool ParagliderSimWorker::samplePoint(double x,double y,double z,FieldProbeSample& sample) const
 	{
+		if(playback_active_.load())return samplePlaybackPoint(x,y,z,sample);
 		using namespace paracfd::core;
 		std::lock_guard lock(display_amr_mutex_);
 		if(!display_amr_ready_)return false;
@@ -281,57 +647,98 @@ namespace paracfd::gui
 		sample.x=x;sample.y=y;sample.z=z;return true;
 	}
 
+	bool ParagliderSimWorker::samplePlaybackSlice(const SliceParams& params,
+		std::vector<float>& values,FieldRange& range) const
+	{
+		paracfd::core::MacGrid grid;std::vector<double> u,v,w,p;
+		bool have_velocity=false,have_pressure=false;
+		{
+			std::lock_guard lock(flow_mutex_);if(!playback_active_.load())return false;
+			grid=playback_grid_;have_velocity=playback_has_velocity_;have_pressure=playback_has_pressure_;
+			if(have_velocity){u=playback_u_;v=playback_v_;w=playback_w_;}if(have_pressure)p=playback_p_;
+		}
+		if((field_needs_pressure(params.field)&&!have_pressure)||
+			(!field_needs_pressure(params.field)&&!have_velocity)||params.nu<=0||params.nv<=0)return false;
+		values.assign(static_cast<std::size_t>(params.nu)*params.nv,0.0f);range={};
+		range.field_min=std::numeric_limits<float>::max();range.field_max=std::numeric_limits<float>::lowest();
+		for(int row=0;row<params.nv;++row)for(int column=0;column<params.nu;++column)
+		{
+			float x,y,z;slice_vertex_world(params,column,row,x,y,z);
+			const float value=coarse_scalar_at_point(grid,u,v,w,p,have_velocity,have_pressure,
+				params.field,x,y,z,params.rho,params.reference_speed);
+			if(!std::isfinite(value))continue;
+			values[static_cast<std::size_t>(row)*params.nu+column]=value;
+			range.field_min=std::min(range.field_min,value);range.field_max=std::max(range.field_max,value);
+			if(have_velocity)
+			{
+				const float speed=coarse_scalar_at_point(grid,u,v,w,p,true,have_pressure,
+					Field::SpeedMag,x,y,z,params.rho,params.reference_speed);
+				if(std::isfinite(speed))range.speed_max=std::max(range.speed_max,speed);
+			}
+		}
+		range.valid=range.field_min<=range.field_max;return range.valid;
+	}
+
+	bool ParagliderSimWorker::samplePlaybackPoint(double x,double y,double z,
+		FieldProbeSample& sample) const
+	{
+		paracfd::core::MacGrid grid;std::vector<double> u,v,w,p;
+		{
+			std::lock_guard lock(flow_mutex_);if(!playback_active_.load()||
+				!playback_has_velocity_||!playback_has_pressure_)return false;
+			grid=playback_grid_;u=playback_u_;v=playback_v_;w=playback_w_;p=playback_p_;
+		}
+		if(x<0||y<0||z<0||x>grid.nx*grid.h||y>grid.ny*grid.h||z>grid.nz*grid.h)return false;
+		const auto& freestream=core_->config().freestream;sample={};sample.valid=true;
+		sample.x=x;sample.y=y;sample.z=z;
+		auto scalar=[&](Field field){return coarse_scalar_at_point(grid,u,v,w,p,true,true,field,
+			x,y,z,freestream.rho,freestream.speed);};
+		sample.u=scalar(Field::VelU);sample.v=scalar(Field::VelV);sample.w=scalar(Field::VelW);
+		sample.pressure_delta=scalar(Field::PressureDelta);
+		sample.pressure_coefficient=scalar(Field::PressureCoefficient);
+		sample.pressure_gradient=scalar(Field::PressureGradient);
+		sample.vorticity_magnitude=scalar(Field::VorticityMagnitude);
+		sample.q_criterion=scalar(Field::QCriterion);
+		return true;
+	}
+
 	bool ParagliderSimWorker::scalarVolume(Field field,ScalarVolume& volume) const
 	{
 		using namespace paracfd::core;
 		MacGrid g;std::vector<double> u_faces,v_faces,w_faces,pressure;std::uint64_t generation=0;
+		bool have_velocity=false,have_pressure=false;
 		{
 			// Keep publication latency bounded: copy the immutable snapshot under the mutex and
 			// evaluate derivatives after releasing it. Q and vorticity are intentionally CPU-side
 			// visualization products and can otherwise hold this lock for an entire volume pass.
 			std::lock_guard lock(flow_mutex_);
-			if(!flow_ready_||flow_u_.empty())return false;
-			if(volume.valid()&&volume.generation==flow_generation_&&volume.field==field)return true;
-			g=flow_grid_;u_faces=flow_u_;v_faces=flow_v_;w_faces=flow_w_;pressure=flow_p_;generation=flow_generation_;
+			const bool playback=playback_active_.load();
+			if(playback)
+			{
+				have_velocity=playback_has_velocity_;have_pressure=playback_has_pressure_;
+				generation=playback_generation_;g=playback_grid_;
+				if(have_velocity){u_faces=playback_u_;v_faces=playback_v_;w_faces=playback_w_;}
+				if(have_pressure)pressure=playback_p_;
+			}
+			else
+			{
+				if(!flow_ready_)return false;have_velocity=!flow_u_.empty();have_pressure=!flow_p_.empty();
+				generation=flow_generation_;g=flow_grid_;
+				u_faces=flow_u_;v_faces=flow_v_;w_faces=flow_w_;pressure=flow_p_;
+			}
+			if(volume.valid()&&volume.generation==generation&&volume.field==field)return true;
 		}
+		if((field_needs_pressure(field)&&!have_pressure)||
+			(!field_needs_pressure(field)&&!have_velocity))return false;
 		volume={};volume.nx=g.nx;volume.ny=g.ny;volume.nz=g.nz;
 		volume.h=static_cast<float>(g.h);volume.generation=generation;volume.field=field;
 		volume.values.resize(static_cast<std::size_t>(g.p_count()));
-		auto velocity_component=[&](int component,int i,int j,int k)
-		{
-			i=std::clamp(i,0,g.nx-1);j=std::clamp(j,0,g.ny-1);k=std::clamp(k,0,g.nz-1);
-			if(component==0)return 0.5*(u_faces[g.uidx(i,j,k)]+u_faces[g.uidx(i+1,j,k)]);
-			if(component==1)return 0.5*(v_faces[g.vidx(i,j,k)]+v_faces[g.vidx(i,j+1,k)]);
-			return 0.5*(w_faces[g.widx(i,j,k)]+w_faces[g.widx(i,j,k+1)]);
-		};
-		auto derivative=[&](int component,int axis,int i,int j,int k)
-		{
-			const int c=axis==0?i:axis==1?j:k,n=axis==0?g.nx:axis==1?g.ny:g.nz;
-			const int a=std::clamp(c-1,0,n-1),b=std::clamp(c+1,0,n-1);if(a==b)return 0.0;
-			int ia=i,ja=j,ka=k,ib=i,jb=j,kb=k;if(axis==0){ia=a;ib=b;}else if(axis==1){ja=a;jb=b;}else{ka=a;kb=b;}
-			return (velocity_component(component,ib,jb,kb)-velocity_component(component,ia,ja,ka))/((b-a)*g.h);
-		};
 		const auto& freestream=core_->config().freestream;
-		const double dynamic_pressure=0.5*freestream.rho*freestream.speed*freestream.speed;
 		volume.minimum=std::numeric_limits<float>::max();volume.maximum=std::numeric_limits<float>::lowest();
 		for(int k=0;k<g.nz;++k)for(int j=0;j<g.ny;++j)for(int i=0;i<g.nx;++i)
 		{
-			const double u=velocity_component(0,i,j,k),v=velocity_component(1,i,j,k),w=velocity_component(2,i,j,k);
-			float value=static_cast<float>(std::sqrt(u*u+v*v+w*w));
-			if(field==Field::VelU)value=static_cast<float>(u);else if(field==Field::VelV)value=static_cast<float>(v);else if(field==Field::VelW)value=static_cast<float>(w);
-			else if(field==Field::PressureDelta)value=static_cast<float>(pressure[g.pidx(i,j,k)]);
-			else if(field==Field::PressureCoefficient)value=dynamic_pressure>0?static_cast<float>(pressure[g.pidx(i,j,k)]/dynamic_pressure):0.0f;
-			else if(field==Field::PressureGradient)
-			{
-				auto pd=[&](int axis){const int c=axis==0?i:axis==1?j:k,n=axis==0?g.nx:axis==1?g.ny:g.nz;const int a=std::clamp(c-1,0,n-1),b=std::clamp(c+1,0,n-1);if(a==b)return 0.0;int ia=i,ja=j,ka=k,ib=i,jb=j,kb=k;if(axis==0){ia=a;ib=b;}else if(axis==1){ja=a;jb=b;}else{ka=a;kb=b;}return(pressure[g.pidx(ib,jb,kb)]-pressure[g.pidx(ia,ja,ka)])/((b-a)*g.h);};
-				const double x=pd(0),y=pd(1),z=pd(2);value=static_cast<float>(std::sqrt(x*x+y*y+z*z));
-			}
-			else if(field==Field::VorticityMagnitude||field==Field::QCriterion)
-			{
-				double a[3][3];for(int row=0;row<3;++row)for(int column=0;column<3;++column)a[row][column]=derivative(row,column,i,j,k);
-				if(field==Field::VorticityMagnitude){const double x=a[2][1]-a[1][2],y=a[0][2]-a[2][0],z=a[1][0]-a[0][1];value=static_cast<float>(std::sqrt(x*x+y*y+z*z));}
-				else{double ss=0,oo=0;for(int row=0;row<3;++row)for(int column=0;column<3;++column){const double s=0.5*(a[row][column]+a[column][row]),o=0.5*(a[row][column]-a[column][row]);ss+=s*s;oo+=o*o;}value=static_cast<float>(0.5*(oo-ss));}
-			}
+			float value=coarse_scalar(g,u_faces,v_faces,w_faces,pressure,have_velocity,
+				have_pressure,field,i,j,k,freestream.rho,freestream.speed);
 			if(!std::isfinite(value))value=0.0f;volume.values[static_cast<std::size_t>(g.pidx(i,j,k))]=value;
 			volume.minimum=std::min(volume.minimum,value);volume.maximum=std::max(volume.maximum,value);
 		}
@@ -340,7 +747,9 @@ namespace paracfd::gui
 
 	std::uint64_t ParagliderSimWorker::visualizationGeneration() const
 	{
-		std::lock_guard lock(flow_mutex_);return flow_ready_?flow_generation_:0;
+		std::lock_guard lock(flow_mutex_);
+		if(playback_active_.load())return playback_generation_;
+		return flow_ready_?flow_generation_:0;
 	}
 
 	void ParagliderSimWorker::publishFlowField()
@@ -361,51 +770,46 @@ namespace paracfd::gui
 		grid.nz = std::max(1, static_cast<int>(std::llround(extent.z / h)));
 		grid.h = h;
 
-		// Resample cell-centred values from the finest active brick. This copy is solely a
-		// visualization product; the CFD fields remain staggered, FP32, and GPU resident.
-		const std::size_t cells = static_cast<std::size_t>(grid.p_count());
-		std::vector<double> uc(cells), vc(cells), wc(cells), pressure(cells);
+		// Resample the continuous composite AMR reconstruction. This copy is solely a
+		// visualization/recording product; the CFD fields remain staggered, FP32, and GPU resident.
+		const std::size_t cells=static_cast<std::size_t>(grid.p_count());
+		std::vector<double> uc(cells),vc(cells),wc(cells),pressure(cells);
 		for (int k = 0; k < grid.nz; ++k)
 			for (int j = 0; j < grid.ny; ++j)
 				for (int i = 0; i < grid.nx; ++i)
 				{
 					const Vec3d world{domain.lo.x + (i + 0.5) * h,
 						domain.lo.y + (j + 0.5) * h, domain.lo.z + (k + 0.5) * h};
-					const BrickLocation location = hierarchy.locate_finest(world);
-					if (!location.found()) continue;
-					const AmrHostLevelFields& level = display_amr_->levels()[location.level];
-					const BrickFieldLayout& layout = level.layout;
-					const int bi = location.brick, li = location.cell.x, lj = location.cell.y, lk = location.cell.z;
-					const std::size_t out = static_cast<std::size_t>(grid.pidx(i, j, k));
-					uc[out] = 0.5 * (static_cast<double>(level.u[layout.u_index(bi, li, lj, lk)])
-						+ static_cast<double>(level.u[layout.u_index(bi, li + 1, lj, lk)]));
-					vc[out] = 0.5 * (static_cast<double>(level.v[layout.v_index(bi, li, lj, lk)])
-						+ static_cast<double>(level.v[layout.v_index(bi, li, lj + 1, lk)]));
-					wc[out] = 0.5 * (static_cast<double>(level.w[layout.w_index(bi, li, lj, lk)])
-						+ static_cast<double>(level.w[layout.w_index(bi, li, lj, lk + 1)]));
+					const BrickLocation location=hierarchy.locate_finest(world);
+					if(!location.found())continue;
+					const std::size_t out=static_cast<std::size_t>(grid.pidx(i,j,k));
+					const Vec3d velocity=sample_amr_velocity(hierarchy,*display_amr_,world);
+					uc[out]=velocity.x;vc[out]=velocity.y;wc[out]=velocity.z;
+					const AmrHostLevelFields& level=display_amr_->levels()[location.level];
+					const BrickFieldLayout& layout=level.layout;
+					const int bi=location.brick,li=location.cell.x,lj=location.cell.y,lk=location.cell.z;
 					const int pressure_dof=core_->pressure_system().pressure_dof_at_point(core_->embedded_boundary(),world);
 					pressure[out]=pressure_dof>=0&&pressure_dof<static_cast<int>(display_pressure_.size())
 						?display_pressure_[pressure_dof]:static_cast<double>(level.p[layout.cell_index(bi,li,lj,lk)]);
 				}
-
 		std::vector<double> u(static_cast<std::size_t>(grid.u_count()));
 		std::vector<double> v(static_cast<std::size_t>(grid.v_count()));
 		std::vector<double> w(static_cast<std::size_t>(grid.w_count()));
 		auto finite_or_zero = [](double value) { return std::isfinite(value) ? value : 0.0; };
 		for (int k = 0; k < grid.nz; ++k) for (int j = 0; j < grid.ny; ++j) for (int i = 0; i <= grid.nx; ++i)
 		{
-			const int left = std::max(0, i - 1), right = std::min(grid.nx - 1, i);
-			u[grid.uidx(i,j,k)] = finite_or_zero(0.5 * (uc[grid.pidx(left,j,k)] + uc[grid.pidx(right,j,k)]));
+			const int left=std::max(0,i-1),right=std::min(grid.nx-1,i);
+			u[grid.uidx(i,j,k)]=finite_or_zero(0.5*(uc[grid.pidx(left,j,k)]+uc[grid.pidx(right,j,k)]));
 		}
 		for (int k = 0; k < grid.nz; ++k) for (int j = 0; j <= grid.ny; ++j) for (int i = 0; i < grid.nx; ++i)
 		{
-			const int below = std::max(0, j - 1), above = std::min(grid.ny - 1, j);
-			v[grid.vidx(i,j,k)] = finite_or_zero(0.5 * (vc[grid.pidx(i,below,k)] + vc[grid.pidx(i,above,k)]));
+			const int below=std::max(0,j-1),above=std::min(grid.ny-1,j);
+			v[grid.vidx(i,j,k)]=finite_or_zero(0.5*(vc[grid.pidx(i,below,k)]+vc[grid.pidx(i,above,k)]));
 		}
 		for (int k = 0; k <= grid.nz; ++k) for (int j = 0; j < grid.ny; ++j) for (int i = 0; i < grid.nx; ++i)
 		{
-			const int back = std::max(0, k - 1), front = std::min(grid.nz - 1, k);
-			w[grid.widx(i,j,k)] = finite_or_zero(0.5 * (wc[grid.pidx(i,j,back)] + wc[grid.pidx(i,j,front)]));
+			const int back=std::max(0,k-1),front=std::min(grid.nz-1,k);
+			w[grid.widx(i,j,k)]=finite_or_zero(0.5*(wc[grid.pidx(i,j,back)]+wc[grid.pidx(i,j,front)]));
 		}
 		for (double& value : pressure) value = finite_or_zero(value);
 		display_amr_ready_ = true;
@@ -421,6 +825,67 @@ namespace paracfd::gui
 		flow_u_.swap(u); flow_v_.swap(v); flow_w_.swap(w); flow_p_.swap(pressure);
 		++flow_generation_;
 		flow_ready_ = true;
+	}
+
+	void ParagliderSimWorker::captureRecordingFrame(double scheduled_time,long long steps)
+	{
+		RecordingOptions options;std::uint64_t recording_epoch=0;
+		{
+			std::lock_guard lock(recording_mutex_);options=recording_options_;
+			recording_epoch=recording_epoch_;
+		}
+		if(!options.any())return;
+		RecordedFrame frame;frame.physical_time=scheduled_time;frame.steps=steps;
+		std::vector<double> u,v,w,p;
+		{
+			std::lock_guard lock(flow_mutex_);if(!flow_ready_)return;frame.grid=flow_grid_;
+			if(options.velocity){u=flow_u_;v=flow_v_;w=flow_w_;}
+			if(options.pressure)p=flow_p_;
+		}
+		if(options.velocity)frame.velocity=compress_as_float_blocks({&u,&v,&w});
+		if(options.pressure)frame.pressure=compress_as_float(p);
+		if(options.surface_pressure)
+		{
+			std::vector<float> plus,minus,delta,forces;
+			{
+				std::lock_guard lock(snapshot_mutex_);plus=snapshot_.cp_plus;minus=snapshot_.cp_minus;
+				delta=snapshot_.delta_cp;forces=snapshot_.triangle_pressure_force_xyz;
+				frame.cp_min=snapshot_.cp_min;frame.cp_max=snapshot_.cp_max;
+				frame.side_cp_min=snapshot_.side_cp_min;frame.side_cp_max=snapshot_.side_cp_max;
+			}
+			if(!plus.empty()&&plus.size()==minus.size()&&plus.size()==delta.size()&&
+				forces.size()==3*plus.size())
+			{
+				frame.surface_triangles=plus.size();
+				frame.surface_pressure=compress_float_blocks({&plus,&minus,&delta,&forces});
+			}
+		}
+		frame.compressed_bytes=static_cast<std::size_t>(frame.velocity.size()+frame.pressure.size()+
+			frame.surface_pressure.size());
+		{
+			std::lock_guard lock(recording_mutex_);
+			// A configuration change clears the timeline. Do not append a frame encoded with
+			// the superseded channel layout after that clear.
+			if(recording_epoch!=recording_epoch_||options.velocity!=recording_options_.velocity||
+				options.pressure!=recording_options_.pressure||
+				options.surface_pressure!=recording_options_.surface_pressure||
+				options.every_step!=recording_options_.every_step)return;
+			recorded_compressed_bytes_+=frame.compressed_bytes;recorded_frames_.push_back(std::move(frame));
+		}
+	}
+
+	void ParagliderSimWorker::captureScheduledRecordingFrames(double physical_time,long long steps)
+	{
+		for(;;)
+		{
+			double scheduled=0;
+			{
+				std::lock_guard lock(recording_mutex_);if(!recording_options_.any()||recording_options_.every_step||
+					next_recording_time_>physical_time+1e-10)return;
+				scheduled=next_recording_time_;next_recording_time_+=kRecordingInterval;
+			}
+			captureRecordingFrame(scheduled,steps);
+		}
 	}
 
 	void ParagliderSimWorker::updateSettling(double physical_time,const paracfd::core::Vec3d& force,const paracfd::core::ExternalAeroConservationStats& conservation)
@@ -587,7 +1052,8 @@ namespace paracfd::gui
 		return true;
 	}
 
-	void ParagliderSimWorker::publish(const paracfd::core::ExternalAeroStepStats& stats,bool include_surface)
+	void ParagliderSimWorker::publish(const paracfd::core::ExternalAeroStepStats& stats,
+		bool include_surface,bool update_convergence)
 	{
 		std::vector<float> cp_plus,cp_minus,delta_cp,triangle_pressure_force_xyz;
 		float cp_min = 0.0f, cp_max = 0.0f,side_cp_min=0.0f,side_cp_max=0.0f;
@@ -620,7 +1086,8 @@ namespace paracfd::gui
 			side_cp_min=-side_maximum;
 			side_cp_max=side_maximum;
 		}
-		if(have_surface)updateSettling(stats.physical_time,loads.viscous_loads_valid?loads.total_force:loads.pressure_force,conservation);
+		if(have_surface&&update_convergence)updateSettling(stats.physical_time,
+			loads.viscous_loads_valid?loads.total_force:loads.pressure_force,conservation);
 
 		std::lock_guard lock(snapshot_mutex_);
 		snapshot_.steps = steps_;
@@ -694,12 +1161,22 @@ namespace paracfd::gui
 	{
 		try
 		{
+			{
+				std::lock_guard lock(recording_mutex_);recording_started_.store(recording_options_.any());
+			}
 			paracfd::core::ExternalAeroStepStats stats = core_->initialize();
 			publishFlowField();
 			// The zero-time projection creates a divergence-free, impermeable initial
 			// velocity. Its pressure is the impulse required to create that state from
 			// uniform flow, not an evolved aerodynamic pressure field.
 			publish(stats, false);
+			bool record_every_step=false;
+			{
+				std::lock_guard lock(recording_mutex_);record_every_step=recording_options_.any()&&
+					recording_options_.every_step;
+			}
+			if(record_every_step)captureRecordingFrame(stats.physical_time,steps_);
+			else captureScheduledRecordingFrames(stats.physical_time,steps_);
 			if (!stats.pressure.converged)
 			{
 				char message[192];
@@ -744,9 +1221,22 @@ namespace paracfd::gui
 				}
 				// Surface loads require a deliberately throttled pressure download; scalar
 				// solver telemetry remains available after every GPU step.
-				const bool publish_fields = steps_ == 1 || (steps_ % 10) == 0;
+				bool record_due=false,record_every_step=false;
+				{
+					std::lock_guard lock(recording_mutex_);record_every_step=recording_options_.any()&&
+						recording_options_.every_step;
+					record_due=recording_options_.any()&&(record_every_step||
+						next_recording_time_<=stats.physical_time+1e-10);
+				}
+				const bool convergence_publish=steps_==1||(steps_%10)==0;
+				const bool publish_fields=convergence_publish||record_due;
 				if (publish_fields) publishFlowField();
-				publish(stats, publish_fields);
+				publish(stats,publish_fields,convergence_publish);
+				if(record_due)
+				{
+					if(record_every_step)captureRecordingFrame(stats.physical_time,steps_);
+					else captureScheduledRecordingFrames(stats.physical_time,steps_);
+				}
 			}
 		}
 		catch (const std::exception& exception)
@@ -758,6 +1248,7 @@ namespace paracfd::gui
 			snapshot_.playing = false;
 			++snapshot_.generation;
 		}
+		recording_started_.store(false);
 		emit finished();
 	}
 }

@@ -70,6 +70,7 @@ namespace paracfd::gui
 		// arrow host-flow request to the (possibly new) worker.
 		void setParagliderWorker(ParagliderSimWorker* w);
 		void setInfo(const SimInfo& info);
+		void resetFlowAnimation();
 		// Camera framing is deliberately separate from physical placement: a paraglider
 		// is upstream of the centre of its long wake domain, so fitting the domain makes
 		// a correctly placed wing look small and off-centre.
@@ -87,6 +88,8 @@ namespace paracfd::gui
 			const QString& error_label=QString{},bool mean_force_ready=false,
 			double mean_force_drift=0.0,double mean_force_tolerance=0.02,
 			double maximum_flow_throughs=2.5);
+		void setPlaybackState(bool active,std::size_t frame=0,std::size_t frame_count=0,
+			double physical_time=0,bool discontinuity=false);
 
 		// Live-update ONLY the reference speed used for the fixed per-field colour range + the arrow
 		// speed-scale fallback (both matter when auto-range is off). Follows a live "Input speed"
@@ -405,6 +408,9 @@ namespace paracfd::gui
 		double simulation_mean_force_drift_=0,simulation_mean_force_tolerance_=0.02;
 		double simulation_maximum_flow_throughs_=2.5;
 		bool simulation_mean_force_ready_=false;
+		bool playback_active_=false;
+		std::size_t playback_frame_=0,playback_frame_count_=0;
+		double playback_physical_time_=0;
 
 		// GL objects.
 		QOpenGLShaderProgram prog_;

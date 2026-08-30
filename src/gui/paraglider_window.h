@@ -2,6 +2,7 @@
 
 #include "core/geometry/step_import.h"
 #include "core/paraglider_config.h"
+#include "gui/paraglider_sim_worker.h"
 
 #include <QMainWindow>
 #include <QElapsedTimer>
@@ -13,6 +14,7 @@
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QFrame;
 class QLabel;
 class QMenu;
 class QPlainTextEdit;
@@ -32,7 +34,6 @@ namespace paracfd::gui
 {
 	class ParagliderSimWorker;
 	class SliceViewer;
-	struct ParagliderDisplaySnapshot;
 
 	// Purpose-built paraglider application shell: validated STEP solid -> conservative cut cells
 	// cuts -> static AMR/EB -> GPU. The TriMesh is both CFD and display geometry.
@@ -92,12 +93,32 @@ namespace paracfd::gui
 			const paracfd::core::ExternalAeroPreprocessingError& error);
 		void spawnWorker(std::unique_ptr<paracfd::core::ExternalAeroCore> core);
 		void shutdownWorker();
+		void showRecordingDialog();
+		void updateRecordingButton();
+		void updatePlaybackPanel();
+		void resetPlaybackSession();
+		void setPlaybackFrame(int frame,bool discontinuity=false);
+		void startPlayback(int direction);
+		void stopPlayback();
+		void leavePlayback();
+		void applyPlaybackSurface(const PlaybackFrameSnapshot& frame);
 
 		SliceViewer* viewer_=nullptr;
 		ParagliderSimWorker* worker_=nullptr;
 		QThread* worker_thread_=nullptr;
 		QTimer* repaint_timer_=nullptr;
+		QTimer* playback_timer_=nullptr;
 		QMenu* recent_files_menu_=nullptr;
+		QFrame* playback_panel_=nullptr;
+		QLabel *playback_dataset_label_=nullptr,*playback_time_label_=nullptr;
+		QPushButton *recording_button_=nullptr,*playback_rewind_button_=nullptr,
+			*playback_play_button_=nullptr,*playback_stop_button_=nullptr;
+		QSlider* playback_slider_=nullptr;
+		RecordingOptions recording_options_{};
+		std::size_t playback_known_frames_=0;
+		int playback_frame_=0,playback_direction_=0;
+		double playback_frame_time_=0,playback_anchor_time_=0;
+		QElapsedTimer playback_clock_;
 
 		paracfd::core::ParagliderConfig config_;
 		paracfd::core::TriMesh imported_mesh_;

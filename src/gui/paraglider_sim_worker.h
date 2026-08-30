@@ -5,6 +5,7 @@
 #include "gui/flow_particles.h"
 #include "gui/slice_field.h"
 
+#include <QByteArray>
 #include <QObject>
 
 #include <atomic>
@@ -18,6 +19,39 @@
 
 namespace paracfd::gui
 {
+	// Playback records the independent source channels. Derived views are rebuilt on demand,
+	// so selecting velocity also covers speed, vorticity, Q, arrows and tracers; selecting
+	// pressure also covers Cp and the pressure gradient.
+	struct RecordingOptions
+	{
+		bool velocity = true;
+		bool pressure = true;
+		bool surface_pressure = true;
+		bool every_step = false;
+		bool any() const { return velocity || pressure || surface_pressure; }
+	};
+
+	struct PlaybackDatasetInfo
+	{
+		RecordingOptions channels;
+		std::size_t frame_count = 0;
+		std::size_t compressed_bytes = 0;
+		double first_time = 0, last_time = 0;
+		bool recording = false;
+	};
+
+	struct PlaybackFrameSnapshot
+	{
+		std::size_t frame_index = 0, frame_count = 0;
+		long long steps = 0;
+		double physical_time = 0;
+		bool has_surface_pressure = false;
+		std::vector<float> cp_plus, cp_minus, delta_cp;
+		std::vector<float> triangle_pressure_force_xyz;
+		float cp_min = -1, cp_max = 1;
+		float side_cp_min = -1, side_cp_max = 1;
+	};
+
 	struct FieldProbeSample
 	{
 		bool valid = false;
@@ -100,6 +134,12 @@ namespace paracfd::gui
 		void stepOnce();
 		void configureAutoPause(bool enabled,double sensitivity);
 		void configureConvergenceExit(double relative_mean_tolerance,double maximum_flow_throughs);
+		void configureRecording(const RecordingOptions& options);
+		PlaybackDatasetInfo playbackDatasetInfo() const;
+		std::size_t playbackFrameAtTime(double physical_time,int direction) const;
+		bool setPlaybackFrame(std::size_t index,PlaybackFrameSnapshot& snapshot);
+		void endPlayback();
+		bool playbackActive() const { return playback_active_.load(); }
 		bool latestSnapshot(std::uint64_t& generation, std::uint64_t& surface_generation,
 			ParagliderDisplaySnapshot& out) const;
 		// Borrow the latest coarse, uniform display resampling of the live AMR fields.
@@ -126,11 +166,18 @@ namespace paracfd::gui
 			bool valid = false;
 			double u = 0, v = 0, w = 0, p = 0, h = 0;
 		};
-		bool sampleStateLocked(const paracfd::core::Vec3d& world, StateSample& sample) const;
+		bool sampleStateLocked(const paracfd::core::Vec3d& world, StateSample& sample,
+			bool need_pressure) const;
 		bool sampleDerivedLocked(const paracfd::core::Vec3d& world, Field field,
 			FieldProbeSample& sample, bool all_derived) const;
-		void publish(const paracfd::core::ExternalAeroStepStats& stats,bool include_surface);
+		void publish(const paracfd::core::ExternalAeroStepStats& stats,bool include_surface,
+			bool update_convergence=true);
 		void publishFlowField();
+		void captureRecordingFrame(double scheduled_time,long long steps);
+		void captureScheduledRecordingFrames(double physical_time,long long steps);
+		bool samplePlaybackSlice(const SliceParams& params,std::vector<float>& values,
+			FieldRange& range) const;
+		bool samplePlaybackPoint(double x,double y,double z,FieldProbeSample& sample) const;
 		void updateSettling(double physical_time,const paracfd::core::Vec3d& force,
 			const paracfd::core::ExternalAeroConservationStats& conservation);
 		struct SettlingSample{double time=0;paracfd::core::Vec3d force{};double flow_change=0;};
@@ -150,6 +197,28 @@ namespace paracfd::gui
 		std::vector<double> flow_u_, flow_v_, flow_w_, flow_p_;
 		bool flow_ready_ = false;
 		std::uint64_t flow_generation_ = 0;
+		struct RecordedFrame
+		{
+			double physical_time = 0;
+			long long steps = 0;
+			paracfd::core::MacGrid grid{};
+			QByteArray velocity,pressure,surface_pressure;
+			std::size_t surface_triangles = 0;
+			std::size_t compressed_bytes = 0;
+			float cp_min = -1,cp_max = 1,side_cp_min = -1,side_cp_max = 1;
+		};
+		mutable std::mutex recording_mutex_;
+		RecordingOptions recording_options_{};
+		std::vector<RecordedFrame> recorded_frames_;
+		std::size_t recorded_compressed_bytes_ = 0;
+		std::uint64_t recording_epoch_ = 0;
+		double next_recording_time_ = 0;
+		static constexpr double kRecordingInterval = 1.0 / 30.0;
+		std::atomic<bool> recording_started_{false},playback_active_{false};
+		paracfd::core::MacGrid playback_grid_{};
+		std::vector<double> playback_u_,playback_v_,playback_w_,playback_p_;
+		bool playback_has_velocity_ = false,playback_has_pressure_ = false;
+		std::uint64_t playback_generation_ = (std::uint64_t{1} << 63);
 		double latest_flow_change_ = 0;
 		std::deque<SettlingSample> settling_history_;
 		std::deque<paracfd::core::TimedAerodynamicForce> mean_force_history_;

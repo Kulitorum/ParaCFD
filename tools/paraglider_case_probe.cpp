@@ -1,4 +1,5 @@
 #include "core/fluid/external_aero_core.h"
+#include "core/fluid/amr_sampling.h"
 #include "core/geometry/mesh_clip.h"
 #include "core/geometry/step_import.h"
 #include "core/geometry/triangle_bvh.h"
@@ -170,6 +171,50 @@ namespace
 		const AmrHostLevelFields& level=fields.levels()[location.level];const int brick=location.brick,i=location.cell.x,j=location.cell.y,k=location.cell.z;
 		return {0.5*(static_cast<double>(level.u[level.layout.u_index(brick,i,j,k)])+static_cast<double>(level.u[level.layout.u_index(brick,i+1,j,k)])),0.5*(static_cast<double>(level.v[level.layout.v_index(brick,i,j,k)])+static_cast<double>(level.v[level.layout.v_index(brick,i,j+1,k)])),0.5*(static_cast<double>(level.w[level.layout.w_index(brick,i,j,k)])+static_cast<double>(level.w[level.layout.w_index(brick,i,j,k+1)]))};
 	}
+	void report_coarse_fine_velocity_jumps(const ExternalAeroCore& core,const AmrHostFields& fields)
+	{
+		const CompositeAmrPressureSystem& system=core.pressure_system();double area=0,speed_square=0,maximum=0;
+		double limit_speed_square=0,limit_maximum=0,magnitude_square=0,magnitude_maximum=0;
+		std::size_t worst=0,limit_worst=0,magnitude_worst=0;
+		for(std::size_t edge=0;edge<system.coarse_fine.size();++edge)
+		{
+			const CoarseFinePressureConnection& connection=system.coarse_fine[edge];
+			const Vec3d coarse=nearest_cell_velocity(core.hierarchy(),fields,system.centroid[connection.coarse_dof]);
+			const Vec3d fine=nearest_cell_velocity(core.hierarchy(),fields,system.centroid[connection.fine_dof]);
+			const double jump=std::sqrt(length2(fine-coarse));area+=connection.open_area;
+			speed_square+=connection.open_area*jump*jump;if(jump>maximum){maximum=jump;worst=edge;}
+			Vec3d offset{};offset[static_cast<int>(connection.axis)]=1e-6*core.hierarchy().levels().back().h;
+			const Vec3d lower=sample_amr_velocity(core.hierarchy(),fields,connection.face_centroid-offset);
+			const Vec3d upper=sample_amr_velocity(core.hierarchy(),fields,connection.face_centroid+offset);
+			const double limit_jump=std::sqrt(length2(upper-lower));
+			limit_speed_square+=connection.open_area*limit_jump*limit_jump;
+			if(limit_jump>limit_maximum){limit_maximum=limit_jump;limit_worst=edge;}
+			const double magnitude_jump=std::abs(std::sqrt(length2(upper))-std::sqrt(length2(lower)));
+			magnitude_square+=connection.open_area*magnitude_jump*magnitude_jump;
+			if(magnitude_jump>magnitude_maximum){magnitude_maximum=magnitude_jump;magnitude_worst=edge;}
+		}
+		if(system.coarse_fine.empty())return;const CoarseFinePressureConnection& connection=system.coarse_fine[worst];
+		const Vec3d coarse=nearest_cell_velocity(core.hierarchy(),fields,system.centroid[connection.coarse_dof]);
+		const Vec3d fine=nearest_cell_velocity(core.hierarchy(),fields,system.centroid[connection.fine_dof]);
+		std::printf("[paraglider-case]   coarse/fine cell-velocity jump: rms=%.6g max=%.6g m/s edge=%zu axis=%d centre=[%.6g %.6g %.6g] coarse=[%.6g %.6g %.6g] fine=[%.6g %.6g %.6g]\n",
+			area>0?std::sqrt(speed_square/area):0,maximum,worst,static_cast<int>(connection.axis),
+			connection.face_centroid.x,connection.face_centroid.y,connection.face_centroid.z,
+			coarse.x,coarse.y,coarse.z,fine.x,fine.y,fine.z);
+		const CoarseFinePressureConnection& limit_connection=system.coarse_fine[limit_worst];
+		Vec3d limit_offset{};limit_offset[static_cast<int>(limit_connection.axis)]=1e-6*core.hierarchy().levels().back().h;
+		const Vec3d limit_lower=sample_amr_velocity(core.hierarchy(),fields,limit_connection.face_centroid-limit_offset);
+		const Vec3d limit_upper=sample_amr_velocity(core.hierarchy(),fields,limit_connection.face_centroid+limit_offset);
+		const BrickLocation lower_owner=core.hierarchy().locate_finest(limit_connection.face_centroid-limit_offset);
+		const BrickLocation upper_owner=core.hierarchy().locate_finest(limit_connection.face_centroid+limit_offset);
+		std::printf("[paraglider-case]   composite AMR interface-limit jump: rms=%.6g max=%.6g m/s edge=%zu axis=%d centre=[%.6g %.6g %.6g] lower=L%d [%.6g %.6g %.6g] upper=L%d [%.6g %.6g %.6g]\n",
+			area>0?std::sqrt(limit_speed_square/area):0,limit_maximum,limit_worst,
+			static_cast<int>(limit_connection.axis),limit_connection.face_centroid.x,
+			limit_connection.face_centroid.y,limit_connection.face_centroid.z,
+			lower_owner.level,limit_lower.x,limit_lower.y,limit_lower.z,
+			upper_owner.level,limit_upper.x,limit_upper.y,limit_upper.z);
+		std::printf("[paraglider-case]   composite AMR speed interface-limit jump: rms=%.6g max=%.6g m/s edge=%zu\n",
+			area>0?std::sqrt(magnitude_square/area):0,magnitude_maximum,magnitude_worst);
+	}
 
 	void report_circulation(const ExternalAeroCore& core,const TriMesh& wing,double freestream_speed,double reference_length)
 	{
@@ -194,6 +239,7 @@ namespace
 		if(diagnostic_fields&&bvh)
 		{
 			const FieldMaximum maximum=locate_regular_maximum(core,*diagnostic_fields);const NearestSurfacePoint nearest=bvh->nearest(maximum.point);std::printf("[paraglider-case]   active regular maximum: %.6g m/s component=%c level=%d brick=%d ijk=[%d %d %d] point=[%.6g %.6g %.6g] fabric-distance=%.6g m triangle=%u\n",maximum.value,maximum.component>=0?"uvw"[maximum.component]:'?',maximum.level,maximum.brick,maximum.i,maximum.j,maximum.k,maximum.point.x,maximum.point.y,maximum.point.z,nearest.found?nearest.distance:-1.0,nearest.triangle_id);
+			report_coarse_fine_velocity_jumps(core,*diagnostic_fields);
 			CompositeCellMomentumState cell_state;if(core.download_cell_momentum_state(cell_state)){int max_dof=-1,max_component=-1;double max_value=0;for(int q=0;q<system.storage_size;++q)if(system.active[q])for(int component=0;component<3;++component){const double value=std::abs(static_cast<double>(component==0?cell_state.x[q]:(component==1?cell_state.y[q]:cell_state.z[q])));if(value>max_value){max_value=value;max_dof=q;max_component=component;}}if(max_dof>=0){int degree=0;double open_area=0,wall_area=0;for(const auto& edge:system.embedded)if(edge.coarse_dof==max_dof||edge.fine_dof==max_dof){++degree;open_area+=edge.open_area;}for(const auto& edge:system.coarse_fine)if(edge.coarse_dof==max_dof||edge.fine_dof==max_dof){++degree;open_area+=edge.open_area;}for(const auto& patch:system.surface_patches)if(patch.plus_dof==max_dof||patch.minus_dof==max_dof)wall_area+=patch.area;const Vec3d centre=system.centroid[max_dof];const BrickLocation owner=core.hierarchy().locate_finest(centre);const double h=owner.found()?core.hierarchy().levels()[owner.level].h:core.hierarchy().finest_cell_size();const NearestSurfacePoint cell_nearest=bvh->nearest(centre);std::printf("[paraglider-case]   collocated maximum: %.6g m/s component=%c dof=%d state=[%.6g %.6g %.6g] V/h3=%.6g degree=%d open-A=%.6g wall-A=%.6g centre=[%.6g %.6g %.6g] fabric-distance=%.6g m triangle=%u\n",max_value,"uvw"[max_component],max_dof,static_cast<double>(cell_state.x[max_dof]),static_cast<double>(cell_state.y[max_dof]),static_cast<double>(cell_state.z[max_dof]),system.volume[max_dof]/(h*h*h),degree,open_area,wall_area,centre.x,centre.y,centre.z,cell_nearest.found?cell_nearest.distance:-1.0,cell_nearest.triangle_id);}}
 			if(wing_box){const DirectionalStats direction=directional_stats(core,*diagnostic_fields,*wing_box);print_direction_region("active",direction.all);print_direction_region("background",direction.background);}
 		}

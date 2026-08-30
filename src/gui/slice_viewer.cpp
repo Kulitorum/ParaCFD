@@ -376,8 +376,15 @@ void main()
 		paraglider_worker_ = w;
 		if(!w){simulation_running_=simulation_auto_paused_=simulation_settling_ready_=false;simulation_pause_label_.clear();simulation_error_label_.clear();}
 		range_valid_ = false;
-		arrows_.reset();
-		tracers_.reset();
+		resetFlowAnimation();
+		update();
+	}
+
+	void SliceViewer::resetFlowAnimation()
+	{
+		arrows_.reset();tracers_.reset();arrow_draw_count_=0;tracer_strips_=0;
+		tracer_firsts_.clear();tracer_counts_.clear();
+		arrow_clock_started_=false;tracer_clock_started_=false;
 		update();
 	}
 
@@ -387,6 +394,17 @@ void main()
 		double mean_force_drift,double mean_force_tolerance,double maximum_flow_throughs)
 	{
 		simulation_running_=running;simulation_auto_paused_=auto_paused;simulation_auto_pause_enabled_=auto_pause_enabled;simulation_settling_ready_=settling_ready;simulation_settling_score_=settling_score;simulation_flow_throughs_=flow_throughs;simulation_pause_label_=automatic_pause_label;simulation_error_label_=error_label;simulation_mean_force_ready_=mean_force_ready;simulation_mean_force_drift_=mean_force_drift;simulation_mean_force_tolerance_=mean_force_tolerance;simulation_maximum_flow_throughs_=maximum_flow_throughs;update();
+	}
+
+	void SliceViewer::setPlaybackState(bool active,std::size_t frame,std::size_t frame_count,
+		double physical_time,bool discontinuity)
+	{
+		const bool changed=playback_active_!=active;playback_active_=active;
+		playback_frame_=frame;playback_frame_count_=frame_count;
+		playback_physical_time_=std::max(0.0,physical_time);
+		slice_sample_dirty_=true;iso_surface_dirty_=true;range_valid_=false;
+		if(changed||discontinuity){resetFlowAnimation();probe_valid_=false;}
+		update();
 	}
 
 	void SliceViewer::setSimulationProgress(long long step,double physical_time,double wall_time)
@@ -518,8 +536,7 @@ void main()
 		// slice and the model without cluttering. Re-seed the tracers for the new domain.
 		float diag = std::sqrt((float)(info.Lx * info.Lx + info.Ly * info.Ly + info.Lz * info.Lz));
 		arrow_len_ = std::max(4.0f * (float)info.h, 0.02f * diag);
-		arrows_.reset();
-		tracers_.reset(); // re-seed the streakline grid for the new domain
+		resetFlowAnimation(); // re-seed all animated flow state for the new domain
 		iso_volume_.reset();cp_volume_.reset();volume_texture_ready_=false;volume_texture_generation_=0;iso_surface_dirty_=true;
 	}
 
@@ -2058,17 +2075,21 @@ void main()
 		if (paraglider_worker_)
 		{
 			QFont f = p.font(); f.setPointSizeF(10.0); f.setBold(true); p.setFont(f);
-			const bool stopped_with_error=!simulation_error_label_.isEmpty();
-			const QColor state_colour=stopped_with_error?QColor(255,105,90):(simulation_running_?QColor(75,220,120):QColor(255,185,65));
+			const bool stopped_with_error=!playback_active_&&!simulation_error_label_.isEmpty();
+			const QColor state_colour=playback_active_?QColor(61,205,224):
+				(stopped_with_error?QColor(255,105,90):(simulation_running_?QColor(75,220,120):QColor(255,185,65)));
 			const QRect state_cue(std::max(238,(width()-410)/2),16,410,70);p.fillRect(state_cue,QColor(18,20,24,220));p.setPen(state_colour);p.drawRect(state_cue.adjusted(0,0,-1,-1));p.setBrush(state_colour);p.setPen(Qt::NoPen);p.drawEllipse(QRect(state_cue.x()+10,state_cue.y()+10,12,12));p.setBrush(Qt::NoBrush);p.setPen(state_colour);
 			QString state_text;
-			if(stopped_with_error)state_text="STOPPED — ERROR";
+			if(playback_active_)state_text="PLAYBACK";
+			else if(stopped_with_error)state_text="STOPPED — ERROR";
 			else if(simulation_running_)state_text="RUNNING";
 			else if(simulation_auto_paused_)state_text=QString("PAUSED — %1").arg(simulation_pause_label_.isEmpty()?QString("AUTOMATIC"):simulation_pause_label_);
 			else state_text="PAUSED";
 			if(!simulation_case_label_.isEmpty())state_text+=QString(" — %1").arg(simulation_case_label_);p.drawText(state_cue.adjusted(30,2,-6,-44),Qt::AlignLeft|Qt::AlignVCenter,state_text);
 			QFont state_detail=f;state_detail.setBold(false);state_detail.setPointSizeF(8.5);p.setFont(state_detail);p.setPen(QColor(225,228,234));QString detail;
-			if(stopped_with_error)detail=QFontMetrics(p.font()).elidedText(simulation_error_label_,Qt::ElideRight,state_cue.width()-20);
+			if(playback_active_)detail=QString("recorded frame %1 / %2 · simulation timeline")
+				.arg(playback_frame_+1).arg(playback_frame_count_);
+			else if(stopped_with_error)detail=QFontMetrics(p.font()).elidedText(simulation_error_label_,Qt::ElideRight,state_cue.width()-20);
 			else if(!simulation_auto_pause_enabled_)detail="auto-pause disabled";
 			else if(simulation_settling_ready_&&simulation_flow_throughs_<kAutoPauseMinimumFlowThroughs)
 				detail=QString("score %1 · warm-up %2/%3 · max %4 flow").arg(simulation_settling_score_,0,'f',2).arg(simulation_flow_throughs_,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2).arg(simulation_maximum_flow_throughs_,0,'g',3);
@@ -2078,7 +2099,10 @@ void main()
 				detail=QString("settle %1 · mean warming · flow %2/%3").arg(simulation_settling_score_,0,'f',2).arg(simulation_flow_throughs_,0,'f',2).arg(simulation_maximum_flow_throughs_,0,'g',3);
 			else detail=QString("observing %1/%2 flow-throughs").arg(simulation_flow_throughs_,0,'f',2).arg(simulation_maximum_flow_throughs_,0,'g',3);
 			p.drawText(state_cue.adjusted(10,24,-6,-24),Qt::AlignLeft|Qt::AlignVCenter,detail);
-			p.drawText(state_cue.adjusted(10,46,-6,-3),Qt::AlignLeft|Qt::AlignVCenter,QString("step %1  ·  simulation t=%2 s  ·  wall=%3 s").arg(simulation_step_).arg(simulation_physical_time_,0,'f',3).arg(simulation_wall_time_,0,'f',2));p.setFont(f);
+			const QString time_detail=playback_active_?
+				QString("simulation t=%1 s  ·  source step %2").arg(playback_physical_time_,0,'f',3).arg(simulation_step_):
+				QString("step %1  ·  simulation t=%2 s  ·  wall=%3 s").arg(simulation_step_).arg(simulation_physical_time_,0,'f',3).arg(simulation_wall_time_,0,'f',2);
+			p.drawText(state_cue.adjusted(10,46,-6,-3),Qt::AlignLeft|Qt::AlignVCenter,time_detail);p.setFont(f);
 			const QRect cue(18, 16, 210, 28);
 			p.fillRect(cue, QColor(18, 20, 24, 190));
 			p.setPen(QColor(255, 120, 90));
