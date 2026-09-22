@@ -296,9 +296,7 @@ namespace paracfd::core
 			StepGeometry result;
 			result.mesh=display_mesh(envelope.solid,envelope.faces,deflection_mm,error);
 			if(result.mesh.empty())return {};
-			result.closed_solid=make_validated_closed_solid_source(envelope.solid,{
-				{result.mesh.bbox_min[0],result.mesh.bbox_min[1],result.mesh.bbox_min[2]},
-				{result.mesh.bbox_max[0],result.mesh.bbox_max[1],result.mesh.bbox_max[2]}});
+			result.closed_solid=make_validated_closed_solid_source(envelope.solid,result.mesh);
 			result.solid_envelope.validated=true;
 			result.solid_envelope.source_orientation_reversed=envelope.reversed;
 			result.solid_envelope.face_count=static_cast<std::uint32_t>(envelope.faces.size());

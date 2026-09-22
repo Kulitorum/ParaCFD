@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <sstream>
@@ -97,6 +98,11 @@ namespace paracfd::core
 				if(length2(edge.nonorthogonal_correction)<=1e-24)return;const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;for(int dof:{lower,upper})if(node_map.emplace(dof,static_cast<int>(node_map.size())).second)system.pressure_gradient_dof.push_back(dof);
 			};
 			for(const auto& edge:system.coarse_fine)register_connection(edge);for(const auto& edge:system.embedded)register_connection(edge);for(const auto& edge:system.regular_pressure_corrections)for(int dof:{edge.lower_dof,edge.upper_dof})if(node_map.emplace(dof,static_cast<int>(node_map.size())).second)system.pressure_gradient_dof.push_back(dof);
+			// Surface pressure must be reconstructed at the wall patch, even when
+			// its aperture connections happen to be orthogonal.
+			for(const auto& patch:system.surface_patches)for(int dof:{patch.plus_dof,patch.minus_dof})
+				if(dof>=0&&system.active[dof]&&node_map.emplace(dof,static_cast<int>(node_map.size())).second)
+					system.pressure_gradient_dof.push_back(dof);
 			std::vector<std::vector<PressureGradientSample>> samples(system.pressure_gradient_dof.size());auto add_sample=[&](int endpoint,int neighbour,double area)
 			{
 				auto found=node_map.find(endpoint);if(found==node_map.end()||neighbour<0||neighbour>=system.storage_size||!system.active[neighbour]||endpoint==neighbour)return;const Vec3d displacement=system.centroid[neighbour]-system.centroid[endpoint];const double distance2=length2(displacement);if(distance2>1e-24&&area>0)samples[found->second].push_back({neighbour,area/distance2});
@@ -175,7 +181,11 @@ namespace paracfd::core
 				}
 				Vec3d represented{};for(int column=0;column<3;++column)for(int row=0;row<3;++row)represented[column]+=((1-upper_weight)*response[lower_node][3*row+column]+upper_weight*response[upper_node][3*row+column])*correction[row];const double error=std::sqrt(length2(represented-correction));if(error<=1e-8+1e-3*magnitude)return;std::ostringstream message;message<<"unsupported nonorthogonal pressure correction: "<<kind<<" edge "<<index<<" dofs ["<<lower_dof<<','<<upper_dof<<"] nodes ["<<lower_node<<','<<upper_node<<"] ranks ["<<static_cast<int>(system.pressure_gradient_rank[lower_node])<<','<<static_cast<int>(system.pressure_gradient_rank[upper_node])<<"] rings ["<<static_cast<int>(system.pressure_gradient_ring[lower_node])<<','<<static_cast<int>(system.pressure_gradient_ring[upper_node])<<"] samples ["<<(system.pressure_gradient_offset[lower_node+1]-system.pressure_gradient_offset[lower_node])<<','<<(system.pressure_gradient_offset[upper_node+1]-system.pressure_gradient_offset[upper_node])<<"] volumes ["<<system.volume[lower_dof]<<','<<system.volume[upper_dof]<<"] centroids [["<<system.centroid[lower_dof].x<<','<<system.centroid[lower_dof].y<<','<<system.centroid[lower_dof].z<<"],["<<system.centroid[upper_dof].x<<','<<system.centroid[upper_dof].y<<','<<system.centroid[upper_dof].z<<"]] face=["<<face_centroid.x<<','<<face_centroid.y<<','<<face_centroid.z<<"] area="<<open_area<<" k=["<<correction.x<<','<<correction.y<<','<<correction.z<<"] relative error="<<error/magnitude;throw std::runtime_error(message.str());
 			};
-			for(std::size_t q=0;q<system.coarse_fine.size();++q){auto& edge=system.coarse_fine[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("coarse/fine",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.embedded.size();++q){auto& edge=system.embedded[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("embedded",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.regular_pressure_corrections.size();++q){auto& edge=system.regular_pressure_corrections[q];validate_correction("regular",q,edge.lower_dof,edge.upper_dof,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,{},edge.nonorthogonal_correction);}
+			const bool require_nonorthogonal=true;
+			if(require_nonorthogonal)
+			{
+				for(std::size_t q=0;q<system.coarse_fine.size();++q){auto& edge=system.coarse_fine[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("coarse/fine",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.embedded.size();++q){auto& edge=system.embedded[q];const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;validate_correction("embedded",q,lower,upper,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,edge.face_centroid,edge.nonorthogonal_correction);}for(std::size_t q=0;q<system.regular_pressure_corrections.size();++q){auto& edge=system.regular_pressure_corrections[q];validate_correction("regular",q,edge.lower_dof,edge.upper_dof,edge.lower_gradient_node,edge.upper_gradient_node,edge.upper_gradient_weight,edge.open_area,{},edge.nonorthogonal_correction);}
+			}
 		}
 
 		std::vector<Vec3d> reconstruct_pressure_gradients(const CompositeAmrPressureSystem& system,const std::vector<double>& pressure)
@@ -220,6 +230,18 @@ namespace paracfd::core
 			if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int regular=regular_fragment_cell(ref);return regular>=0&&regular<static_cast<int>(map.cell_dof.size())?map.cell_dof[regular]:-1;}const int fragment=irregular_fragment_index(ref);return fragment>=0&&fragment<static_cast<int>(map.fragment_dof.size())?map.fragment_dof[fragment]:-1;
 		}
 		return dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);
+	}
+
+	std::vector<Vec3d> composite_pressure_gradients_cpu(
+		const CompositeAmrPressureSystem& system,const std::vector<double>& pressure)
+	{
+		if(pressure.size()<static_cast<std::size_t>(system.storage_size))
+			throw std::invalid_argument("pressure gradient vector is too small");
+		std::vector<Vec3d> result(system.storage_size);
+		const auto compact=reconstruct_pressure_gradients(system,pressure);
+		for(std::size_t node=0;node<compact.size();++node)
+			result[system.pressure_gradient_dof[node]]=compact[node];
+		return result;
 	}
 
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy, bool outlet)
@@ -299,6 +321,17 @@ namespace paracfd::core
 			"cannot build a composite pressure operator from unresolved AMR embedded-boundary topology");
 		const auto pressure_begin=std::chrono::steady_clock::now();
 		CompositeAmrPressureSystem system=build_composite_amr_pressure_base(hierarchy,options,false);system.gauges.clear();
+		for(int level=0;level<static_cast<int>(atlas.solid_bricks.size());++level)
+			for(int brick=0;brick<static_cast<int>(atlas.solid_bricks[level].size());++brick)
+				if(atlas.solid_bricks[level][brick])
+				{
+					const int cells=system.brick_size*system.brick_size*system.brick_size;
+					for(int local=0;local<cells;++local)
+					{
+						const int q=system.level_offset[level]+brick*cells+local;
+						system.active[q]=0;system.volume[q]=0;
+					}
+				}
 		const auto base_end=std::chrono::steady_clock::now();
 		for(const AmrEbLevelAtlas& level_atlas:atlas.levels)
 		{
@@ -321,12 +354,15 @@ namespace paracfd::core
 				{
 					if(!system.active[global_dof])throw std::runtime_error(
 						"AMR EB retained face-state small root mapped to an inactive pressure DOF");
+					system.face_state_retained_dofs.push_back(global_dof);
 					++mapped_face_state_retained_roots;
 				}
 			}
 			if(mapped_face_state_retained_roots!=level_atlas.face_state_retained_small_roots)throw std::runtime_error(
 				"AMR EB retained face-state small-root count does not match mapped pressure roots");
 			system.face_state_retained_small_root_count+=mapped_face_state_retained_roots;
+			if(system.face_state_retained_dofs.size()!=system.face_state_retained_small_root_count)
+				throw std::runtime_error("AMR EB retained face-state pressure-DOF list is incomplete");
 			std::vector<unsigned char> resolving(eb.fragments.size(),0);std::function<int(FragmentRef)> map_ref=[&](FragmentRef ref)->int
 			{
 				if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int cell=regular_fragment_cell(ref);return cell>=0&&cell<static_cast<int>(cell_global.size())?cell_global[cell]:-1;}const int fragment=irregular_fragment_index(ref);if(fragment<0||fragment>=static_cast<int>(fragment_global.size()))return -1;if(fragment_global[fragment]>=0)return fragment_global[fragment];if(resolving[fragment])throw std::runtime_error("cyclic AMR EB fragment merge mapping");resolving[fragment]=1;fragment_global[fragment]=map_ref(eb.fragments[fragment].merge_target);resolving[fragment]=0;return fragment_global[fragment];
@@ -366,8 +402,23 @@ namespace paracfd::core
 			{
 				const BrickLocation owner=hierarchy.locate_finest(patch.centroid);if(!owner.found()||owner.level!=level_atlas.level)continue;const int plus=patch.plus_fragment==invalid_fragment?-1:map_ref(patch.plus_fragment),minus=patch.minus_fragment==invalid_fragment?-1:map_ref(patch.minus_fragment);if(plus<0&&minus<0)throw std::runtime_error("owned AMR surface patch has no fluid pressure mapping");if(patch.plus_fragment!=invalid_fragment&&patch.minus_fragment!=invalid_fragment&&patch.plus_fragment!=patch.minus_fragment&&plus==minus)throw std::runtime_error("agglomeration collapsed distinct fabric pressure sides");system.surface_patches.push_back({patch.source_triangle_id,patch.source_face_id,patch.area,patch.centroid,patch.normal,plus,minus});
 			}
+			for(const auto& face:eb.boundary_apertures)
+			{
+				const int dof=map_ref(face.fragment);if(dof<0||!system.active[dof])continue;
+				const double boundary=face.direction>0?hierarchy.domain().hi[face.axis]:hierarchy.domain().lo[face.axis];
+				if(std::abs(face.centroid[face.axis]-boundary)>1e-8*eb.grid.h)continue;
+				if(face.axis==0)throw std::runtime_error("solid intersects inlet/outlet; increase streamwise domain clearance");
+				Vec3d area{};area[face.axis]=face.direction*face.area;
+				system.boundary_faces.push_back({dof,area,face.centroid});
+			}
+
 		}
-		for(const CoarseFinePressureConnection& connection:system.coarse_fine)if(!system.active[connection.coarse_dof]||!system.active[connection.fine_dof])throw std::runtime_error("embedded boundary intersects a 2:1 interface; aperture-aware cross-level topology is required");
+		std::erase_if(system.coarse_fine,[&](const CoarseFinePressureConnection& connection)
+		{
+			const bool a=system.active[connection.coarse_dof]!=0,b=system.active[connection.fine_dof]!=0;
+			if(a!=b)throw std::runtime_error("embedded boundary intersects a 2:1 interface; aperture-aware cross-level topology is required");
+			return !a;
+		});
 		const auto mapping_end=std::chrono::steady_clock::now();
 		finalize_component_gauges(system);const auto gauges_end=std::chrono::steady_clock::now();
 		try

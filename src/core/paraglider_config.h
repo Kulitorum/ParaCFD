@@ -44,10 +44,9 @@ namespace paracfd::core
 	{
 		double cfl = 0.7;
 		double smagorinsky_cs = 0.10;
-		// The production FP32 cut-cell operator reaches a measured residual floor of
-		// O(1e-4) on the full PlanB solid. Tighter requests stall rather than improve
-		// the corrected flux field; use an FP64 validation build when tighter solves
-		// are required.
+		// Pressure and Krylov state are FP64.  The attached-airfoil circulation gate
+		// requires a true residual of 1e-5; looser projections dissipate circulation
+		// even when the velocity transport itself remains bounded.
 		double projection_tolerance = 5e-4;
 		int projection_max_iterations = 600;
 	};

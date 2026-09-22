@@ -163,6 +163,11 @@ namespace paracfd::core
 		int plus_dof = -1;
 		int minus_dof = -1;
 	};
+	struct CompositeBoundaryPressureFace
+	{
+		int dof = -1;
+		Vec3d outward_area{}, centroid{};
+	};
 	struct SmoothFabricWallPatchLoad
 	{
 		std::uint32_t source_triangle_id = 0;
@@ -194,11 +199,14 @@ namespace paracfd::core
 		std::vector<int> level_offset;
 		std::vector<unsigned char> active;
 		// Number of mapped, active pressure roots that were deliberately retained
-		// below the configured small-fragment volume threshold.  The production
-		// face-centred MAC path advances these through conservative face fluxes; the
-		// experimental collocated transport must reject them because its explicit
-		// control-volume update would divide by their small volume.
+		// below the configured small-fragment volume threshold. The pressure solve
+		// retains their exact volume; explicit momentum transport redistributes their
+		// conservative update over aperture-connected control-volume aggregates.
 		std::size_t face_state_retained_small_root_count = 0;
+		// Exact pressure DOFs for topology-safe sub-threshold roots. Collocated
+		// momentum uses these to build conservative redistribution aggregates while
+		// retaining the independently bracketed pressure states.
+		std::vector<int> face_state_retained_dofs;
 		// Active control-volume DOFs belonging to a fluid component connected to the
 		// external X-max reference. Sealed pockets remain valid two-sided fluid, but
 		// are initialized quiescent instead of inheriting the external freestream.
@@ -236,6 +244,7 @@ namespace paracfd::core
 		// Static CAD provenance and two-sided pressure mapping. These records are
 		// consumed only when publishing loads/visualization, not by timestep kernels.
 		std::vector<CompositeSurfacePressurePatch> surface_patches;
+		std::vector<CompositeBoundaryPressureFace> boundary_faces;
 		std::vector<CompositeEbPressureSamplingMap> eb_sampling_maps;
 		// One compact pressure reference for each active fluid component that cannot
 		// reach the X-max Dirichlet outlet. Empty for intentionally pure-Neumann tests.
@@ -249,6 +258,11 @@ namespace paracfd::core
 		void apply_cpu(const std::vector<double>& pressure, std::vector<double>& output) const;
 		void diagonal_cpu(std::vector<double>& diagonal) const;
 	};
+
+	// Same-fluid linear reconstruction for pressure traction quadrature. Entries
+	// are indexed by pressure DOF; ordinary nodes without a WLS stencil are zero.
+	std::vector<Vec3d> composite_pressure_gradients_cpu(
+		const CompositeAmrPressureSystem& system,const std::vector<double>& pressure);
 
 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
 		bool pressure_outlet_xmax = true);
@@ -336,9 +350,9 @@ namespace paracfd::core
 		int recycle_rejections = 0;
 	};
 
-	// GPU-resident deferred non-orthogonal solve. Each inner Krylov solve uses the
-	// positive orthogonal finite-volume operator; outer minimal-residual corrections
-	// converge the complete affine-corrected operator used by the physical flux update.
+	// GPU-resident pressure solve. Orthogonal systems use multigrid-PCG; cut-cell
+	// and AMR systems use the corrected non-orthogonal operator with flexible GMRES
+	// and one bounded multigrid V-cycle per Arnoldi vector.
 	class DeviceCompositeAmrPressureSolver
 	{
 	public:
@@ -464,6 +478,9 @@ namespace paracfd::core
 		AmrGpuSolveResult project(Real rho, Real dt, double tolerance, int max_iterations, bool warm_start = false);
 		void download_divergence(std::vector<Real>& host) const;
 		void download_pressure(std::vector<Real>& host) const;
+		// Restore both the FP64 solve state and its flow-precision shadow together.
+		// Also used to exercise the production flux correction with manufactured fields.
+		void upload_pressure(const std::vector<double>& host);
 		Real* pressure() { return pressure_; }
 		const Real* pressure() const { return pressure_; }
 		const PressureReal* rhs() const { return rhs_; }

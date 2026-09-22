@@ -356,8 +356,8 @@ namespace paracfd::gui
 			snapshot_.bounded_mean_force_ready=false;snapshot_.bounded_mean_force_complete=false;
 			snapshot_.pause_reason=SimulationPauseReason::None;snapshot_.settling_score=0;
 			snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;
-			snapshot_.mean_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;
-			snapshot_.bounded_mean_force={};snapshot_.bounded_mean_force_coverage=0;
+			snapshot_.mean_force=snapshot_.mean_pressure_force=snapshot_.mean_viscous_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;
+			snapshot_.bounded_mean_force=snapshot_.bounded_mean_pressure_force=snapshot_.bounded_mean_viscous_force={};snapshot_.bounded_mean_force_coverage=0;
 			snapshot_.flow_throughs=0;
 		}
 		++snapshot_.generation;
@@ -374,8 +374,8 @@ namespace paracfd::gui
 		snapshot_.settling_ready=false;snapshot_.mean_force_ready=false;
 		snapshot_.bounded_mean_force_ready=false;snapshot_.bounded_mean_force_complete=false;
 		snapshot_.settling_score=0;snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;
-		snapshot_.mean_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;
-		snapshot_.bounded_mean_force={};snapshot_.bounded_mean_force_coverage=0;snapshot_.flow_throughs=0;
+		snapshot_.mean_force=snapshot_.mean_pressure_force=snapshot_.mean_viscous_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;
+		snapshot_.bounded_mean_force=snapshot_.bounded_mean_pressure_force=snapshot_.bounded_mean_viscous_force={};snapshot_.bounded_mean_force_coverage=0;snapshot_.flow_throughs=0;
 		++snapshot_.generation;
 	}
 
@@ -760,10 +760,29 @@ namespace paracfd::gui
 		std::unique_lock display_lock(display_amr_mutex_);
 		core_->download_fields(*display_amr_);
 		core_->download_pressure(display_pressure_);
+		CompositeCellMomentumState display_momentum;
+		if(core_->download_cell_momentum_state(display_momentum))
+		{
+			// The conservative solver advances cell control-volume momentum. Its projected
+			// aperture flux can legitimately be very fast on a vanishingly small opening
+			// while carrying negligible volume. Sampling those diagnostic face speeds as a
+			// Cartesian volume creates bright grid planes and hides the resolved wake. For
+			// display/recording only, reconstruct the MAC field from the evolved momentum;
+			// the pressure solve and load integration continue to use the exact apertures.
+			CompositeAmrFluxes display_fluxes;
+			reconstruct_composite_cell_fluxes_cpu(core_->pressure_system(),display_momentum,
+				*display_amr_,display_fluxes);
+		}
 
 		const Aabb3d& domain = hierarchy.domain();
-		const double h = hierarchy.levels().front().h;
 		const Vec3d extent = domain.hi - domain.lo;
+		// Preserve resolved wake structure when the display budget permits it.
+		// Always sampling at level zero discarded finer AMR vortices before
+		// arrows, tracers, vorticity and recordings could display them.
+		double h = hierarchy.finest_cell_size();
+		constexpr double maximum_display_cells = 2.0 * 1024 * 1024;
+		while (std::ceil(extent.x / h) * std::ceil(extent.y / h) *
+			std::ceil(extent.z / h) > maximum_display_cells) h *= 2;
 		MacGrid grid;
 		grid.nx = std::max(1, static_cast<int>(std::llround(extent.x / h)));
 		grid.ny = std::max(1, static_cast<int>(std::llround(extent.y / h)));
@@ -888,15 +907,22 @@ namespace paracfd::gui
 		}
 	}
 
-	void ParagliderSimWorker::updateSettling(double physical_time,const paracfd::core::Vec3d& force,const paracfd::core::ExternalAeroConservationStats& conservation)
+	void ParagliderSimWorker::updateSettling(double physical_time,
+		const paracfd::core::AerodynamicLoads& loads,
+		const paracfd::core::ExternalAeroConservationStats& conservation)
 	{
+		const paracfd::core::Vec3d force=loads.viscous_loads_valid?
+			loads.total_force:loads.pressure_force;
 		if(settling_reset_.exchange(false))
 		{
 			settling_history_.clear();mean_force_history_.clear();
+			mean_pressure_force_history_.clear();mean_viscous_force_history_.clear();
 			settling_consecutive_=mean_consecutive_=0;
 			settling_score_=settling_force_drift_=settling_force_rms_=flow_throughs_=0;
 			settling_epoch_time_=physical_time;settling_ready_=false;
-			mean_convergence_={};bounded_mean_force_={};bounded_mean_force_coverage_=0;
+			mean_convergence_={};mean_pressure_convergence_={};mean_viscous_convergence_={};
+			bounded_mean_force_=bounded_mean_pressure_force_=bounded_mean_viscous_force_={};
+			bounded_mean_force_coverage_=0;
 			bounded_mean_force_ready_=bounded_mean_force_complete_=false;
 			pause_reason_.store(SimulationPauseReason::None);
 		}
@@ -907,9 +933,20 @@ namespace paracfd::gui
 		if(!(flow_time>0))return;
 		flow_throughs_=std::max(0.0,physical_time-settling_epoch_time_)/flow_time;
 		mean_force_history_.push_back({physical_time,force});
+		mean_pressure_force_history_.push_back({physical_time,loads.pressure_force});
+		mean_viscous_force_history_.push_back({physical_time,
+			loads.viscous_loads_valid?loads.viscous_force:paracfd::core::Vec3d{}});
 		const double mean_window=std::max(0.5,flow_time),mean_oldest=physical_time-mean_window;
 		while(mean_force_history_.size()>2&&mean_force_history_[1].time<mean_oldest)mean_force_history_.pop_front();
+		while(mean_pressure_force_history_.size()>2&&mean_pressure_force_history_[1].time<mean_oldest)
+			mean_pressure_force_history_.pop_front();
+		while(mean_viscous_force_history_.size()>2&&mean_viscous_force_history_[1].time<mean_oldest)
+			mean_viscous_force_history_.pop_front();
 		mean_convergence_=paracfd::core::assess_aerodynamic_mean_convergence(mean_force_history_,physical_time,mean_window);
+		mean_pressure_convergence_=paracfd::core::assess_aerodynamic_mean_convergence(
+			mean_pressure_force_history_,physical_time,mean_window);
+		mean_viscous_convergence_=paracfd::core::assess_aerodynamic_mean_convergence(
+			mean_viscous_force_history_,physical_time,mean_window);
 		// Preserve a time-weighted final-window load even if there are not yet enough
 		// samples to certify two independent half windows. Maximum-flow exits must not
 		// silently turn the sweep's <D>/<L> columns into instantaneous samples.
@@ -919,6 +956,12 @@ namespace paracfd::gui
 		bounded_mean_force_complete_=bounded_mean.complete;
 		bounded_mean_force_coverage_=bounded_mean.coverage;
 		bounded_mean_force_=bounded_mean.force;
+		const auto bounded_pressure=paracfd::core::bounded_aerodynamic_mean(
+			mean_pressure_force_history_,physical_time,mean_window);
+		const auto bounded_viscous=paracfd::core::bounded_aerodynamic_mean(
+			mean_viscous_force_history_,physical_time,mean_window);
+		bounded_mean_pressure_force_=bounded_pressure.force;
+		bounded_mean_viscous_force_=bounded_viscous.force;
 		const bool conservative=conservation.volume_weighted_rms_divergence<1e-3;
 		if(flow_throughs_>=1.0&&mean_convergence_.ready&&conservative&&
 			mean_convergence_.relative_drift<mean_force_tolerance_.load())++mean_consecutive_;
@@ -1017,8 +1060,8 @@ namespace paracfd::gui
 		out.absolute_integrated_flux_error = snapshot_.absolute_integrated_flux_error;
 		out.net_integrated_flux_error = snapshot_.net_integrated_flux_error;
 		out.flow_change=snapshot_.flow_change;out.settling_score=snapshot_.settling_score;out.settling_force_drift=snapshot_.settling_force_drift;out.settling_force_rms=snapshot_.settling_force_rms;out.flow_throughs=snapshot_.flow_throughs;
-		out.mean_force=snapshot_.mean_force;out.mean_force_drift=snapshot_.mean_force_drift;out.mean_force_rms=snapshot_.mean_force_rms;out.mean_force_ready=snapshot_.mean_force_ready;
-		out.bounded_mean_force=snapshot_.bounded_mean_force;out.bounded_mean_force_coverage=snapshot_.bounded_mean_force_coverage;out.bounded_mean_force_ready=snapshot_.bounded_mean_force_ready;out.bounded_mean_force_complete=snapshot_.bounded_mean_force_complete;out.pause_reason=snapshot_.pause_reason;
+		out.mean_force=snapshot_.mean_force;out.mean_pressure_force=snapshot_.mean_pressure_force;out.mean_viscous_force=snapshot_.mean_viscous_force;out.mean_force_drift=snapshot_.mean_force_drift;out.mean_force_rms=snapshot_.mean_force_rms;out.mean_force_ready=snapshot_.mean_force_ready;
+		out.bounded_mean_force=snapshot_.bounded_mean_force;out.bounded_mean_pressure_force=snapshot_.bounded_mean_pressure_force;out.bounded_mean_viscous_force=snapshot_.bounded_mean_viscous_force;out.bounded_mean_force_coverage=snapshot_.bounded_mean_force_coverage;out.bounded_mean_force_ready=snapshot_.bounded_mean_force_ready;out.bounded_mean_force_complete=snapshot_.bounded_mean_force_complete;out.pause_reason=snapshot_.pause_reason;
 		out.gpu_bytes = snapshot_.gpu_bytes;
 		out.playing=snapshot_.playing;out.auto_pause_enabled=snapshot_.auto_pause_enabled;out.auto_paused=snapshot_.auto_paused;out.settling_ready=snapshot_.settling_ready;
 		out.error = snapshot_.error;
@@ -1086,8 +1129,7 @@ namespace paracfd::gui
 			side_cp_min=-side_maximum;
 			side_cp_max=side_maximum;
 		}
-		if(have_surface&&update_convergence)updateSettling(stats.physical_time,
-			loads.viscous_loads_valid?loads.total_force:loads.pressure_force,conservation);
+		if(have_surface&&update_convergence)updateSettling(stats.physical_time,loads,conservation);
 
 		std::lock_guard lock(snapshot_mutex_);
 		snapshot_.steps = steps_;
@@ -1112,14 +1154,16 @@ namespace paracfd::gui
 		if(convergence_reset_pending)
 		{
 			snapshot_.settling_ready=false;snapshot_.flow_change=latest_flow_change_;snapshot_.settling_score=0;snapshot_.settling_force_drift=0;snapshot_.settling_force_rms=0;snapshot_.flow_throughs=0;
-			snapshot_.mean_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;snapshot_.mean_force_ready=false;
-			snapshot_.bounded_mean_force={};snapshot_.bounded_mean_force_coverage=0;snapshot_.bounded_mean_force_ready=false;snapshot_.bounded_mean_force_complete=false;snapshot_.pause_reason=SimulationPauseReason::None;
+			snapshot_.mean_force=snapshot_.mean_pressure_force=snapshot_.mean_viscous_force={};snapshot_.mean_force_drift=0;snapshot_.mean_force_rms=0;snapshot_.mean_force_ready=false;
+			snapshot_.bounded_mean_force=snapshot_.bounded_mean_pressure_force=snapshot_.bounded_mean_viscous_force={};snapshot_.bounded_mean_force_coverage=0;snapshot_.bounded_mean_force_ready=false;snapshot_.bounded_mean_force_complete=false;snapshot_.pause_reason=SimulationPauseReason::None;
 		}
 		else
 		{
 			snapshot_.settling_ready=settling_ready_;snapshot_.flow_change=latest_flow_change_;snapshot_.settling_score=settling_score_;snapshot_.settling_force_drift=settling_force_drift_;snapshot_.settling_force_rms=settling_force_rms_;snapshot_.flow_throughs=flow_throughs_;
 			snapshot_.mean_force=(mean_convergence_.previous_mean+mean_convergence_.current_mean)*0.5;snapshot_.mean_force_drift=mean_convergence_.relative_drift;snapshot_.mean_force_rms=mean_convergence_.current_rms_fraction;snapshot_.mean_force_ready=mean_convergence_.ready;
-			snapshot_.bounded_mean_force=bounded_mean_force_;snapshot_.bounded_mean_force_coverage=bounded_mean_force_coverage_;snapshot_.bounded_mean_force_ready=bounded_mean_force_ready_;snapshot_.bounded_mean_force_complete=bounded_mean_force_complete_;snapshot_.pause_reason=pause_reason_.load();
+			snapshot_.mean_pressure_force=(mean_pressure_convergence_.previous_mean+mean_pressure_convergence_.current_mean)*0.5;
+			snapshot_.mean_viscous_force=(mean_viscous_convergence_.previous_mean+mean_viscous_convergence_.current_mean)*0.5;
+			snapshot_.bounded_mean_force=bounded_mean_force_;snapshot_.bounded_mean_pressure_force=bounded_mean_pressure_force_;snapshot_.bounded_mean_viscous_force=bounded_mean_viscous_force_;snapshot_.bounded_mean_force_coverage=bounded_mean_force_coverage_;snapshot_.bounded_mean_force_ready=bounded_mean_force_ready_;snapshot_.bounded_mean_force_complete=bounded_mean_force_complete_;snapshot_.pause_reason=pause_reason_.load();
 		}
 		snapshot_.error.clear();
 		if (have_surface)

@@ -1,5 +1,6 @@
 #include "gui/slice_field.h"
 #include "core/fluid/amr_sampling.h"
+#include "core/aero_sweep.h"
 
 #include <cmath>
 #include <cstdio>
@@ -57,6 +58,28 @@ namespace
 		ok&=near(static_cast<float>(sampled.y),static_cast<float>(-2+0.3*point.x+point.y-0.4*point.z),2e-5f,"AMR affine v");
 		ok&=near(static_cast<float>(sampled.z),static_cast<float>(0.5-0.2*point.x+0.7*point.y+point.z),2e-5f,"AMR affine w");
 
+        const double circulation=rectangular_circulation_xz(hierarchy,fields,
+            0.213,1.577,0.37,0.173,0.863);
+        const double analytic_circulation=(-0.2-0.25)*(1.577-0.213)*(0.863-0.173);
+        ok&=near(static_cast<float>(circulation),static_cast<float>(analytic_circulation),
+            2e-5f,"AMR off-grid contour circulation");
+
+        // Change d(w)/dx to d(u)/dz, giving a curl-free affine field.
+        for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index)
+        {
+            const auto& metadata=hierarchy.levels()[level_index];auto& values=fields.levels()[level_index];
+            const int bs=hierarchy.brick_size();
+            for(int brick=0;brick<static_cast<int>(metadata.bricks.size());++brick)
+                for(int k=0;k<=bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i)
+                {
+                    const auto& record=metadata.bricks[brick];
+                    const double x=record.origin.x+(i+0.5)*record.h;
+                    values.w[values.layout.w_index(brick,i,j,k)]+=static_cast<Real>(0.45*x);
+                }
+        }
+        ok&=near(static_cast<float>(rectangular_circulation_xz(hierarchy,fields,
+            0.213,1.577,0.37,0.173,0.863)),0.0f,2e-5f,"AMR curl-free circulation");
+
 		// Give fine normal faces a resolved tangential mode whose coarse conservative face
 		// stores only its mean. The visualization limits must still meet at the interface.
 		for(int level_index=1;level_index<static_cast<int>(hierarchy.levels().size());++level_index)
@@ -76,6 +99,22 @@ namespace
 		const double epsilon=1e-8;const Vec3d fine=sample_amr_velocity(hierarchy,fields,{1-epsilon,0.37,0.63});
 		const Vec3d coarse=sample_amr_velocity(hierarchy,fields,{1+epsilon,0.37,0.63});
 		ok&=near(static_cast<float>(coarse.x),static_cast<float>(fine.x),2e-5f,"AMR coarse/fine interface u");
+		return ok;
+	}
+
+	bool fixed_attitude_glide_trim()
+	{
+		using namespace paracfd::core;
+		const std::vector<FixedAttitudeGlideSample> samples={{0,100,1000},{10,100,1000}};
+		const FixedAttitudeGlideTrim trim=solve_fixed_attitude_glide(samples,10,100);
+		bool ok=trim.equilibrium;
+		ok&=near(static_cast<float>(trim.flight_path_degrees),5.71059f,0.01f,"trim flight-path angle");
+		ok&=near(static_cast<float>(trim.glide_ratio),10.0f,0.02f,"trim glide ratio");
+		ok&=near(static_cast<float>(trim.reference_vertical_support),1004.9875f,0.2f,
+			"trim reference support");
+		ok&=near(static_cast<float>(trim.sink_rate),0.983f,0.01f,"trim sink rate");
+		const FixedAttitudeGlideTrim missing=solve_fixed_attitude_glide({{0,100,100},{10,100,100}},10,100);
+		if(missing.equilibrium){std::fprintf(stderr,"visualization probe: false glide equilibrium\n");ok=false;}
 		return ok;
 	}
 }
@@ -98,7 +137,7 @@ int main()
 		const double x=(i+0.5)*grid.h,y=(j+0.5)*grid.h,z=(k+0.5)*grid.h;
 		p[grid.pidx(i,j,k)]=x+2*y+3*z;
 	}
-	float range[3]{};bool ok=composite_amr_sampling();
+	float range[3]{};bool ok=composite_amr_sampling()&&fixed_attitude_glide_trim();
 	paracfd::gui::slice_reduce_cpu(u.data(),v.data(),w.data(),p.data(),nullptr,grid,Field::VorticityMagnitude,range);
 	ok&=near(range[0],2.0f,1e-5f,"vorticity min")&&near(range[1],2.0f,1e-5f,"vorticity max");
 	paracfd::gui::slice_reduce_cpu(u.data(),v.data(),w.data(),p.data(),nullptr,grid,Field::QCriterion,range);

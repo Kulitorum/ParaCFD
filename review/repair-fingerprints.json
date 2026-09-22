@@ -1,0 +1,129 @@
+{
+  "created_utc": "2026-09-06T00:27:26.081527+00:00",
+  "baseline": "build-paraglider-ui/repair-baseline-20260906",
+  "default_momentum": "conservative cell momentum",
+  "planb_added_rotation_degrees": 0,
+  "build": "Release / CUDA 13.1 / sm_89",
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "be491278af35b45d1956a871c5ca3b8f318a178b5934f58d93566fd737e281fe"
+    },
+    {
+      "path": "src/core/fluid/amr_advection.cu",
+      "sha256": "cad40f1cc01344d50c4f9dc69848ab63f6bfc874f818c913ba93b6c75cf65759"
+    },
+    {
+      "path": "src/core/fluid/amr_advection.h",
+      "sha256": "1e10b3c133b2e2d772630dd4c5f96bda703e99ea644f04b0062cba77062e0f73"
+    },
+    {
+      "path": "src/core/fluid/amr_eb.cpp",
+      "sha256": "d93a6dea03efe9a0b91b1ec25e54e2884b1d82d8a185d65afc62463b0198d152"
+    },
+    {
+      "path": "src/core/fluid/amr_eb.h",
+      "sha256": "eb7d02fc166882398b9b7c216fbdb5e46214b6a5c9f01e978ad288e8caf6bdb9"
+    },
+    {
+      "path": "src/core/fluid/amr_pressure.cpp",
+      "sha256": "f0b26134207a6879d509a96602a75aad955afca53eeaca16827246d9d3ce2264"
+    },
+    {
+      "path": "src/core/fluid/amr_pressure.cu",
+      "sha256": "a813aff26183eca7c51776a671b2ff5dc07262543ec535b2a4d2448fc7772605"
+    },
+    {
+      "path": "src/core/fluid/amr_pressure.h",
+      "sha256": "e9d99786cd773cfd661584448c65cc3d3488ba1fde469f869b65f59f2af19165"
+    },
+    {
+      "path": "src/core/fluid/amr_sampling.h",
+      "sha256": "472b6a576c4fd90257e43105f2f015da666f19ce1e56dc39985aa2c1590ff68f"
+    },
+    {
+      "path": "src/core/fluid/external_aero_core.cpp",
+      "sha256": "da17d1c19aea6c6207c3ebeb3a228b9df398284ef5ba950c32bf1f1cc138e946"
+    },
+    {
+      "path": "src/core/fluid/external_aero_core.h",
+      "sha256": "ff1c7ad3cad3790606d0fcbfd74f6e5e4fc98ca573af62928a6c49ed0e37e770"
+    },
+    {
+      "path": "src/core/geometry/closed_solid.h",
+      "sha256": "cd835f8c53aa028d1f053202df99c622ef9e7b5cdc69e306cda3ad3262e2e67f"
+    },
+    {
+      "path": "src/core/geometry/embedded_boundary.h",
+      "sha256": "baaa516855cb42d1833f9029841a09d55bafa516646870151beaf4b49c2fb497"
+    },
+    {
+      "path": "src/core/geometry/occt_closed_solid.cpp",
+      "sha256": "927ed5b0573b7ac72f0e3d7f7f624c2d16da00344fd3d57c86ee149306034564"
+    },
+    {
+      "path": "src/core/geometry/occt_closed_solid.h",
+      "sha256": "09ec34fe4b31f1b70d6d88d916c787f15ebf8799e830fe29c404e9d1a227dcd3"
+    },
+    {
+      "path": "src/core/geometry/solid_embedded_boundary.cpp",
+      "sha256": "7a5ee963f616b9f0f7347bbb737e6487109b6a53dc3ae0d3b5aa83f806da163d"
+    },
+    {
+      "path": "src/core/geometry/step_import.cpp",
+      "sha256": "ac1c757b6a90493e4ec2ed21883e4e1c3f798755ef0126eae2c50de2201f4496"
+    },
+    {
+      "path": "src/gui/paraglider_main.cpp",
+      "sha256": "bc81277674761d94b64c61e8bae6c04d593a0dcab939d5aba43d4dd03a5887cf"
+    },
+    {
+      "path": "src/gui/paraglider_window.cpp",
+      "sha256": "32ae704d9d352043c1d8bc6e2cd7d11ead60198a5a993745f83256247ec53074"
+    },
+    {
+      "path": "src/gui/paraglider_window.h",
+      "sha256": "473ed5ca564e58b29c30b83adbf85f0e6daaef6b8d49fd345b7f3715a269bd7a"
+    },
+    {
+      "path": "tools/naca_validation_probe.cpp",
+      "sha256": "74d7fcb2fbc2a4ad77f90d421d18d51542bede74f409cea6b2f424fdfcddad64"
+    },
+    {
+      "path": "tools/paraglider_case_probe.cpp",
+      "sha256": "80670d2c1b51c1877c21b2547229fb10c78bab3a7a7f6192b4ea43bb0f9d63de"
+    },
+    {
+      "path": "tools/visualization_probe.cpp",
+      "sha256": "eb70d73cca28b860a32cdb175eb8d2899fff1c2ca9246c86774ed57231fc28cc"
+    },
+    {
+      "path": "tools/physics_contract_probe.cpp",
+      "sha256": "6101036ae5dd9896b7a14ed2ef7f94e770bc5fadf3ceabfb2abcdaeb786a4b43"
+    },
+    {
+      "path": "configs/planb_parakite.json",
+      "sha256": "9b81b718600fff2c189ca404a4db2efdd2322fc4aab46a1bd796ae08f1860a94"
+    },
+    {
+      "path": "Test-Data/PlanBParakite-Solid.step",
+      "sha256": "36d7a1be6c36ab6ef2c54d8744689b65e8fb61b3c20edac4f2259099acbc668a"
+    },
+    {
+      "path": "build-paraglider-ui/Release/paracfd-gui.exe",
+      "sha256": "d0b890e8e3bbcbe163a9ebf815bbfa4a6059328a49c465f7ceac8780799299fd"
+    },
+    {
+      "path": "build-paraglider-ui/Release/physics_contract_probe.exe",
+      "sha256": "7e7704f9245337b2a1fed9c591e6c1444bef6cc1f0a77812ccfefd0034f9b57e"
+    },
+    {
+      "path": "build-paraglider-ui/Release/naca_validation_probe.exe",
+      "sha256": "fdfa549a9e24a424c6e24cd8fa44de4022ee051dee5696b84725c7be69519ca8"
+    },
+    {
+      "path": "build-paraglider-ui/Release/paraglider_case_probe.exe",
+      "sha256": "3988ebb06eb476b933ee68e739f326127435b5df4989c392ed8419e9e2c32f16"
+    }
+  ]
+}

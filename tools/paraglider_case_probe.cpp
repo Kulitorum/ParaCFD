@@ -63,6 +63,82 @@ namespace
 		if(!(value.volume>0)){std::printf("[paraglider-case]   %s direction: no represented volume\n",label);return;}const double inv=1.0/value.volume;std::printf("[paraglider-case]   %s direction: mean=[%.5g %.5g %.5g] m/s rms|u|=%.5g rms-trans=%.5g u-range=[%.5g %.5g] max|v,w|=[%.5g %.5g] reverse=%.4g%% transverse-dominant=%.4g%%\n",label,value.sum_u*inv,value.sum_v*inv,value.sum_w*inv,std::sqrt(value.sum_speed2*inv),std::sqrt(value.sum_transverse2*inv),value.min_u,value.max_u,value.max_abs_v,value.max_abs_w,100.0*value.reverse_volume*inv,100.0*value.cross_dominant_volume*inv);
 	}
 
+	struct MomentumBalanceDiagnostic
+	{
+		bool have_previous=false;
+		double previous_time=0;
+		Vec3d previous_momentum{};
+
+		void sample(int step,const ExternalAeroCore& core,const AerodynamicLoads& loads,double rho)
+		{
+			if(core.uses_half_wing_symmetry())return;
+			CompositeCellMomentumState state;if(!core.download_cell_momentum_state(state))return;
+			AmrHostFields fields(core.hierarchy());core.download_fields(fields);
+			std::vector<double> pressure;core.download_pressure(pressure);
+			const CompositeAmrPressureSystem& system=core.pressure_system();
+			const int bs=system.brick_size,cells=bs*bs*bs;
+			Vec3d momentum{},momentum_flux{},pressure_normal{};
+			const Vec3d freestream{core.config().freestream.speed,0,0};
+			for(int q=0;q<system.storage_size;++q)if(system.active[q])
+			{
+				const double mass=rho*system.volume[q];
+				momentum=momentum+(Vec3d{state.x[q],state.y[q],state.z[q]}-freestream)*mass;
+			}
+			for(int level_index=0;level_index<static_cast<int>(core.hierarchy().levels().size());++level_index)
+			{
+				const AmrLevel& level=core.hierarchy().levels()[level_index];
+				const AmrHostLevelFields& value=fields.levels()[level_index];
+				const double area=level.h*level.h;
+				for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick)
+				{
+					const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;
+					for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i)
+					{
+						const int dof=system.level_offset[level_index]+brick*cells+i+bs*(j+bs*k);
+						if(!system.active[dof])continue;
+						const Vec3d cell_velocity{state.x[dof],state.y[dof],state.z[dof]};
+						auto boundary=[&](int axis,int sign,double normal_velocity,bool pressure_outlet)
+						{
+							const double outward_normal_velocity=sign*normal_velocity;
+							const Vec3d transported=outward_normal_velocity<0?freestream:cell_velocity;
+							Vec3d normal{};normal[axis]=static_cast<double>(sign);
+							const double freestream_normal=dot(freestream,normal);
+							momentum_flux=momentum_flux+
+								(transported*outward_normal_velocity-freestream*freestream_normal)*(rho*area);
+							if(!pressure_outlet)
+							{
+								pressure_normal=pressure_normal+normal*(pressure[dof]*area);
+							}
+						};
+						if(i==0&&(record.flags&BRICK_XMIN))boundary(0,-1,value.u[value.layout.u_index(brick,0,j,k)],false);
+						if(i==bs-1&&(record.flags&BRICK_XMAX))boundary(0,1,value.u[value.layout.u_index(brick,bs,j,k)],system.pressure_outlet_xmax);
+						if(j==0&&(record.flags&BRICK_YMIN))boundary(1,-1,value.v[value.layout.v_index(brick,i,0,k)],false);
+						if(j==bs-1&&(record.flags&BRICK_YMAX))boundary(1,1,value.v[value.layout.v_index(brick,i,bs,k)],false);
+						if(k==0&&(record.flags&BRICK_ZMIN))boundary(2,-1,value.w[value.layout.w_index(brick,i,j,0)],false);
+						if(k==bs-1&&(record.flags&BRICK_ZMAX))boundary(2,1,value.w[value.layout.w_index(brick,i,j,bs)],false);
+					}
+				}
+			}
+			if(have_previous&&core.physical_time()>previous_time)
+			{
+				const Vec3d momentum_rate=(momentum-previous_momentum)/(core.physical_time()-previous_time);
+				const Vec3d closure=(momentum_rate+momentum_flux+pressure_normal)*-1.0;
+				const Vec3d surface=loads.viscous_loads_valid?loads.total_force:loads.pressure_force;
+				const Vec3d error=closure-surface;
+				const std::vector<Vec3d> geometric_closure=
+					composite_cell_pressure_closure_cpu(system);
+				Vec3d closure_reaction{};
+				for(int q=0;q<system.storage_size;++q)if(system.active[q])
+					closure_reaction=closure_reaction+geometric_closure[q]*pressure[q];
+				std::printf("[paraglider-momentum-closure] step=%d interval=%.6g s surface=[%.6g %.6g %.6g] outer-CV=[%.6g %.6g %.6g] error=[%.6g %.6g %.6g] geometric-reaction=[%.6g %.6g %.6g] N\n",
+					step,core.physical_time()-previous_time,surface.x,surface.y,surface.z,
+					closure.x,closure.y,closure.z,error.x,error.y,error.z,
+					closure_reaction.x,closure_reaction.y,closure_reaction.z);
+			}
+			previous_time=core.physical_time();previous_momentum=momentum;have_previous=true;
+		}
+	};
+
 	struct SurfaceTemporalDiagnostic
 	{
 		struct Frame{std::vector<double> cp,area;double range=1;};
@@ -99,20 +175,78 @@ namespace
 
 	void report_surface_geometry(const TriMesh& wing,const ExternalAeroCore& core)
 	{
-		double mesh_area=0,patch_area=0,collapsed_patch_area=0;std::size_t collapsed_patches=0;Vec3d mesh_vector_area{},patch_vector_area{};
+		double mesh_area=0,patch_area=0,collapsed_patch_area=0;std::size_t collapsed_patches=0;Vec3d mesh_vector_area{},mesh_absolute_projected_area{},patch_vector_area{};
 		for(std::size_t triangle=0;triangle<wing.triangle_count();++triangle)
 		{
 			const std::uint32_t ia=wing.indices[3*triangle],ib=wing.indices[3*triangle+1],ic=wing.indices[3*triangle+2];
 			const Vec3d a{wing.positions[3*ia],wing.positions[3*ia+1],wing.positions[3*ia+2]},b{wing.positions[3*ib],wing.positions[3*ib+1],wing.positions[3*ib+2]},c{wing.positions[3*ic],wing.positions[3*ic+1],wing.positions[3*ic+2]};
 			const Vec3d vector_area=cross(b-a,c-a)*0.5;mesh_area+=std::sqrt(length2(vector_area));mesh_vector_area=mesh_vector_area+vector_area;
+			mesh_absolute_projected_area=mesh_absolute_projected_area+
+				Vec3d{std::abs(vector_area.x),std::abs(vector_area.y),std::abs(vector_area.z)};
 		}
 		for(const CompositeSurfacePressurePatch& patch:core.pressure_system().surface_patches){const Vec3d vector_area=patch.normal*patch.area;patch_area+=patch.area;patch_vector_area=patch_vector_area+vector_area;if(patch.plus_dof==patch.minus_dof){++collapsed_patches;collapsed_patch_area+=patch.area;}}
 		const auto relative=[](Vec3d value,double area){return area>0?std::sqrt(length2(value))/area:0.0;};
 		std::printf("[paraglider-geometry] source-area=%.9g vector-area=[%.9g %.9g %.9g] rel=%.3e represented-area=%.9g coverage=%.9g vector-area=[%.9g %.9g %.9g] rel=%.3e\n",mesh_area,mesh_vector_area.x,mesh_vector_area.y,mesh_vector_area.z,relative(mesh_vector_area,mesh_area),patch_area,mesh_area>0?patch_area/mesh_area:0.0,patch_vector_area.x,patch_vector_area.y,patch_vector_area.z,relative(patch_vector_area,patch_area));
+		std::printf("[paraglider-geometry] half absolute projected areas normal-to-[X Y Z]=[%.9g %.9g %.9g] m2\n",
+			0.5*mesh_absolute_projected_area.x,0.5*mesh_absolute_projected_area.y,
+			0.5*mesh_absolute_projected_area.z);
 		std::printf("[paraglider-geometry] collapsed two-sided patches=%zu area=%.9g m2 (%.6g%% represented area)\n",collapsed_patches,collapsed_patch_area,patch_area>0?100*collapsed_patch_area/patch_area:0);
 		const std::vector<Vec3d> closure=composite_cell_pressure_closure_cpu(core.pressure_system());double sum_norm=0,max_norm=0,volume_weighted=0,total_volume=0;Vec3d sum{};int count=0;
 		for(int q=0;q<core.pressure_system().storage_size;++q)if(core.pressure_system().active[q]){const double norm=std::sqrt(length2(closure[q]));sum=sum+closure[q];sum_norm+=norm;max_norm=std::max(max_norm,norm);volume_weighted+=norm*norm/core.pressure_system().volume[q];total_volume+=core.pressure_system().volume[q];if(norm>1e-14)++count;}
-		std::printf("[paraglider-geometry] control-volume-closure corrected=%d sum|dA|=%.9g max|dA|=%.9g rms-accel-scale=%.9g net=[%.9g %.9g %.9g]\n",count,sum_norm,max_norm,total_volume>0?std::sqrt(volume_weighted/total_volume):0.0,sum.x,sum.y,sum.z);
+		std::printf("[paraglider-geometry] control-volume-closure nonzero=%d sum|dA|=%.9g max|dA|=%.9g rms-accel-scale=%.9g net=[%.9g %.9g %.9g]\n",count,sum_norm,max_norm,total_volume>0?std::sqrt(volume_weighted/total_volume):0.0,sum.x,sum.y,sum.z);
+
+		// Recover the actual geometric chord attitude at mid-span.  A glide-path
+		// trial only adds its equivalent-frame rotation to this CAD attitude; it
+		// must not be mistaken for the complete rigged incidence of the aircraft.
+		const double section_y=0.5*(wing.bbox_min[1]+wing.bbox_max[1]);
+		const double scale=std::max({1.0,static_cast<double>(wing.bbox_max[0]-wing.bbox_min[0]),
+			static_cast<double>(wing.bbox_max[1]-wing.bbox_min[1]),
+			static_cast<double>(wing.bbox_max[2]-wing.bbox_min[2])});
+		const double plane_tolerance=1e-10*scale;
+		std::vector<Vec3d> section;
+		auto append_unique=[&](Vec3d point)
+		{
+			for(const Vec3d& value:section)
+				if((value.x-point.x)*(value.x-point.x)+(value.z-point.z)*(value.z-point.z)<1e-18*scale*scale)return;
+			section.push_back(point);
+		};
+		for(std::size_t triangle=0;triangle<wing.triangle_count();++triangle)
+		{
+			Vec3d vertex[3];double distance[3];
+			for(int corner=0;corner<3;++corner)
+			{
+				const auto value=wing.vertex_position_double(wing.indices[3*triangle+corner]);
+				vertex[corner]={value[0],value[1],value[2]};distance[corner]=vertex[corner].y-section_y;
+				if(std::abs(distance[corner])<=plane_tolerance)append_unique(vertex[corner]);
+			}
+			for(int edge=0;edge<3;++edge)
+			{
+				const int next=(edge+1)%3;
+				if(!((distance[edge]<-plane_tolerance&&distance[next]>plane_tolerance)||
+					(distance[edge]>plane_tolerance&&distance[next]<-plane_tolerance)))continue;
+				const double fraction=distance[edge]/(distance[edge]-distance[next]);
+				append_unique(vertex[edge]+(vertex[next]-vertex[edge])*fraction);
+			}
+		}
+		if(section.size()>=6)
+		{
+			double x_lo=std::numeric_limits<double>::infinity(),x_hi=-x_lo;
+			for(const Vec3d& point:section){x_lo=std::min(x_lo,point.x);x_hi=std::max(x_hi,point.x);}
+			const double chord_x=x_hi-x_lo,band=std::max(1e-8*scale,0.01*chord_x);
+			double z_le=0,z_te=0;int le_count=0,te_count=0;
+			for(const Vec3d& point:section)
+			{
+				if(point.x<=x_lo+band){z_le+=point.z;++le_count;}
+				if(point.x>=x_hi-band){z_te+=point.z;++te_count;}
+			}
+			if(le_count&&te_count)
+			{
+				z_le/=le_count;z_te/=te_count;
+				const double angle=std::atan2(z_te-z_le,chord_x)*180.0/3.14159265358979323846;
+				std::printf("[paraglider-geometry] mid-span chord LE=[%.9g %.9g] TE=[%.9g %.9g] x-chord=%.9g m attitude=%.6g deg (positive TE-up) samples=%zu\n",
+					x_lo,z_le,x_hi,z_te,chord_x,angle,section.size());
+			}
+		}
 	}
 
 	void report_pressure_correction_support(const CompositeAmrPressureSystem& system)
@@ -220,16 +354,17 @@ namespace
 	{
 		AmrHostFields fields(core.hierarchy());core.download_fields(fields);const auto& domain=core.hierarchy().domain();const double chord=reference_length>0?reference_length:wing.bbox_max[0]-wing.bbox_min[0],pad=0.35*chord;
 		const double x0=std::max(domain.lo.x+core.hierarchy().finest_cell_size(),wing.bbox_min[0]-pad),x1=std::min(domain.hi.x-core.hierarchy().finest_cell_size(),wing.bbox_max[0]+pad),z0=std::max(domain.lo.z+core.hierarchy().finest_cell_size(),wing.bbox_min[2]-pad),z1=std::min(domain.hi.z-core.hierarchy().finest_cell_size(),wing.bbox_max[2]+pad),y=0.5*(wing.bbox_min[1]+wing.bbox_max[1]);
-		const int samples=512;double circulation=0;for(int q=0;q<samples;++q){const double t=(q+0.5)/samples,x=x0+t*(x1-x0),z=z0+t*(z1-z0);circulation+=nearest_cell_velocity(core.hierarchy(),fields,{x,y,z0}).x*(x1-x0)/samples;circulation+=nearest_cell_velocity(core.hierarchy(),fields,{x1,y,z}).z*(z1-z0)/samples;circulation-=nearest_cell_velocity(core.hierarchy(),fields,{x,y,z1}).x*(x1-x0)/samples;circulation-=nearest_cell_velocity(core.hierarchy(),fields,{x0,y,z}).z*(z1-z0)/samples;}
+		const double circulation=rectangular_circulation_xz(core.hierarchy(),fields,x0,x1,y,z0,z1);
 		const double cl=freestream_speed!=0&&chord>0?-2.0*circulation/(freestream_speed*chord):std::numeric_limits<double>::quiet_NaN();std::printf("[paraglider-circulation] loop=[%.6g %.6g]x[%.6g %.6g] y=%.6g Gamma=%.9g m2/s inferred-Cl=%.9g\n",x0,x1,z0,z1,y,circulation,cl);
 	}
 
-	void report(int step,const ExternalAeroCore& core,const ExternalAeroStepStats& stats,double rho,AmrHostFields* diagnostic_fields,const TriangleBvh* bvh,const Aabb3d* wing_box,SurfaceTemporalDiagnostic* surface_temporal=nullptr,const TriMesh* wing=nullptr)
+	void report(int step,const ExternalAeroCore& core,const ExternalAeroStepStats& stats,double rho,AmrHostFields* diagnostic_fields,const TriangleBvh* bvh,const Aabb3d* wing_box,SurfaceTemporalDiagnostic* surface_temporal=nullptr,const TriMesh* wing=nullptr,MomentumBalanceDiagnostic* momentum_balance=nullptr)
 	{
 		const AerodynamicLoads loads=core.aerodynamic_loads();const ExternalAeroConservationStats conservation=core.conservation_stats();
 		if(step==0)std::printf("[paraglider-case] phase=initialization-impulse (pressure/load is not an evolved aerodynamic result)\n");
 		if(surface_temporal&&wing)surface_temporal->sample(step,core.physical_time(),*wing,loads);
 		std::printf("[paraglider-case] step=%d t=%.6f s dt=%.3e max|u_i|=%.5g [regular=%.5g special=%.5g CFL-source=%.5g] CFL=%.3f LES=%.5g/s x%d Fp=[%.8g %.8g %.8g] Fv=[%.8g %.8g %.8g] N div[max=%.3e rmsV=%.3e] flux-error[max=%.3e abs=%.3e net=%.3e] PCG=%d/%.3e step=%.2f ms projection=%.2f ms EB=%.2f ms\n",step,core.physical_time(),stats.dt,stats.max_abs_velocity,stats.max_abs_regular_velocity,stats.max_abs_special_velocity,stats.cfl_velocity,stats.effective_cfl,stats.max_diffusion_rate,stats.diffusion_substeps,loads.pressure_force.x,loads.pressure_force.y,loads.pressure_force.z,loads.viscous_force.x,loads.viscous_force.y,loads.viscous_force.z,conservation.max_abs_divergence,conservation.volume_weighted_rms_divergence,conservation.max_integrated_flux_error,conservation.absolute_integrated_flux_error,conservation.net_integrated_flux_error,stats.pressure.iterations,stats.pressure.relative_residual,stats.gpu_step_ms,stats.projection_ms,stats.embedded_transport_ms);
+		if(momentum_balance)momentum_balance->sample(step,core,loads,rho);
 		CompositeAmrFluxes fluxes;core.download_special_fluxes(fluxes);double coarse_fine_max=0,embedded_max=0;std::size_t embedded_edge=0;for(double value:fluxes.coarse_fine_velocity)coarse_fine_max=std::max(coarse_fine_max,std::abs(value));for(std::size_t edge=0;edge<fluxes.embedded_velocity.size();++edge)if(std::abs(fluxes.embedded_velocity[edge])>embedded_max){embedded_max=std::abs(fluxes.embedded_velocity[edge]);embedded_edge=edge;}const CompositeAmrPressureSystem& system=core.pressure_system();if(embedded_edge<system.embedded.size()){std::vector<double> pressure;core.download_pressure(pressure);const CoarseFinePressureConnection& connection=system.embedded[embedded_edge];const int lower=connection.direction>0?connection.coarse_dof:connection.fine_dof,upper=connection.direction>0?connection.fine_dof:connection.coarse_dof;const double delta_p=pressure[upper]-pressure[lower],correction=-(stats.dt/rho)*delta_p*pressure_gradient_factor(connection);std::printf("[paraglider-case]   special maxima: coarse/fine=%.5g EB=%.5g; EB edge=%zu axis=%d A=%.3e d=%.3e dn=%.3e Va=%.3e Vb=%.3e dp=%.5g Pa du_p=%.5g m/s centroid=[%.5g %.5g %.5g]\n",coarse_fine_max,embedded_max,embedded_edge,static_cast<int>(connection.axis),connection.open_area,connection.centre_distance,connection.normal_distance,system.volume[connection.coarse_dof],system.volume[connection.fine_dof],delta_p,correction,connection.face_centroid.x,connection.face_centroid.y,connection.face_centroid.z);
 			const int bs=system.brick_size,last_level=static_cast<int>(system.hierarchy->levels().size())-1;const int structured_end=system.level_offset[last_level]+static_cast<int>(system.hierarchy->levels()[last_level].bricks.size())*bs*bs*bs;
 			auto describe_node=[&](int node,const char* label)
@@ -252,7 +387,7 @@ int main(int argc,char** argv)
 	// each diagnostic sample visible while the case is running instead of buffering
 	// the entire multi-minute history until process exit.
 	std::setvbuf(stdout,nullptr,_IONBF,0);
-	std::string config_path="configs/planb_parakite.json",step_path_override;int steps=50,sample_every=5,max_levels=0,projection_max_iterations=0;double base_cell_size=0,projection_tolerance=0,min_volume_fraction=0,smagorinsky_cs=-1,target_physical_time=0,thin_y_fraction=-1,thin_y_width=0.125,aoa_degrees=0,upstream_margin=-1,downstream_margin=-1,lateral_margin=-1,vertical_margin=-1,reference_area=-1,reference_length=-1;bool locate_regular_max=false,surface_temporal=false,conservative_cell_momentum=false,no_smooth_wall=false,no_pressure_impulse=false,steps_explicit=false,thin_y_width_explicit=false,half_wing_override=false;
+	std::string config_path="configs/planb_parakite.json",step_path_override;int steps=50,sample_every=5,max_levels=0,projection_max_iterations=0;double base_cell_size=0,projection_tolerance=0,min_volume_fraction=0,smagorinsky_cs=-1,target_physical_time=0,thin_y_fraction=-1,thin_y_width=0.125,aoa_degrees=0,upstream_margin=-1,downstream_margin=-1,lateral_margin=-1,vertical_margin=-1,reference_area=-1,reference_length=-1;bool locate_regular_max=false,surface_temporal=false,momentum_balance=false,conservative_cell_momentum=true,no_smooth_wall=false,no_pressure_impulse=false,steps_explicit=false,thin_y_width_explicit=false,half_wing_override=false;
 	for(int i=1;i<argc;++i)
 	{
 		const std::string argument=argv[i];
@@ -279,11 +414,12 @@ int main(int argc,char** argv)
 		else if(argument=="--half-wing")half_wing_override=true;
 		else if(argument=="--locate-regular-max")locate_regular_max=true;
 		else if(argument=="--surface-temporal")surface_temporal=true;
+		else if(argument=="--momentum-balance")momentum_balance=true;
 		else if(argument=="--conservative-cell-momentum")conservative_cell_momentum=true;
 		else if(argument=="--staggered-momentum")conservative_cell_momentum=false;
 		else if(argument=="--no-smooth-wall")no_smooth_wall=true;
 		else if(argument=="--no-pressure-impulse")no_pressure_impulse=true;
-		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--step solid.step] [--steps N] [--physical-time seconds] [--sample-every N] [--projection-tolerance value] [--projection-max N] [--min-volume-fraction value] [--smagorinsky-cs value] [--base-cell-size m] [--max-levels N] [--aoa degrees] [--upstream-margin m] [--downstream-margin m] [--lateral-margin m] [--vertical-margin m] [--reference-area m2] [--reference-length m] [--half-wing] [--thin-y-fraction 0..1] [--thin-y-width metres] [--locate-regular-max] [--surface-temporal] [--conservative-cell-momentum|--staggered-momentum] [--no-smooth-wall] [--no-pressure-impulse]\n");return 2;}
+		else{std::fprintf(stderr,"usage: paraglider_case_probe [--config file] [--step solid.step] [--steps N] [--physical-time seconds] [--sample-every N] [--projection-tolerance value] [--projection-max N] [--min-volume-fraction value] [--smagorinsky-cs value] [--base-cell-size m] [--max-levels N] [--aoa degrees] [--upstream-margin m] [--downstream-margin m] [--lateral-margin m] [--vertical-margin m] [--reference-area m2] [--reference-length m] [--half-wing] [--thin-y-fraction 0..1] [--thin-y-width metres] [--locate-regular-max] [--surface-temporal] [--momentum-balance] [--conservative-cell-momentum|--staggered-momentum] [--no-smooth-wall] [--no-pressure-impulse]\n");return 2;}
 	}
 	if(thin_y_width_explicit&&thin_y_fraction<0)thin_y_fraction=0.5;if(steps<0||sample_every<1||target_physical_time<0||(thin_y_fraction>=0&&(thin_y_fraction<0.05||thin_y_fraction>0.95))||!(thin_y_width>0)){std::fprintf(stderr,"steps and physical-time must be nonnegative, sample-every positive, thin-Y fraction in [0.05,0.95], and thin-Y width positive\n");return 2;}if(target_physical_time>0&&!steps_explicit)steps=std::numeric_limits<int>::max();
 	ParagliderConfig config;std::string error;if(!load_paraglider_config(config_path,config,&error)){std::fprintf(stderr,"[paraglider-case] %s\n",error.c_str());return 2;}if(!step_path_override.empty())config.step_path=step_path_override;if(base_cell_size>0)config.amr.base_cell_size=base_cell_size;if(projection_tolerance>0)config.solver.projection_tolerance=projection_tolerance;if(projection_max_iterations>0)config.solver.projection_max_iterations=projection_max_iterations;if(min_volume_fraction>0)config.amr.min_volume_fraction=min_volume_fraction;if(smagorinsky_cs>=0)config.solver.smagorinsky_cs=smagorinsky_cs;if(max_levels>0)config.amr.max_levels=max_levels;if(upstream_margin>=0)config.domain.upstream_margin=upstream_margin;if(downstream_margin>=0)config.domain.downstream_margin=downstream_margin;if(lateral_margin>=0)config.domain.lateral_margin=lateral_margin;if(vertical_margin>=0)config.domain.vertical_margin=vertical_margin;if(aoa_degrees!=0)config.placement=pitch_placement(config.placement,aoa_degrees);if(half_wing_override)config.domain.half_wing_symmetry=true;if(config.domain.half_wing_symmetry&&thin_y_fraction>=0){std::fprintf(stderr,"[paraglider-case] --half-wing and cropped-Y diagnosis are mutually exclusive\n");return 2;}
@@ -399,19 +535,20 @@ int main(int argc,char** argv)
 	    if (level.face_state_retained_small_roots) minimum_face_state_retained_volume_fraction = std::min(minimum_face_state_retained_volume_fraction, level.minimum_face_state_retained_volume_fraction);
 	    maximum_aggregate_span_cells = std::max(maximum_aggregate_span_cells, level.maximum_aggregate_span_cells);
 	  }
-	  std::printf("[paraglider-case] geometry=closed-solid-canonical-interface momentum=%s triangles=%zu bricks=%zu DOFs=%d EB-edges=%zu MUSCL=%d LS-full=%d wall-nodes=%d patches=%zu gauges=%zu clamped-face-interpolation=%d raw-traction-closure=%d/max-%.6g-1m retained-small-apertures=%zu/%.6g-m2 quality-agglomerations=%zu static-subcell-components/aggregates/volume=%zu/%zu/%.6g-m3 face-state-retained-roots/volume/min-fraction=%zu/%.6g-m3/%.6g max-aggregate-span=%.6g-h min-volume=%.6g load=%.2f ms preprocess=%.2f ms GPU=%.2f MiB tolerance=%.3e\n", core.uses_conservative_cell_momentum() ? "collocated-experimental" : "face-centred-mac-production", wing.triangle_count(), core.hierarchy().active_brick_count(), core.pressure_system().storage_size, core.pressure_system().embedded.size(), core.embedded_high_order_stencil_count(), core.embedded_least_squares_full_rank_count(), core.fabric_wall_node_count(), core.pressure_system().surface_patches.size(), core.pressure_system().gauges.size(), core.clamped_cell_flux_interpolation_count(), core.pressure_closure_correction_count(), core.max_pressure_closure_acceleration(), small_apertures, small_aperture_area, quality_agglomerations, static_subcell_components, static_subcell_aggregates, static_subcell_volume, face_state_retained_small_roots, face_state_retained_small_volume, face_state_retained_small_roots ? minimum_face_state_retained_volume_fraction : 0, maximum_aggregate_span_cells, config.amr.min_volume_fraction, elapsed_ms(load_begin, load_end), elapsed_ms(build_begin, build_end), core.gpu_bytes() / (1024.0 * 1024.0), config.solver.projection_tolerance);
+	  std::printf("[paraglider-case] geometry=closed-solid-canonical-interface momentum=%s triangles=%zu bricks=%zu DOFs=%d EB-edges=%zu MUSCL=%d LS-full=%d wall-nodes=%d patches=%zu gauges=%zu clamped-face-interpolation=%d raw-traction-closure=%d/max-%.6g-1m retained-small-apertures=%zu/%.6g-m2 quality-agglomerations=%zu static-subcell-components/aggregates/volume=%zu/%zu/%.6g-m3 face-state-retained-roots/volume/min-fraction=%zu/%.6g-m3/%.6g max-aggregate-span=%.6g-h min-volume=%.6g load=%.2f ms preprocess=%.2f ms GPU=%.2f MiB tolerance=%.3e\n", core.uses_conservative_cell_momentum() ? "collocated-control-volume-experimental" : "face-centred-mac", wing.triangle_count(), core.hierarchy().active_brick_count(), core.pressure_system().storage_size, core.pressure_system().embedded.size(), core.embedded_high_order_stencil_count(), core.embedded_least_squares_full_rank_count(), core.fabric_wall_node_count(), core.pressure_system().surface_patches.size(), core.pressure_system().gauges.size(), core.clamped_cell_flux_interpolation_count(), core.pressure_closure_correction_count(), core.max_pressure_closure_acceleration(), small_apertures, small_aperture_area, quality_agglomerations, static_subcell_components, static_subcell_aggregates, static_subcell_volume, face_state_retained_small_roots, face_state_retained_small_volume, face_state_retained_small_roots ? minimum_face_state_retained_volume_fraction : 0, maximum_aggregate_span_cells, config.amr.min_volume_fraction, elapsed_ms(load_begin, load_end), elapsed_ms(build_begin, build_end), core.gpu_bytes() / (1024.0 * 1024.0), config.solver.projection_tolerance);
 	  if (reconciled_facet_pairs) std::printf("[paraglider-case] shared-interface partition residuals: count=%zu sum=%.9g-m2 max=%.9g-m2 (diagnostic; topology remains paired)\n", reconciled_facet_pairs, reconciled_facet_area_residual, maximum_reconciled_facet_area_residual);
 	  if (suppressed_subresolution_atom_splits) std::printf("[paraglider-case] sub-resolution grazing splits suppressed: count=%zu sum=%.9g-m3 max=%.9g-m3 (parent atoms retained)\n", suppressed_subresolution_atom_splits, suppressed_subresolution_atom_volume, maximum_suppressed_subresolution_atom_volume);
 	  report_surface_geometry(wing, core);
 	  std::unique_ptr<AmrHostFields> diagnostic_fields = locate_regular_max ? std::make_unique<AmrHostFields>(core.hierarchy()) : nullptr;
 	  SurfaceTemporalDiagnostic surface_history;
+	  MomentumBalanceDiagnostic momentum_history;
 	  const Aabb3d wing_box{ { wing.bbox_min[0], wing.bbox_min[1], wing.bbox_min[2] }, { wing.bbox_max[0], wing.bbox_max[1], wing.bbox_max[2] } };
 	  if (!stats.pressure.converged)
 	  {
 	    std::fprintf(stderr, "[paraglider-case] initialization did not converge: iterations=%d residual=%.3e inner=%d applications mean/max-it=%.1f/%d max-residual=%.3e\n", stats.pressure.iterations, stats.pressure.relative_residual, stats.pressure.preconditioner_applications, stats.pressure.preconditioner_applications ? static_cast<double>(stats.pressure.inner_iterations_total) / stats.pressure.preconditioner_applications : 0.0, stats.pressure.inner_iterations_maximum, stats.pressure.inner_relative_residual_maximum);
 	    return 3;
 	  }
-	  report(0, core, stats, config.freestream.rho, diagnostic_fields.get(), &bvh, &wing_box, surface_temporal ? &surface_history : nullptr, &wing);
+	  report(0, core, stats, config.freestream.rho, diagnostic_fields.get(), &bvh, &wing_box, surface_temporal ? &surface_history : nullptr, &wing, momentum_balance ? &momentum_history : nullptr);
 	  int completed_steps = 0;
 	  for (int step = 1; step <= steps && (!(target_physical_time > 0) || core.physical_time() < target_physical_time); ++step)
 	  {
@@ -423,7 +560,7 @@ int main(int argc,char** argv)
 		  return 4;
 	    }
 	    const bool reached_time = target_physical_time > 0 && core.physical_time() >= target_physical_time;
-	    if (step == 1 || step == steps || reached_time || step % sample_every == 0) report(step, core, stats, config.freestream.rho, diagnostic_fields.get(), &bvh, &wing_box, surface_temporal ? &surface_history : nullptr, &wing);
+	    if (step == 1 || step == steps || reached_time || step % sample_every == 0) report(step, core, stats, config.freestream.rho, diagnostic_fields.get(), &bvh, &wing_box, surface_temporal ? &surface_history : nullptr, &wing, momentum_balance ? &momentum_history : nullptr);
 	  }
 	  if (target_physical_time > 0 && core.physical_time() < target_physical_time)
 	  {
@@ -433,7 +570,7 @@ int main(int argc,char** argv)
 	  const AerodynamicLoads summary_loads = core.aerodynamic_loads();
 	  const Vec3d summary_force = summary_loads.viscous_loads_valid ? summary_loads.total_force : summary_loads.pressure_force;
 	  const ExternalAeroConservationStats summary_conservation = core.conservation_stats();
-	  const double summary_cd = summary_loads.force_coefficients_valid ? summary_loads.cd : std::numeric_limits<double>::quiet_NaN(), summary_cl = summary_loads.force_coefficients_valid ? summary_loads.cl : std::numeric_limits<double>::quiet_NaN();
+	  const double summary_cd = summary_loads.force_coefficients_valid ? (summary_loads.viscous_loads_valid ? summary_loads.cd : summary_loads.cd_pressure) : std::numeric_limits<double>::quiet_NaN(), summary_cl = summary_loads.force_coefficients_valid ? (summary_loads.viscous_loads_valid ? summary_loads.cl : summary_loads.cl_pressure) : std::numeric_limits<double>::quiet_NaN();
 	  std::printf("[paraglider-case-summary] levels=%zu finest_h=%.9g steps=%d t=%.9g prestep_regular_max=%.9g prestep_special_max=%.9g Fx=%.9g Fy=%.9g Fz=%.9g Fpx=%.9g Fpy=%.9g Fpz=%.9g Fvx=%.9g Fvy=%.9g Fvz=%.9g Cd=%.9g Cl=%.9g div_max=%.9g div_rms=%.9g flux_net=%.9g gpu_mib=%.9g step_ms=%.9g projection_ms=%.9g pressure_iterations=%d pressure_residual=%.9g\n", core.hierarchy().levels().size(), core.hierarchy().finest_cell_size(), completed_steps, core.physical_time(), stats.max_abs_regular_velocity, stats.max_abs_special_velocity, summary_force.x, summary_force.y, summary_force.z, summary_loads.pressure_force.x, summary_loads.pressure_force.y, summary_loads.pressure_force.z, summary_loads.viscous_force.x, summary_loads.viscous_force.y, summary_loads.viscous_force.z, summary_cd, summary_cl, summary_conservation.max_abs_divergence, summary_conservation.volume_weighted_rms_divergence, summary_conservation.net_integrated_flux_error, core.gpu_bytes() / (1024.0 * 1024.0), stats.gpu_step_ms, stats.projection_ms, stats.pressure.iterations, stats.pressure.relative_residual);
 	  report_circulation(core, wing, config.freestream.speed, config.reference.length);
     }

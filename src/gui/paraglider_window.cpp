@@ -151,6 +151,7 @@ namespace paracfd::gui
 		struct WingSectionMeasurement
 		{
 			double chord=0.0,thickness=0.0;
+			double incidence_degrees=std::numeric_limits<double>::quiet_NaN();
 			int accepted_sections=0;
 		};
 
@@ -163,7 +164,7 @@ namespace paracfd::gui
 				static_cast<double>(oriented.bbox_max[2])-oriented.bbox_min[2],1.0});
 			if(!(span>1.0e-9*scale))return result;
 			const double tolerance=1.0e-9*scale,tolerance2=tolerance*tolerance;
-			std::vector<double> chords,thicknesses;
+			std::vector<double> chords,thicknesses,incidences;
 			for(const double fraction:{0.20,0.35,0.50,0.65,0.80})
 			{
 				const double plane=oriented.bbox_min[1]+fraction*span;
@@ -221,6 +222,22 @@ namespace paracfd::gui
 				const double chord=chord_hi-chord_lo,thickness=thickness_hi-thickness_lo;
 				if(!(chord>1.0e-6*scale&&thickness>1.0e-6*scale&&thickness<chord))continue;
 				chords.push_back(chord);thicknesses.push_back(thickness);
+				// The fixed +X freestream makes a leading edge above its trailing edge
+				// positive geometric incidence.  The loader already requires LE at X-min.
+				double x_lo=std::numeric_limits<double>::infinity(),x_hi=-x_lo;
+				for(const Vec3d point:points){x_lo=std::min(x_lo,point.x);x_hi=std::max(x_hi,point.x);}
+				const double x_chord=x_hi-x_lo,band=std::max(tolerance,0.01*x_chord);
+				double z_le=0,z_te=0;int le_count=0,te_count=0;
+				for(const Vec3d point:points)
+				{
+					if(point.x<=x_lo+band){z_le+=point.z;++le_count;}
+					if(point.x>=x_hi-band){z_te+=point.z;++te_count;}
+				}
+				if(x_chord>0&&le_count&&te_count)
+				{
+					z_le/=le_count;z_te/=te_count;
+					incidences.push_back(-std::atan2(z_te-z_le,x_chord)*180.0/3.14159265358979323846);
+				}
 			}
 			if(chords.empty())return result;
 			auto median=[](std::vector<double> values)
@@ -229,6 +246,7 @@ namespace paracfd::gui
 				return values.size()%2?values[middle]:0.5*(values[middle-1]+values[middle]);
 			};
 			result.chord=median(chords);result.thickness=median(thicknesses);
+			if(!incidences.empty())result.incidence_degrees=median(incidences);
 			result.accepted_sections=static_cast<int>(chords.size());return result;
 		}
 
@@ -522,13 +540,18 @@ namespace paracfd::gui
 		auto* geometry_group=new QGroupBox("Aerodynamic solid");auto* geometry_column=new QVBoxLayout(geometry_group);
 		solid_status_readout_=new QLabel("Load one closed STEP solid. Internal ribs and vents do not belong in the aerodynamic export.");solid_status_readout_->setWordWrap(true);solid_status_readout_->setStyleSheet("color:#000;");
 		geometry_column->addWidget(solid_status_readout_);column->addWidget(geometry_group);
-		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("AoA +1°");auto* aoa_down=new QPushButton("AoA -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
-		auto* aoa_group=new QGroupBox("Aerodynamic reference / convergence / AoA sweep");
+		auto* orientation=new QGridLayout;auto* flip=new QPushButton("Flip LE/TE 180°");auto* yaw=new QPushButton("Yaw +90°");auto* aoa_up=new QPushButton("Trim pitch +1°");auto* aoa_down=new QPushButton("Trim pitch -1°");connect(flip,&QPushButton::clicked,this,[this]{rotateWing(180,{0,0,1});});connect(yaw,&QPushButton::clicked,this,[this]{rotateWing(90,{0,0,1});});connect(aoa_up,&QPushButton::clicked,this,[this]{rotateWing(1,{0,1,0});});connect(aoa_down,&QPushButton::clicked,this,[this]{rotateWing(-1,{0,1,0});});orientation->addWidget(flip,0,0);orientation->addWidget(yaw,0,1);orientation->addWidget(aoa_up,1,0);orientation->addWidget(aoa_down,1,1);column->addLayout(orientation);
+		auto* aoa_group=new QGroupBox("Aerodynamic reference / convergence / free flight");
 		auto* aoa_column=new QVBoxLayout(aoa_group);
 		auto* aoa_reference_form=new QFormLayout;
 		reference_area_=real_spin(0,10000,0,3," m²");
 		reference_area_->setToolTip("Whole-wing aerodynamic reference area. Use the published flat or projected area consistently; it changes CL/CD, never the force solution.");
 		aoa_reference_form->addRow("Wing reference area",reference_area_);
+		trim_mass_=real_spin(1,500,QSettings{}.value("flight/allUpMass",100.0).toDouble(),1," kg");
+		trim_mass_->setToolTip("Total flying mass: pilot, canopy, harness, reserve and carried equipment. Used only by the fixed-attitude glide equilibrium search.");
+		connect(trim_mass_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,
+			[](double value){QSettings{}.setValue("flight/allUpMass",value);});
+		aoa_reference_form->addRow("All-up flying mass",trim_mass_);
 		aoa_column->addLayout(aoa_reference_form);
 		auto* aoa_angles=new QWidget;
 		auto* aoa_grid=new QGridLayout(aoa_angles);
@@ -548,12 +571,17 @@ namespace paracfd::gui
 		aoa_column->addLayout(exit_form);
 		aoa_sweep_button_=new QPushButton("Run aerodynamic AoA sweep");
 		aoa_sweep_button_->setToolTip("Treat the current placed CAD orientation as 0°, rebuild each requested pitch, and record time-averaged whole-wing forces. Each case exits steady, mean-converged, or explicitly at the maximum flow time.");
-		aoa_column->addWidget(aoa_sweep_button_);
+		trim_search_button_=new QPushButton("Find fixed-attitude glide");
+		trim_search_button_->setToolTip("Keep the current CAD placement as the rigged trim attitude. Trial angles represent descent-path directions in an equivalent rotated frame; total mass sets the equilibrium speed after the aerodynamic resultant aligns with gravity.");
+		auto* flight_note=new QLabel(QString::fromUtf8("Trim search solves flight-path angle from the aerodynamic force direction, then predicts airspeed and sink from weight balance. The STEP has no gravity/riser reference: set the known rigged trim pitch first. ParaCFD does not prescribe sink rate or invent a pitch attitude without riser/pilot moment data."));
+		flight_note->setWordWrap(true);flight_note->setStyleSheet("color:#52606d;font-size:9pt;");
+		aoa_column->addWidget(aoa_sweep_button_);aoa_column->addWidget(trim_search_button_);aoa_column->addWidget(flight_note);
 		aoa_sweep_results_=new QPlainTextEdit;
 		aoa_sweep_results_->setReadOnly(true);aoa_sweep_results_->setLineWrapMode(QPlainTextEdit::NoWrap);aoa_sweep_results_->setMaximumHeight(150);aoa_sweep_results_->setStyleSheet("font-family:Consolas;color:#000;");
 		aoa_sweep_results_->setPlainText("Angles are relative to the current CAD placement.\nSet wing area above to obtain CL/CD.");
 		aoa_column->addWidget(aoa_sweep_results_);column->addWidget(aoa_group);
 		connect(aoa_sweep_button_,&QPushButton::clicked,this,&ParagliderWindow::toggleAoaSweep);
+		connect(trim_search_button_,&QPushButton::clicked,this,&ParagliderWindow::toggleTrimSearch);
 		connect(aoa_mean_tolerance_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,
 			[this](double){if(worker_)worker_->configureConvergenceExit(
 				aoa_mean_tolerance_->value()/100.0,aoa_max_flow_throughs_->value());});
@@ -570,9 +598,9 @@ namespace paracfd::gui
 		build_button_->setToolTip("Build the static AMR/embedded-boundary grid, initialize the pressure field, and immediately run the CFD simulation.");
 		play_button_=new QPushButton("Play");play_button_->setCheckable(true);
 		step_button_=new QPushButton("Step");play_button_->setEnabled(false);step_button_->setEnabled(false);
-		conservative_momentum_=new QCheckBox("Experimental collocated CV momentum");
-		conservative_momentum_->setChecked(false);
-		conservative_momentum_->setToolTip("Development solver: currently unstable at high incidence. Leave unchecked to use the validated face-centred MAC production solver.");
+		conservative_momentum_=new QCheckBox("Collocated CV momentum (experimental)");
+		conservative_momentum_->setChecked(true);
+		conservative_momentum_->setToolTip("Use conservative cell momentum, the default solver. Single runs, AoA sweeps and glide trials use the same selection. Uncheck only for a diagnostic comparison with staggered MAC.");
 		half_wing_=new QCheckBox("Use HalfWing Simulation");
 		half_wing_->setToolTip("Simulate the +Y span half with a free-slip mirror plane at the wing centre. Use only for symmetric geometry at zero sideslip. Integrated loads are reconstructed for the whole wing.");
 		auto_pause_=new QCheckBox("Auto-pause when converged / bounded");auto_pause_->setChecked(true);
@@ -601,7 +629,7 @@ namespace paracfd::gui
 		base_h_=real_spin(0.015625,10,0.25,5," m");levels_=new ScrollSafeSpinBox;levels_->setRange(1,6);brick_size_=new ScrollSafeSpinBox;brick_size_->setRange(8,64);brick_size_->setSingleStep(8);
 		wing_refine_=real_spin(0,50,1,3," m");surface_refine_=real_spin(0,20,0.35,3," m");wake_length_=real_spin(0,200,8,2," m");wake_radius_=real_spin(0,100,2,2," m");
 		min_volume_fraction_=real_spin(0.001,0.49,0.005,4);min_volume_fraction_->setSingleStep(0.001);min_volume_fraction_->setToolTip("Small exterior-fluid fragment merge threshold.");min_aperture_area_fraction_=real_spin(0,0.1,1e-4,6);min_aperture_area_fraction_->setSingleStep(1e-4);min_aperture_area_fraction_->setToolTip("Diagnostic threshold only. Smaller positive-area apertures are reported but remain connected.");
-		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(5e-4,1e-2,5e-4,8);projection_tolerance_->setToolTip("Production FP32 floor. Smaller residual requests stall on the full cut-cell wing; use an FP64 validation build for tighter solves.");projection_iterations_=new ScrollSafeSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
+		cfl_=real_spin(0.02,0.95,0.7,2);smagorinsky_=real_spin(0,0.4,0.1,3);projection_tolerance_=real_spin(1e-8,1e-2,1e-5,8);projection_tolerance_->setToolTip("Relative residual of the corrected double-precision pressure solve. The verification probes use 1e-5; check load sensitivity before accepting a looser tolerance.");projection_iterations_=new ScrollSafeSpinBox;projection_iterations_->setRange(20,5000);projection_iterations_->setSingleStep(50);
 		reference_length_=real_spin(0,1000,0,3," m");
 		form->addRow("Speed",speed_);form->addRow("Density",rho_);form->addRow("Kinematic viscosity",nu_);form->addRow("STEP deflection",tessellation_);form->addRow("Upstream margin",upstream_);form->addRow("Downstream margin",downstream_);form->addRow("Lateral margin",lateral_);form->addRow("Vertical margin",vertical_);form->addRow("Base cell size",base_h_);form->addRow("AMR levels",levels_);form->addRow("Brick size",brick_size_);form->addRow("Wing refine distance",wing_refine_);form->addRow("Surface refine distance",surface_refine_);form->addRow("Wake length",wake_length_);form->addRow("Wake radius",wake_radius_);form->addRow("Min fragment volume / h³",min_volume_fraction_);form->addRow("Small-aperture audit / h²",min_aperture_area_fraction_);form->addRow("CFL",cfl_);form->addRow("Smagorinsky Cs",smagorinsky_);form->addRow("Projection tolerance",projection_tolerance_);form->addRow("Projection max iterations",projection_iterations_);form->addRow("Reference length",reference_length_);column->addWidget(physics);
 		for(auto* spin:{speed_,rho_,nu_,tessellation_,upstream_,downstream_,lateral_,vertical_,base_h_,wing_refine_,surface_refine_,wake_length_,wake_radius_,min_volume_fraction_,min_aperture_area_fraction_,cfl_,smagorinsky_,projection_tolerance_,reference_area_,reference_length_})connect(spin,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(levels_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(brick_size_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});connect(conservative_momentum_,&QCheckBox::toggled,this,[this]{auto_gpu_estimate_bytes_=auto_gpu_budget_bytes_=0;updateGridReadout();});
@@ -713,6 +741,15 @@ namespace paracfd::gui
 		if(!aoa_sweep_min_||!aoa_sweep_max_||!aoa_sweep_step_)return false;aoa_sweep_min_->setValue(minimum_degrees);aoa_sweep_max_->setValue(maximum_degrees);aoa_sweep_step_->setValue(step_degrees);if(aoa_sweep_active_)cancelAoaSweep("restarted");toggleAoaSweep();return aoa_sweep_active_;
 	}
 
+	bool ParagliderWindow::startTrimSearch(double minimum_degrees,double maximum_degrees,
+		double step_degrees,double all_up_mass)
+	{
+		if(!aoa_sweep_min_||!aoa_sweep_max_||!aoa_sweep_step_||!trim_mass_)return false;
+		aoa_sweep_min_->setValue(minimum_degrees);aoa_sweep_max_->setValue(maximum_degrees);
+		aoa_sweep_step_->setValue(step_degrees);trim_mass_->setValue(all_up_mass);
+		if(aoa_sweep_active_)cancelAoaSweep("restarted");toggleTrimSearch();return aoa_sweep_active_;
+	}
+
 	void ParagliderWindow::normalizePlacementToDomain()
 	{
 		if(source_mesh_.empty())return;const ParagliderConfig c=configFromUi();config_.placement=frame_wing_for_external_domain(source_mesh_,config_.placement,c.domain.upstream_margin,c.domain.lateral_margin,c.domain.vertical_margin,c.amr.base_cell_size*c.amr.brick_size);viewer_->setMeshPlacement(config_.placement);
@@ -726,22 +763,92 @@ namespace paracfd::gui
 	void ParagliderWindow::toggleAoaSweep()
 	{
 		if(aoa_sweep_active_){cancelAoaSweep("cancelled by user");return;}
-		if(source_mesh_.empty()){QMessageBox::information(this,"No wing","Open a STEP wing before starting an AoA sweep.");return;}
-		if(thin_y_debug_&&thin_y_debug_->isChecked()){QMessageBox::information(this,"AoA sweep unavailable","Disable the cropped Y-span diagnostic first. Use the full or symmetric half-wing domain for an aerodynamic sweep.");return;}
+		beginAoaSequence(false);
+	}
+
+	void ParagliderWindow::toggleTrimSearch()
+	{
+		if(aoa_sweep_active_){cancelAoaSweep("cancelled by user");return;}
+		beginAoaSequence(true);
+	}
+
+	void ParagliderWindow::beginAoaSequence(bool trim_search)
+	{
+		const QString operation=trim_search?"glide trim search":"AoA sweep";
+		if(source_mesh_.empty()){QMessageBox::information(this,"No wing",QString("Open a STEP wing before starting the %1.").arg(operation));return;}
+		if(thin_y_debug_&&thin_y_debug_->isChecked()){QMessageBox::information(this,"Full wing required",QString("Disable the cropped Y-span diagnostic first. Use the full or symmetric half-wing domain for the %1.").arg(operation));return;}
 		try{aoa_sweep_angles_=inclusive_angle_sweep(aoa_sweep_min_->value(),aoa_sweep_max_->value(),aoa_sweep_step_->value(),31);}
 		catch(const std::exception& exception){QMessageBox::critical(this,"Invalid AoA sweep",exception.what());return;}
-		restoreFullWingDisplay();aoa_sweep_baseline_=viewer_->modelPlacement();aoa_sweep_index_=0;aoa_sweep_active_=true;aoa_sweep_waiting_=false;aoa_sweep_previous_auto_pause_=auto_pause_->isChecked();auto_pause_->setChecked(true);auto_pause_->setEnabled(false);auto_pause_sensitivity_->setEnabled(false);aoa_mean_tolerance_->setEnabled(false);aoa_max_flow_throughs_->setEnabled(false);build_button_->setEnabled(false);aoa_sweep_button_->setText("Cancel AoA sweep");
+		if(trim_search&&aoa_sweep_angles_.front()<0)
+		{
+			QMessageBox::information(this,"Invalid descent-path range","Fixed-attitude glide search requires a non-negative minimum flight-path angle.");return;
+		}
+		restoreFullWingDisplay();aoa_sweep_baseline_=viewer_->modelPlacement();aoa_sweep_index_=0;
+		const WingSectionMeasurement trim_measurement=measure_wing_sections(
+			placed_mesh(source_mesh_,aoa_sweep_baseline_));
+		trim_baseline_incidence_degrees_=trim_measurement.incidence_degrees;
+		QString aerodynamic_resolution_note;
+		if(trim_measurement.chord>0&&levels_&&base_h_)
+		{
+			constexpr double minimum_cells_per_chord=32.0;
+			int required_levels=levels_->value();
+			while(required_levels<levels_->maximum()&&
+				base_h_->value()/std::ldexp(1.0,required_levels-1)>
+				trim_measurement.chord/minimum_cells_per_chord)++required_levels;
+			const double required_h=trim_measurement.chord/minimum_cells_per_chord;
+			const double available_h=base_h_->value()/std::ldexp(1.0,required_levels-1);
+			if(available_h>required_h*(1.0+1e-12))
+			{
+				QMessageBox::information(this,"Aerodynamic grid is too coarse",
+					QString("The %1 requires at least %2 cells across the measured %3 m chord, but the current base spacing and maximum AMR level provide only %4. Reduce the base cell size before running aerodynamic loads.")
+					.arg(operation).arg(minimum_cells_per_chord,0,'f',0)
+					.arg(trim_measurement.chord,0,'g',5)
+					.arg(trim_measurement.chord/available_h,0,'f',1));
+				return;
+			}
+			if(required_levels>levels_->value())
+			{
+				const int previous=levels_->value();levels_->setValue(required_levels);
+				aerodynamic_resolution_note=QString("\nresolution = AMR levels raised %1 → %2 to provide %3 cells/chord (finest h = %4 m)")
+					.arg(previous).arg(required_levels)
+					.arg(trim_measurement.chord/available_h,0,'f',1).arg(available_h,0,'g',5);
+			}
+			else aerodynamic_resolution_note=QString("\nresolution = %1 cells/chord (finest h = %2 m)")
+				.arg(trim_measurement.chord/available_h,0,'f',1).arg(available_h,0,'g',5);
+		}
+		aoa_sweep_active_=true;aoa_sweep_waiting_=false;trim_search_active_=trim_search;
+		trim_all_cases_converged_=true;trim_samples_.clear();
+		aoa_sweep_previous_conservative_=conservative_momentum_&&conservative_momentum_->isChecked();
+		aoa_sweep_previous_auto_pause_=auto_pause_->isChecked();auto_pause_->setChecked(true);
+		auto_pause_->setEnabled(false);auto_pause_sensitivity_->setEnabled(false);
+		aoa_mean_tolerance_->setEnabled(false);aoa_max_flow_throughs_->setEnabled(false);
+		aoa_sweep_min_->setEnabled(false);aoa_sweep_max_->setEnabled(false);aoa_sweep_step_->setEnabled(false);
+		trim_mass_->setEnabled(false);build_button_->setEnabled(false);
+		if(conservative_momentum_)conservative_momentum_->setEnabled(false);
+		aoa_sweep_button_->setEnabled(!trim_search);trim_search_button_->setEnabled(trim_search);
+		aoa_sweep_button_->setText(trim_search?"Run aerodynamic AoA sweep":"Cancel AoA sweep");
+		trim_search_button_->setText(trim_search?"Cancel glide search":"Find fixed-attitude glide");
 		const QString geometry_provenance=
-			"geometry = validated closed OCCT solid; canonical conservative cut cells";
-		aoa_sweep_results_->setPlainText(QString("AoA       <D> [N]     <L> [N]    L/D       CD       CL   sim [s]  wall [s]  exit\n%1\n%2\nmean tolerance = %3%; maximum = %4 flow-throughs").arg(reference_area_->value()>0?QString("reference area = %1 m²").arg(reference_area_->value(),0,'g',8):QString("reference area = 0: CL/CD withheld; force L/D remains available")).arg(geometry_provenance).arg(aoa_mean_tolerance_->value(),0,'g',4).arg(aoa_max_flow_throughs_->value(),0,'g',4));
-		statusBar()->showMessage(QString("Starting %1-case AoA sweep; current CAD placement is 0°.").arg(aoa_sweep_angles_.size()),8000);QTimer::singleShot(0,this,&ParagliderWindow::startNextAoaSweepCase);
+			QString("geometry = closed OCCT solid\nmomentum = %1")
+			.arg(conservative_momentum_&&conservative_momentum_->isChecked()?
+				"experimental collocated control volumes":"staggered MAC")+aerodynamic_resolution_note;
+		if(trim_search)
+			aoa_sweep_results_->setPlainText(QString::fromUtf8(
+				"FIXED-ATTITUDE FREE-FLIGHT SEARCH\nγ trial   α geom      <D> [N]     <L> [N]    pressure D/L [N]       skin D/L [N]     horizontal residual   vertical support   sim [s]  wall [s]  exit\nall-up mass = %1 kg; reference speed = %2 m/s\n%3\nMeasured fixed CAD chord incidence = %4°. Trial geometric α ≈ incidence + γ; γ is only the candidate descent path in the equivalent rotated frame.\nThe STEP cannot define rigged pitch relative to gravity: the current CAD placement must already contain that flight attitude.\nmean tolerance = %5%; maximum = %6 flow-throughs")
+				.arg(trim_mass_->value(),0,'g',6).arg(speed_->value(),0,'g',6).arg(geometry_provenance)
+				.arg(std::isfinite(trim_baseline_incidence_degrees_)?QString::number(trim_baseline_incidence_degrees_,'f',2):QString("unknown"))
+				.arg(aoa_mean_tolerance_->value(),0,'g',4).arg(aoa_max_flow_throughs_->value(),0,'g',4));
+		else aoa_sweep_results_->setPlainText(QString("AoA       <D> [N]     <L> [N]    L/D       CD       CL   sim [s]  wall [s]  exit\n%1\n%2\nmean tolerance = %3%; maximum = %4 flow-throughs").arg(reference_area_->value()>0?QString("reference area = %1 m²").arg(reference_area_->value(),0,'g',8):QString("reference area = 0: CL/CD withheld; force L/D remains available")).arg(geometry_provenance).arg(aoa_mean_tolerance_->value(),0,'g',4).arg(aoa_max_flow_throughs_->value(),0,'g',4));
+		statusBar()->showMessage(QString("Starting %1-case %2; current CAD placement is the fixed reference attitude.")
+			.arg(aoa_sweep_angles_.size()).arg(operation),8000);
+		QTimer::singleShot(0,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
 
 	void ParagliderWindow::startNextAoaSweepCase()
 	{
 		if(!aoa_sweep_active_||aoa_sweep_index_>=aoa_sweep_angles_.size())return;
-		restoreFullWingDisplay();const double angle=aoa_sweep_angles_[aoa_sweep_index_];config_.placement=left_rotation(aoa_sweep_baseline_,angle,{0,1,0});normalizePlacementToDomain();viewer_->setSimulationCaseLabel(QString("AoA %1°  [%2/%3]").arg(angle,0,'f',1).arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()));aoa_sweep_waiting_=false;
-		statusBar()->showMessage(QString("AoA sweep %1/%2: %3° — building and gathering mean-force statistics.").arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()).arg(angle,0,'f',1));
+		restoreFullWingDisplay();const double angle=aoa_sweep_angles_[aoa_sweep_index_];config_.placement=left_rotation(aoa_sweep_baseline_,angle,{0,1,0});normalizePlacementToDomain();viewer_->setSimulationCaseLabel(QString("%1 %2°  [%3/%4]").arg(trim_search_active_?QString::fromUtf8("glide γ trial"):"AoA").arg(angle,0,'f',1).arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()));aoa_sweep_waiting_=false;
+		statusBar()->showMessage(QString("%1 %2/%3: %4° — building and gathering mean-force statistics.").arg(trim_search_active_?"Glide search":"AoA sweep").arg(aoa_sweep_index_+1).arg(aoa_sweep_angles_.size()).arg(angle,0,'f',1));
 		if(!buildGrid()){cancelAoaSweep("grid construction failed");return;}aoa_sweep_waiting_=true;
 	}
 
@@ -752,6 +859,11 @@ namespace paracfd::gui
 		const Vec3d force=snapshot.mean_force_ready?snapshot.mean_force:
 			(bounded_mean?snapshot.bounded_mean_force:
 			(snapshot.viscous_loads_valid?snapshot.total_force:snapshot.pressure_force));
+		const Vec3d pressure_force=snapshot.mean_force_ready?snapshot.mean_pressure_force:
+			(bounded_mean?snapshot.bounded_mean_pressure_force:snapshot.pressure_force);
+		const Vec3d viscous_force=snapshot.mean_force_ready?snapshot.mean_viscous_force:
+			(bounded_mean?snapshot.bounded_mean_viscous_force:
+			(snapshot.viscous_loads_valid?snapshot.viscous_force:Vec3d{}));
 		const double ratio=std::abs(force.x)>1e-12?force.z/force.x:std::numeric_limits<double>::quiet_NaN();
 		const double area=reference_area_->value(),dynamic_pressure=0.5*rho_->value()*speed_->value()*speed_->value();
 		const bool coefficients_valid=area>0&&dynamic_pressure>0;
@@ -767,18 +879,116 @@ namespace paracfd::gui
 		}
 		const double wall=paused_wall_ms_>=0?paused_wall_ms_/1000.0:(build_wall_timer_active_?build_wall_timer_.elapsed()/1000.0:0.0);
 		const double angle=aoa_sweep_angles_[aoa_sweep_index_];
-		aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4  %5  %6  %7  %8  %9").arg(angle,6,'f',1).arg(force.x,10,'f',3).arg(force.z,10,'f',3).arg(ratio,8,'f',3).arg(cd,8).arg(cl,8).arg(snapshot.physical_time,8,'f',3).arg(wall,8,'f',2).arg(exit_label));
-		std::fprintf(stderr,"[paraglider-aoa-sweep] angle=%.6g mean-D=%.9g mean-L=%.9g L/D=%.9g CD=%s CL=%s sim=%.9g wall=%.3f exit=%s mean-drift=%.6g mean-rms=%.6g\n",angle,force.x,force.z,ratio,cd.toUtf8().constData(),cl.toUtf8().constData(),snapshot.physical_time,wall,exit_label.toUtf8().constData(),snapshot.mean_force_drift,snapshot.mean_force_rms);++aoa_sweep_index_;
+		if(trim_search_active_)
+		{
+			const bool trial_converged=snapshot.pause_reason==SimulationPauseReason::Steady||
+				snapshot.pause_reason==SimulationPauseReason::MeanConverged;
+			trim_all_cases_converged_=trim_all_cases_converged_&&trial_converged;
+			trim_samples_.push_back({angle,force.x,force.z});const double radians=angle*3.14159265358979323846/180.0;
+			const double horizontal=std::cos(radians)*force.x-std::sin(radians)*force.z;
+			const double vertical=std::sin(radians)*force.x+std::cos(radians)*force.z;
+			const double geometric_alpha=trim_baseline_incidence_degrees_+angle;
+			aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4   %5/%6   %7/%8   %9 N          %10 N       %11  %12  %13")
+				.arg(angle,7,'f',2).arg(geometric_alpha,7,'f',2).arg(force.x,10,'f',3).arg(force.z,10,'f',3)
+				.arg(pressure_force.x,8,'f',2).arg(pressure_force.z,8,'f',2)
+				.arg(viscous_force.x,8,'f',2).arg(viscous_force.z,8,'f',2)
+				.arg(horizontal,12,'f',3).arg(vertical,12,'f',3).arg(snapshot.physical_time,8,'f',3)
+				.arg(wall,8,'f',2).arg(exit_label));
+			std::fprintf(stderr,"[paraglider-trim-trial] gamma=%.6g mean-D=%.9g mean-L=%.9g pressure-D=%.9g pressure-L=%.9g skin-D=%.9g skin-L=%.9g world-horizontal=%.9g world-vertical=%.9g sim=%.9g wall=%.3f converged=%d exit=%s\n",
+				angle,force.x,force.z,pressure_force.x,pressure_force.z,viscous_force.x,
+				viscous_force.z,horizontal,vertical,snapshot.physical_time,wall,
+				trial_converged?1:0,exit_label.toUtf8().constData());
+		}
+		else
+		{
+			aoa_sweep_results_->appendPlainText(QString("%1  %2  %3  %4  %5  %6  %7  %8  %9").arg(angle,6,'f',1).arg(force.x,10,'f',3).arg(force.z,10,'f',3).arg(ratio,8,'f',3).arg(cd,8).arg(cl,8).arg(snapshot.physical_time,8,'f',3).arg(wall,8,'f',2).arg(exit_label));
+			std::fprintf(stderr,"[paraglider-aoa-sweep] angle=%.6g mean-D=%.9g mean-L=%.9g L/D=%.9g CD=%s CL=%s sim=%.9g wall=%.3f exit=%s mean-drift=%.6g mean-rms=%.6g\n",angle,force.x,force.z,ratio,cd.toUtf8().constData(),cl.toUtf8().constData(),snapshot.physical_time,wall,exit_label.toUtf8().constData(),snapshot.mean_force_drift,snapshot.mean_force_rms);
+		}
+		++aoa_sweep_index_;
 		if(aoa_sweep_index_>=aoa_sweep_angles_.size())
 		{
-			aoa_sweep_active_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);aoa_sweep_results_->appendPlainText("Sweep complete. The viewer retains the final-angle solution.");statusBar()->showMessage(QString("AoA sweep complete: %1 cases.").arg(aoa_sweep_angles_.size()),10000);return;
+			const bool completed_trim=trim_search_active_;aoa_sweep_active_=false;
+			aoa_sweep_button_->setText("Run aerodynamic AoA sweep");aoa_sweep_button_->setEnabled(true);
+			trim_search_button_->setText("Find fixed-attitude glide");trim_search_button_->setEnabled(true);
+			build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);
+			aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);
+			aoa_sweep_min_->setEnabled(true);aoa_sweep_max_->setEnabled(true);aoa_sweep_step_->setEnabled(true);
+			trim_mass_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);
+			if(conservative_momentum_){conservative_momentum_->setEnabled(true);
+				conservative_momentum_->setChecked(aoa_sweep_previous_conservative_);}
+			if(completed_trim)
+			{
+				const FixedAttitudeGlideTrim trim=solve_fixed_attitude_glide(trim_samples_,speed_->value(),trim_mass_->value());
+				const QString quality_note=trim_all_cases_converged_?QString{}:QString::fromUtf8(
+					"\nWARNING: PROVISIONAL RESULT — at least one trial reached its maximum flow-through limit before convergence. Increase the limit or loosen/refine the convergence setup, then rerun before relying on the estimate.");
+				if(trim.equilibrium)
+				{
+					aoa_sweep_results_->appendPlainText(QString::fromUtf8(
+						"\nEQUILIBRIUM FOUND (interpolated between γ=%1° and %2°)\nflight-path γ = %3°   glide ratio = %4:1   geometric α ≈ %5°\nequilibrium airspeed = %6 m/s   horizontal = %7 m/s   sink = %8 m/s\nreference-speed vertical support = %9 N   required force scale = %10\nThe speed estimate assumes force coefficients remain constant when scaling from the reference speed; rerun near that speed for final validation. Riser/pilot pitch-moment balance is assumed by the fixed CAD trim attitude, not solved.\nThe original trim placement is restored after the search; trial loads are retained in this report.%11")
+						.arg(trim.lower_trial_degrees,0,'f',2).arg(trim.upper_trial_degrees,0,'f',2)
+						.arg(trim.flight_path_degrees,0,'f',3).arg(trim.glide_ratio,0,'f',2)
+						.arg(trim_baseline_incidence_degrees_+trim.flight_path_degrees,0,'f',3)
+						.arg(trim.airspeed,0,'f',3).arg(trim.horizontal_speed,0,'f',3)
+						.arg(trim.sink_rate,0,'f',3).arg(trim.reference_vertical_support,0,'f',3)
+						.arg(trim.force_scale,0,'f',3).arg(quality_note));
+					std::fprintf(stderr,"[paraglider-trim] equilibrium=1 gamma=%.9g glide=%.9g airspeed=%.9g horizontal=%.9g sink=%.9g reference-support=%.9g force-scale=%.9g mass=%.9g\n",
+						trim.flight_path_degrees,trim.glide_ratio,trim.airspeed,trim.horizontal_speed,
+						trim.sink_rate,trim.reference_vertical_support,trim.force_scale,trim_mass_->value());
+					statusBar()->showMessage(QString("Fixed-attitude glide equilibrium: %1 m/s airspeed, %2 m/s sink, %3:1 glide.")
+						.arg(trim.airspeed,0,'f',2).arg(trim.sink_rate,0,'f',2).arg(trim.glide_ratio,0,'f',1),15000);
+				}
+				else
+				{
+					aoa_sweep_results_->appendPlainText(QString::fromUtf8(
+						"\nNO FIXED-ATTITUDE GLIDE EQUILIBRIUM IN THE TRIAL RANGE\nClosest trial γ = %1°: horizontal residual = %2 N, vertical support = %3 N at the reference speed.\nThe aerodynamic resultant never aligned with gravity, so ParaCFD will not fabricate an airspeed or sink-rate result. Verify leading/trailing-edge polarity, convergence and resolved circulation before widening the flight-path range.\nThe original trim placement is restored after the search; trial loads are retained in this report.%4")
+						.arg(trim.flight_path_degrees,0,'f',2).arg(trim.reference_horizontal_residual,0,'f',3)
+						.arg(trim.reference_vertical_support,0,'f',3).arg(quality_note));
+					std::fprintf(stderr,"[paraglider-trim] equilibrium=0 closest-gamma=%.9g horizontal-residual=%.9g vertical-support=%.9g mass=%.9g\n",
+						trim.flight_path_degrees,trim.reference_horizontal_residual,
+						trim.reference_vertical_support,trim_mass_->value());
+					statusBar()->showMessage("No fixed-attitude glide equilibrium exists in the requested flight-path range.",15000);
+				}
+			}
+			else
+			{
+				aoa_sweep_results_->appendPlainText("Sweep complete. The original placement is restored; trial loads are retained in this report.");
+				statusBar()->showMessage(QString("AoA sweep complete: %1 cases.").arg(aoa_sweep_angles_.size()),10000);
+			}
+			trim_search_active_=false;restoreAoaBaseline();return;
 		}
 		QTimer::singleShot(100,this,&ParagliderWindow::startNextAoaSweepCase);
 	}
 
 	void ParagliderWindow::cancelAoaSweep(const QString& reason)
 	{
-		if(!aoa_sweep_active_)return;aoa_sweep_active_=false;aoa_sweep_waiting_=false;aoa_sweep_button_->setText("Run aerodynamic AoA sweep");build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("Sweep stopped: %1.").arg(reason));statusBar()->showMessage(reason.isEmpty()?"AoA sweep stopped.":QString("AoA sweep stopped: %1.").arg(reason),7000);
+		if(!aoa_sweep_active_)return;const bool was_trim=trim_search_active_;aoa_sweep_active_=false;aoa_sweep_waiting_=false;trim_search_active_=false;
+		aoa_sweep_button_->setText("Run aerodynamic AoA sweep");aoa_sweep_button_->setEnabled(true);
+		trim_search_button_->setText("Find fixed-attitude glide");trim_search_button_->setEnabled(true);
+		build_button_->setEnabled(true);auto_pause_->setEnabled(true);auto_pause_sensitivity_->setEnabled(true);
+		aoa_mean_tolerance_->setEnabled(true);aoa_max_flow_throughs_->setEnabled(true);
+		aoa_sweep_min_->setEnabled(true);aoa_sweep_max_->setEnabled(true);aoa_sweep_step_->setEnabled(true);
+		trim_mass_->setEnabled(true);if(!aoa_sweep_previous_auto_pause_)auto_pause_->setChecked(false);
+		if(conservative_momentum_){conservative_momentum_->setEnabled(true);
+			conservative_momentum_->setChecked(aoa_sweep_previous_conservative_);}
+		restoreAoaBaseline();
+		if(!reason.isEmpty())aoa_sweep_results_->appendPlainText(QString("%1 stopped: %2.").arg(was_trim?"Glide search":"Sweep",reason));
+		statusBar()->showMessage(reason.isEmpty()?(was_trim?"Glide search stopped.":"AoA sweep stopped."):
+			QString("%1 stopped: %2.").arg(was_trim?"Glide search":"AoA sweep",reason),7000);
+	}
+
+	void ParagliderWindow::restoreAoaBaseline()
+	{
+		// A trial result has a different geometry frame. Do not leave its worker,
+		// display transform or save/rebuild state attached to the rigged trim case.
+		shutdownWorker();restoreFullWingDisplay();
+		config_.placement=aoa_sweep_baseline_;normalizePlacementToDomain();
+		simulation_running_=simulation_auto_paused_=false;
+		build_wall_timer_active_=build_seen_running_=false;
+		play_button_->setChecked(false);play_button_->setEnabled(false);step_button_->setEnabled(false);
+		amr_boxes_.clear();eb_boxes_.clear();cp_plus_.clear();cp_minus_.clear();delta_cp_.clear();
+		triangle_pressure_force_xyz_.clear();updateDebugBoxes();
+		viewer_->clearTriangleSurfaceColouring();viewer_->clearTrianglePressureForces();
+		viewer_->setSimulationCaseLabel("Original trim restored");
 	}
 
 	void ParagliderWindow::updateGeometryIssueDisplay()
@@ -881,7 +1091,7 @@ namespace paracfd::gui
 
 	bool ParagliderWindow::saveConfigFile(const QString& path)
 	{
-		config_=configFromUi();if(!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)config_.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),config_,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
+		ParagliderConfig saved=configFromUi();if(aoa_sweep_active_)saved.placement=aoa_sweep_baseline_;else if(!thin_debug_display_&&!half_wing_display_&&!embedded_boundary_diagnostic_display_)saved.placement=viewer_->modelPlacement();std::string error;if(!save_paraglider_config(path.toStdString(),saved,&error)){QMessageBox::critical(this,"Config save failed",QString::fromStdString(error));return false;}config_path_=QFileInfo(path).absoluteFilePath();rememberRecentFile(config_path_);statusBar()->showMessage(QString("Saved %1").arg(config_path_),5000);return true;
 	}
 
 	bool ParagliderWindow::autoConfigureGridFromSections()
@@ -948,7 +1158,7 @@ namespace paracfd::gui
 		CudaMemoryInfo cuda_memory;std::string cuda_error;
 		const bool have_cuda_memory=cuda_memory_info(cuda_memory,&cuda_error)&&cuda_memory.total_bytes>0;
 		const std::size_t budget=have_cuda_memory?safe_cuda_budget(cuda_memory,false):0;
-		const bool diagnostic=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		const bool diagnostic=true;
 		Candidate selected;double candidate_finest=requested_finest;
 		QApplication::setOverrideCursor(Qt::WaitCursor);
 		try
@@ -1311,7 +1521,7 @@ namespace paracfd::gui
 		const int muscl=core->embedded_high_order_stencil_count(),
 			ls_full=core->embedded_least_squares_full_rank_count(),wall_nodes=core->fabric_wall_node_count();
 		const QString momentum_mode=core->uses_conservative_cell_momentum()
-			?"COLLOCATED CONTROL-VOLUME — EXPERIMENTAL":"FACE-CENTRED MAC — PRODUCTION";
+			?"CONSERVATIVE CONTROL-VOLUME — EXPERIMENTAL":"FACE-CENTRED MAC — DIAGNOSTIC";
 		const QString topology_mode="CLOSED OCCT SOLID — CANONICAL CONSERVATIVE EMBEDDED BOUNDARY";
 		QString mode=topology_mode+"\n"+momentum_mode;
 		if(reconciled_facet_pairs)mode+=QString("\n%1 shared-interface partition residual%2 recorded (sum %3, max %4 m²)")
@@ -1336,7 +1546,7 @@ namespace paracfd::gui
 		updateGeometryIssueDisplay();
 		std::fprintf(stderr,"[paraglider] grid: symmetry=%s, topology=closed-solid-canonical-interface, mode=%s, %zu bricks, %zu DOFs, fragments=%zu apertures=%zu MUSCL=%d LS-full=%d wall-nodes=%d patches=%zu unresolved=%zu retained-small-apertures=%zu area=%.6g m2 face-state-retained-roots=%zu min-fraction=%.6g, GPU %.2f MiB\n",
 			half_wing?"half-y":"full",
-			core->uses_conservative_cell_momentum()?"collocated-experimental":"face-centred-mac-production",
+			core->uses_conservative_cell_momentum()?"collocated-control-volume-experimental":"face-centred-mac-experimental",
 			bricks,dofs,fragments,apertures,muscl,ls_full,wall_nodes,patches,unresolved,
 			small_apertures,small_aperture_area,face_state_retained_small_roots,
 			face_state_retained_small_roots?minimum_face_state_retained_volume_fraction:0,
@@ -1405,7 +1615,7 @@ namespace paracfd::gui
 		const bool new_surface_results=!s.delta_cp.empty();
 		if(new_surface_results){cp_plus_=std::move(s.cp_plus);cp_minus_=std::move(s.cp_minus);delta_cp_=std::move(s.delta_cp);triangle_pressure_force_xyz_=std::move(s.triangle_pressure_force_xyz);delta_cp_range_=std::max(std::abs(s.cp_min),std::abs(s.cp_max));side_cp_range_=std::max(std::abs(s.side_cp_min),std::abs(s.side_cp_max));applySurfaceColour();}
 		const bool have_surface_results=!delta_cp_.empty();
-		QString solver=QString("%1%2\nstep %3   t=%4 s   dt=%5 ms   CFL=%6\nGPU step %7 ms; projection %8 ms / %9 it\nresidual %10; regular/EB max %11 / %12 m/s\nEB transport %13 1/s; LES diffusion %14 1/s × %15\nGPU %16 MiB").arg(half_wing_display_?"HALF-WING Y-SYMMETRY — WHOLE LOADS RECONSTRUCTED\n":"").arg(s.conservative_cell_momentum?"COLLOCATED CONTROL-VOLUME — EXPERIMENTAL":"FACE-CENTRED MAC — PRODUCTION").arg(s.steps).arg(s.physical_time,0,'f',4).arg(s.dt*1e3,0,'f',3).arg(s.effective_cfl,0,'f',2).arg(s.step_ms,0,'f',1).arg(s.projection_ms,0,'f',1).arg(s.pressure_iterations).arg(s.residual,0,'g',3).arg(s.max_abs_regular_velocity,0,'g',4).arg(s.max_abs_special_velocity,0,'g',4).arg(s.max_embedded_cfl_rate,0,'g',4).arg(s.max_diffusion_rate,0,'g',4).arg(s.diffusion_substeps).arg(s.gpu_bytes/(1024.0*1024.0),0,'f',1);
+		QString solver=QString("%1%2\nstep %3   t=%4 s   dt=%5 ms   CFL=%6\nGPU step %7 ms; projection %8 ms / %9 it\nresidual %10; regular/EB max %11 / %12 m/s\nEB transport %13 1/s; LES diffusion %14 1/s × %15\nGPU %16 MiB").arg(half_wing_display_?"HALF-WING Y-SYMMETRY — WHOLE LOADS RECONSTRUCTED\n":"").arg(s.conservative_cell_momentum?"CONSERVATIVE CONTROL-VOLUME — EXPERIMENTAL":"FACE-CENTRED MAC — DIAGNOSTIC").arg(s.steps).arg(s.physical_time,0,'f',4).arg(s.dt*1e3,0,'f',3).arg(s.effective_cfl,0,'f',2).arg(s.step_ms,0,'f',1).arg(s.projection_ms,0,'f',1).arg(s.pressure_iterations).arg(s.residual,0,'g',3).arg(s.max_abs_regular_velocity,0,'g',4).arg(s.max_abs_special_velocity,0,'g',4).arg(s.max_embedded_cfl_rate,0,'g',4).arg(s.max_diffusion_rate,0,'g',4).arg(s.diffusion_substeps).arg(s.gpu_bytes/(1024.0*1024.0),0,'f',1);
 		solver.prepend(geometry_run_status+"\n");
 		if(s.auto_pause_enabled){if(s.settling_ready){solver+=QString("\nauto-pause score %1; force drift/RMS %2 / %3; field Δ %4").arg(s.settling_score,0,'f',2).arg(s.settling_force_drift,0,'g',3).arg(s.settling_force_rms,0,'g',3).arg(s.flow_change,0,'g',3);if(s.flow_throughs<kAutoPauseMinimumFlowThroughs)solver+=QString("; warm-up %1 / %2 flow-throughs").arg(s.flow_throughs,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);}else solver+=QString("\nauto-pause observing %1 / %2 flow-throughs").arg(s.flow_throughs,0,'f',2).arg(kAutoPauseMinimumFlowThroughs,0,'f',2);solver+=QString("\nexit: mean drift < %1%; maximum %2 flow-throughs").arg(aoa_mean_tolerance_->value(),0,'g',3).arg(aoa_max_flow_throughs_->value(),0,'g',3);}
 		if(s.mean_force_ready)solver+=QString("\nmean-force drift/RMS %1 / %2 over adjacent windows").arg(s.mean_force_drift,0,'g',3).arg(s.mean_force_rms,0,'g',3);

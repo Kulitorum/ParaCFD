@@ -1,3 +1,5 @@
+> **Historical architecture notes:** current repair evidence and remaining limitations are in [review/REPAIR_STATUS.md](review/REPAIR_STATUS.md) and [COMPLETION_PLAN.md](COMPLETION_PLAN.md). Descriptions below of zero-thickness production geometry, a validated MAC solver, or a fixed FP32 pressure-tolerance floor predate the current closed-solid and corrected-pressure implementation.
+
 # ParaCFD
 
 ParaCFD is a C++20/CUDA/Qt6 aerodynamic CFD application for stabilized paraglider geometry imported from STEP. It treats canopy skins, ribs, diagonals, and panels as zero-thickness, two-sided impermeable fabric; fluid exists on both sides, intentional CAD openings remain open, and no solid-volume filling or artificial extrusion is used.

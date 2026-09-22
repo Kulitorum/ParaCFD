@@ -1,3 +1,5 @@
+> **Historical architecture notes:** current repair evidence and remaining limitations are in [review/REPAIR_STATUS.md](review/REPAIR_STATUS.md) and [COMPLETION_PLAN.md](COMPLETION_PLAN.md). Descriptions below of zero-thickness production geometry, a validated MAC solver, or a fixed FP32 pressure-tolerance floor predate the current closed-solid and corrected-pressure implementation.
+
 # Numerical basis for the paraglider CFD path
 
 Current authoritative status: the face-centred staggered MAC solver is the product

@@ -8,6 +8,7 @@
 
 #include "core/fluid/amr_fields.h"
 
+#include <stdexcept>
 #include <algorithm>
 #include <cmath>
 
@@ -274,4 +275,26 @@ namespace paracfd::core
 			amr_sampling_detail::sample_local(hierarchy,fields,location.level,record,1,location.brick,point),
 			amr_sampling_detail::sample_local(hierarchy,fields,location.level,record,2,location.brick,point)};
 	}
+    // A geometrically closed contour must be sampled at its actual positions.
+    // Nearest-cell values move its four sides independently on an AMR grid and
+    // create spurious circulation even for a curl-free affine velocity field.
+    inline double rectangular_circulation_xz(const AmrHierarchy& hierarchy,
+        const AmrHostFields& fields,double x0,double x1,double y,double z0,double z1,
+        int samples=512)
+    {
+        if(!(x1>x0&&z1>z0)||samples<1)
+            throw std::invalid_argument("invalid circulation contour");
+        const double dx=(x1-x0)/samples,dz=(z1-z0)/samples;
+        double circulation=0;
+        for(int q=0;q<samples;++q)
+        {
+            const double x=x0+(q+0.5)*dx,z=z0+(q+0.5)*dz;
+            circulation+=(sample_amr_velocity(hierarchy,fields,{x,y,z0}).x-
+                sample_amr_velocity(hierarchy,fields,{x,y,z1}).x)*dx;
+            circulation+=(sample_amr_velocity(hierarchy,fields,{x1,y,z}).z-
+                sample_amr_velocity(hierarchy,fields,{x0,y,z}).z)*dz;
+        }
+        return circulation;
+    }
+
 }

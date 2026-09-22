@@ -1,0 +1,22 @@
+[
+  {
+    "Path": "C:\\CODE\\ParaCFD\\Test-Data\\PlanBParakite-Solid.step",
+    "Hash": "36D7A1BE6C36AB6EF2C54D8744689B65E8FB61B3C20EDAC4F2259099ACBC668A"
+  },
+  {
+    "Path": "C:\\CODE\\ParaCFD\\configs\\planb_parakite.json",
+    "Hash": "9B81B718600FFF2C189CA404A4DB2EFDD2322FC4AAB46A1BD796AE08F1860A94"
+  },
+  {
+    "Path": "C:\\CODE\\ParaCFD\\configs\\naca_validation.json",
+    "Hash": "E25CBB2FEB48B66D56A3EF19F817A7C65A3F6155B0FC13F992C7AA4C1982C334"
+  },
+  {
+    "Path": "C:\\CODE\\ParaCFD\\src\\core\\fluid\\amr_pressure.cu",
+    "Hash": "52726A476AE5DB65BB99093BCCF72A58480B6A37AD423D8A31AB66CC8E960441"
+  },
+  {
+    "Path": "C:\\CODE\\ParaCFD\\src\\core\\fluid\\amr_advection.cu",
+    "Hash": "ABB82BED7202D62B87DAAC3B5D8134137BC62D9439772E97D7367A361E6C4DB4"
+  }
+]

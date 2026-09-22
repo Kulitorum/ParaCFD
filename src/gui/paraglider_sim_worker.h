@@ -99,11 +99,13 @@ namespace paracfd::gui
 		double flow_change = 0,settling_score = 0,settling_force_drift = 0,settling_force_rms = 0;
 		double flow_throughs = 0;
 		paracfd::core::Vec3d mean_force{};
+		paracfd::core::Vec3d mean_pressure_force{},mean_viscous_force{};
 		double mean_force_drift = 0,mean_force_rms = 0;
 		// Time-weighted force over the bounded final convergence window. This remains
 		// useful at a maximum-flow exit even when the two half-window convergence
 		// comparison is not yet complete.
 		paracfd::core::Vec3d bounded_mean_force{};
+		paracfd::core::Vec3d bounded_mean_pressure_force{},bounded_mean_viscous_force{};
 		double bounded_mean_force_coverage = 0;
 		std::size_t gpu_bytes = 0;
 		bool playing = false,auto_pause_enabled = false,auto_paused = false,settling_ready = false,mean_force_ready = false;
@@ -178,7 +180,7 @@ namespace paracfd::gui
 		bool samplePlaybackSlice(const SliceParams& params,std::vector<float>& values,
 			FieldRange& range) const;
 		bool samplePlaybackPoint(double x,double y,double z,FieldProbeSample& sample) const;
-		void updateSettling(double physical_time,const paracfd::core::Vec3d& force,
+		void updateSettling(double physical_time,const paracfd::core::AerodynamicLoads& loads,
 			const paracfd::core::ExternalAeroConservationStats& conservation);
 		struct SettlingSample{double time=0;paracfd::core::Vec3d force{};double flow_change=0;};
 		std::unique_ptr<paracfd::core::ExternalAeroCore> core_;
@@ -221,9 +223,12 @@ namespace paracfd::gui
 		std::uint64_t playback_generation_ = (std::uint64_t{1} << 63);
 		double latest_flow_change_ = 0;
 		std::deque<SettlingSample> settling_history_;
-		std::deque<paracfd::core::TimedAerodynamicForce> mean_force_history_;
-		paracfd::core::AerodynamicMeanConvergence mean_convergence_;
-		paracfd::core::Vec3d bounded_mean_force_{};
+		std::deque<paracfd::core::TimedAerodynamicForce> mean_force_history_,
+			mean_pressure_force_history_,mean_viscous_force_history_;
+		paracfd::core::AerodynamicMeanConvergence mean_convergence_,
+			mean_pressure_convergence_,mean_viscous_convergence_;
+		paracfd::core::Vec3d bounded_mean_force_{},bounded_mean_pressure_force_{},
+			bounded_mean_viscous_force_{};
 		double bounded_mean_force_coverage_=0;
 		bool bounded_mean_force_ready_=false,bounded_mean_force_complete_=false;
 		int settling_consecutive_=0,mean_consecutive_=0;

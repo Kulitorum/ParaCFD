@@ -8,5 +8,5 @@ class TopoDS_Solid;
 namespace paracfd::core
 {
 	ClosedSolidSourcePtr make_validated_closed_solid_source(
-		const TopoDS_Solid& source_solid,const Aabb3d& source_bounds_metres);
+		const TopoDS_Solid& source_solid,const TriMesh& source_mesh);
 }

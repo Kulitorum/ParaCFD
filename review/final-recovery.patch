@@ -1,0 +1,609 @@
+--- a/src/core/aero_loads.cpp
++++ b/src/core/aero_loads.cpp
+@@ -35,9 +35,12 @@
+ 	AerodynamicLoads compute_pressure_loads(const CompositeAmrPressureSystem& system,const std::vector<double>& p,std::size_t ntri,const FreestreamConfig& fs,const AeroReferenceConfig& ref,double pref)
+ 	{
+ 		if(p.size()<static_cast<std::size_t>(system.storage_size))throw std::invalid_argument("composite aerodynamic pressure vector is too small");AerodynamicLoads out;out.triangles.resize(ntri);std::vector<double> plus_sum(ntri,0),minus_sum(ntri,0),area_sum(ntri,0);const double q=0.5*fs.rho*fs.speed*fs.speed;
++        const auto gradient=composite_pressure_gradients_cpu(system,p);
++        auto wall_pressure=[&](int dof,Vec3d point)
++        {return dof<0?pref:p[dof]+dot(gradient[dof],point-system.centroid[dof]);};
+ 		for(const CompositeSurfacePressurePatch& patch:system.surface_patches)
+ 		{
+-			if(patch.source_triangle_id>=ntri||(patch.plus_dof<0&&patch.minus_dof<0)||patch.plus_dof>=system.storage_size||patch.minus_dof>=system.storage_size)continue;const double pp=patch.plus_dof<0?pref:p[patch.plus_dof],pm=patch.minus_dof<0?pref:p[patch.minus_dof],dp=pm-pp;const Vec3d force=patch.normal*(dp*patch.area);const Vec3d arm=patch.centroid-ref.moment_origin;out.pressure_force=out.pressure_force+force;out.pressure_moment=out.pressure_moment+cross(arm,force);auto& tr=out.triangles[patch.source_triangle_id];tr.pressure_force=tr.pressure_force+force;tr.represented_area+=patch.area;plus_sum[patch.source_triangle_id]+=pp*patch.area;minus_sum[patch.source_triangle_id]+=pm*patch.area;area_sum[patch.source_triangle_id]+=patch.area;
++			if(patch.source_triangle_id>=ntri||(patch.plus_dof<0&&patch.minus_dof<0)||patch.plus_dof>=system.storage_size||patch.minus_dof>=system.storage_size)continue;const double pp=wall_pressure(patch.plus_dof,patch.centroid),pm=wall_pressure(patch.minus_dof,patch.centroid),dp=pm-pp;const Vec3d force=patch.normal*(dp*patch.area);const Vec3d arm=patch.centroid-ref.moment_origin;out.pressure_force=out.pressure_force+force;out.pressure_moment=out.pressure_moment+cross(arm,force);auto& tr=out.triangles[patch.source_triangle_id];tr.pressure_force=tr.pressure_force+force;tr.represented_area+=patch.area;plus_sum[patch.source_triangle_id]+=pp*patch.area;minus_sum[patch.source_triangle_id]+=pm*patch.area;area_sum[patch.source_triangle_id]+=patch.area;
+ 		}
+ 		for(std::size_t i=0;i<ntri;++i)if(area_sum[i]>0){auto& tr=out.triangles[i];tr.p_plus=plus_sum[i]/area_sum[i];tr.p_minus=minus_sum[i]/area_sum[i];tr.delta_p=tr.p_minus-tr.p_plus;if(q>0){tr.cp_plus=(tr.p_plus-pref)/q;tr.cp_minus=(tr.p_minus-pref)/q;tr.delta_cp=tr.delta_p/q;}}
+ 		out.pressure_drag=out.pressure_force.x;out.pressure_side=out.pressure_force.y;out.pressure_lift=out.pressure_force.z;if(q>0&&ref.area>0){out.force_coefficients_valid=true;out.cd_pressure=out.pressure_drag/(q*ref.area);out.cs_pressure=out.pressure_side/(q*ref.area);out.cl_pressure=out.pressure_lift/(q*ref.area);}return out;
+--- a/src/core/fluid/amr_advection.cu
++++ b/src/core/fluid/amr_advection.cu
+@@ -123,25 +123,29 @@
+ 			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count||!active[q])return;
+ 			const int g=group[q];
+ 			if(g<0){const Real inverse=Real(1)/volume[q];x[q]+=dx[q]*inverse;y[q]+=dy[q]*inverse;z[q]+=dz[q]*inverse;return;}
+-			atomicAdd(group_x+g,volume[q]*x[q]+dx[q]);
+-			atomicAdd(group_y+g,volume[q]*y[q]+dy[q]);
+-			atomicAdd(group_z+g,volume[q]*z[q]+dz[q]);
+-		}
+-		__global__ void accumulate_redistributed_state_kernel(const unsigned char* active,
+-			const Real* volume,const int* group,const Real* x,const Real* y,const Real* z,
+-			Real* group_x,Real* group_y,Real* group_z,int count)
+-		{
+-			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count||!active[q])return;
+-			const int g=group[q];if(g<0)return;const Real v=volume[q];
+-			atomicAdd(group_x+g,v*x[q]);atomicAdd(group_y+g,v*y[q]);atomicAdd(group_z+g,v*z[q]);
+-		}
++			atomicAdd(group_x+g,dx[q]);
++			atomicAdd(group_y+g,dy[q]);
++			atomicAdd(group_z+g,dz[q]);
++		}
++        __global__ void accumulate_redistributed_increment_kernel(const unsigned char* active,
++            const Real* volume,const int* group,const Real* before_x,const Real* before_y,
++            const Real* before_z,Real* x,Real* y,Real* z,Real* group_x,Real* group_y,Real* group_z,int count)
++        {
++            const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count||!active[q])return;
++            const int g=group[q];if(g<0)return;const Real v=volume[q];
++            atomicAdd(group_x+g,v*(x[q]-before_x[q]));
++            atomicAdd(group_y+g,v*(y[q]-before_y[q]));
++            atomicAdd(group_z+g,v*(z[q]-before_z[q]));
++            x[q]=before_x[q];y[q]=before_y[q];z[q]=before_z[q];
++        }
++
+ 		__global__ void finalize_redistributed_state_kernel(const unsigned char* active,
+ 			const int* group,const Real* group_volume,const Real* group_x,const Real* group_y,
+ 			const Real* group_z,Real* x,Real* y,Real* z,int count)
+ 		{
+ 			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count||!active[q])return;
+ 			const int g=group[q];if(g<0)return;const Real inverse=Real(1)/group_volume[g];
+-			x[q]=group_x[g]*inverse;y[q]=group_y[g]*inverse;z[q]=group_z[g]*inverse;
++			x[q]+=group_x[g]*inverse;y[q]+=group_y[g]*inverse;z[q]+=group_z[g]*inverse;
+ 		}
+ 		__device__ void atomic_max_positive_cell(Real* destination,Real value)
+ 		{
+@@ -370,9 +374,31 @@
+ 		}
+ 		__global__ void pressure_compact_cell_impulse_kernel(const int* a,const int* b,
+ 			const std::int8_t* axis,const Real* area,const Real* upper_weight,const Real* pressure,
++			const int* gradient_index,const Real* gradient,const Real* displacement,
+ 			Real scale,Real* dx,Real* dy,Real* dz,int count)
+ 		{
+-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const Real weight=upper_weight[edge],face_pressure=(Real(1)-weight)*pressure[a[edge]]+weight*pressure[b[edge]];accumulate_axis_pressure_impulse(a[edge],b[edge],axis[edge],scale*area[edge]*face_pressure,dx,dy,dz);
++			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;
++			const int lower=a[edge],upper=b[edge],ga=gradient_index[lower],gb=gradient_index[upper];
++			const Real w=upper_weight[edge];
++			Real face_pressure=(Real(1)-w)*pressure[lower]+w*pressure[upper];
++			if(ga>=0&&gb>=0)for(int c=0;c<3;++c)
++			{
++				const Real skew=(Real(1)-w)*displacement[6*edge+c]+w*displacement[6*edge+3+c];
++				face_pressure+=skew*((Real(1)-w)*gradient[3*ga+c]+w*gradient[3*gb+c]);
++			}
++			accumulate_axis_pressure_impulse(lower,upper,axis[edge],scale*area[edge]*face_pressure,dx,dy,dz);
++		}
++		__global__ void pressure_reconstructed_surface_impulse_kernel(const int* dof,
++			const Real* coefficient,const Real* displacement,const int* gradient_index,
++			const Real* gradient,const Real* pressure,Real scale,Real* dx,Real* dy,Real* dz,int count)
++		{
++			const int patch=blockIdx.x*blockDim.x+threadIdx.x;if(patch>=count)return;
++			const int node=dof[patch],g=gradient_index[node];Real p=pressure[node];
++			if(g>=0)for(int c=0;c<3;++c)p+=gradient[3*g+c]*displacement[3*patch+c];
++			const Real impulse=scale*p;
++			atomicAdd(dx+node,impulse*coefficient[3*patch]);
++			atomicAdd(dy+node,impulse*coefficient[3*patch+1]);
++			atomicAdd(dz+node,impulse*coefficient[3*patch+2]);
+ 		}
+ 		__global__ void pressure_surface_cell_impulse_kernel(const int* dof,
+ 			const Real* coefficient,const Real* pressure,Real scale,Real* dx,Real* dy,Real* dz,
+@@ -965,7 +991,22 @@
+ 		const std::vector<CompositeEbMomentumRegularConnection> compact_regular=build_composite_eb_momentum_regular_connections(system);
+ 		std::vector<unsigned char> compact_plus(system.storage_size,0);for(const auto& connection:compact_regular)compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);
+ 		auto axis_delta=[&](int dof,int axis,double value){if(axis==0)dx[dof]+=value;else if(axis==1)dy[dof]+=value;else dz[dof]+=value;};
+-		auto internal=[&](int a,int b,int axis,double area,double upper_weight){if(a<0||b<0||a==b||!system.active[a]||!system.active[b]||!(area>0)||upper_weight<0||upper_weight>1)throw std::runtime_error("invalid composite pressure impulse connection");const double face_pressure=(1-upper_weight)*pressure[a]+upper_weight*pressure[b],impulse=scale*area*face_pressure;axis_delta(a,axis,-impulse);axis_delta(b,axis,impulse);};
++        const auto gradient=composite_pressure_gradients_cpu(system,pressure);
++        auto wall_pressure=[&](int dof,Vec3d point)
++        {return pressure[dof]+dot(gradient[dof],point-system.centroid[dof]);};
++        auto internal=[&](int a,int b,int axis,double area,double upper_weight,const Vec3d* face=nullptr)
++        {
++            if(a<0||b<0||a==b||!system.active[a]||!system.active[b]||!(area>0)||upper_weight<0||upper_weight>1)
++                throw std::runtime_error("invalid composite pressure impulse connection");
++            double face_pressure=(1-upper_weight)*pressure[a]+upper_weight*pressure[b];
++            if(face)
++            {
++                const Vec3d skew=*face-(system.centroid[a]*(1-upper_weight)+system.centroid[b]*upper_weight);
++                face_pressure+=dot(skew,gradient[a]*(1-upper_weight)+gradient[b]*upper_weight);
++            }
++            const double impulse=scale*area*face_pressure;
++            axis_delta(a,axis,-impulse);axis_delta(b,axis,impulse);
++        };
+ 		auto interpolation_weight=[&](int a,int b,int axis,double face_coordinate){const double ca=system.centroid[a][axis],cb=system.centroid[b][axis],distance=cb-ca;if(!(std::abs(distance)>1e-14))throw std::runtime_error("composite pressure impulse has coincident centroids");return std::clamp((face_coordinate-ca)/distance,0.0,1.0);};
+ 		for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index)
+ 		{
+@@ -987,12 +1028,21 @@
+ 				}
+ 			}
+ 		}
+-		for(const auto& connection:compact_regular){const int axis=connection.face.component;const AmrLevel& level=hierarchy.levels()[connection.face.level];const BrickMetadata& record=level.bricks[connection.face.brick];const int coordinate=axis==0?connection.face.i:(axis==1?connection.face.j:connection.face.k);const double face_coordinate=record.origin[axis]+coordinate*level.h;internal(connection.lower_dof,connection.upper_dof,axis,connection.open_area,interpolation_weight(connection.lower_dof,connection.upper_dof,axis,face_coordinate));}
+-		auto special=[&](const CoarseFinePressureConnection& connection){const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,b=connection.direction>0?connection.fine_dof:connection.coarse_dof;if(system.active[a]&&system.active[b])internal(a,b,connection.axis,connection.open_area,interpolation_weight(a,b,connection.axis,connection.face_centroid[connection.axis]));};
++        for(const auto& connection:compact_regular)
++        {
++            const int axis=connection.face.component;
++            const auto& level=hierarchy.levels()[connection.face.level];
++            const auto& record=level.bricks[connection.face.brick];
++            const int c[3]={connection.face.i,connection.face.j,connection.face.k};Vec3d face;
++            for(int d=0;d<3;++d)face[d]=record.origin[d]+(c[d]+(axis==d?0:0.5))*level.h;
++            internal(connection.lower_dof,connection.upper_dof,axis,connection.open_area,
++                interpolation_weight(connection.lower_dof,connection.upper_dof,axis,face[axis]),&face);
++        }
++		auto special=[&](const CoarseFinePressureConnection& connection){const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,b=connection.direction>0?connection.fine_dof:connection.coarse_dof;if(system.active[a]&&system.active[b])internal(a,b,connection.axis,connection.open_area,interpolation_weight(a,b,connection.axis,connection.face_centroid[connection.axis]),&connection.face_centroid);};
+ 		for(const auto& connection:system.coarse_fine)special(connection);for(const auto& connection:system.embedded)special(connection);
+ 		for(const CompositeSurfacePressurePatch& patch:system.surface_patches)
+ 		{
+-			if((patch.plus_dof<0&&patch.minus_dof<0)||patch.plus_dof>=system.storage_size||patch.minus_dof>=system.storage_size||!(patch.area>=0)||!std::isfinite(patch.area)||!std::isfinite(patch.normal.x)||!std::isfinite(patch.normal.y)||!std::isfinite(patch.normal.z))throw std::runtime_error("invalid composite pressure surface patch");const Vec3d coefficient=patch.normal*patch.area;if(patch.plus_dof>=0&&system.active[patch.plus_dof]){dx[patch.plus_dof]+=scale*pressure[patch.plus_dof]*coefficient.x;dy[patch.plus_dof]+=scale*pressure[patch.plus_dof]*coefficient.y;dz[patch.plus_dof]+=scale*pressure[patch.plus_dof]*coefficient.z;}if(patch.minus_dof>=0&&system.active[patch.minus_dof]){dx[patch.minus_dof]-=scale*pressure[patch.minus_dof]*coefficient.x;dy[patch.minus_dof]-=scale*pressure[patch.minus_dof]*coefficient.y;dz[patch.minus_dof]-=scale*pressure[patch.minus_dof]*coefficient.z;}
++			if((patch.plus_dof<0&&patch.minus_dof<0)||patch.plus_dof>=system.storage_size||patch.minus_dof>=system.storage_size||!(patch.area>=0)||!std::isfinite(patch.area)||!std::isfinite(patch.normal.x)||!std::isfinite(patch.normal.y)||!std::isfinite(patch.normal.z))throw std::runtime_error("invalid composite pressure surface patch");const Vec3d coefficient=patch.normal*patch.area;if(patch.plus_dof>=0&&system.active[patch.plus_dof]){dx[patch.plus_dof]+=scale*wall_pressure(patch.plus_dof,patch.centroid)*coefficient.x;dy[patch.plus_dof]+=scale*wall_pressure(patch.plus_dof,patch.centroid)*coefficient.y;dz[patch.plus_dof]+=scale*wall_pressure(patch.plus_dof,patch.centroid)*coefficient.z;}if(patch.minus_dof>=0&&system.active[patch.minus_dof]){dx[patch.minus_dof]-=scale*wall_pressure(patch.minus_dof,patch.centroid)*coefficient.x;dy[patch.minus_dof]-=scale*wall_pressure(patch.minus_dof,patch.centroid)*coefficient.y;dz[patch.minus_dof]-=scale*wall_pressure(patch.minus_dof,patch.centroid)*coefficient.z;}
+ 		}
+ 		if(include_physical_boundaries)for(const auto& face:system.boundary_faces)if(system.active[face.dof])
+ 		{
+@@ -1145,11 +1195,25 @@
+ 		boundary_pressure_dof_=upload(boundary_dof,"upload cut boundary pressure nodes");
+ 		boundary_pressure_coefficient_=upload(boundary_coefficient,"upload cut boundary pressure areas");
+ 
++        std::vector<int> pressure_node_index(storage_size_,-1);
++        for(int node=0;node<pressure_gradient_node_count_;++node)
++            pressure_node_index[system.pressure_gradient_dof[node]]=node;
++        pressure_gradient_node_index_=upload(pressure_node_index,"upload traction pressure gradient map");
++        std::vector<Real> surface_displacement(static_cast<std::size_t>(surface_count_)*3);
++        for(int patch=0;patch<surface_count_;++patch)
++        {
++            const Vec3d delta=surface_centroid_[patch]-system.centroid[surface_dof[patch]];
++            for(int axis=0;axis<3;++axis)surface_displacement[3*patch+axis]=Real(delta[axis]);
++        }
++        surface_pressure_displacement_=upload(surface_displacement,"upload wall pressure reconstruction offsets");
++
+ 		// Reserved diagnostic workspace for future collocated pressure/velocity studies.
+ 		std::vector<unsigned char> flux_fit_mask(storage_size_,0);
+ 		regular_pressure_correction_velocity_=allocate<Real>(structured_pressure_correction_count_,"allocate structured pressure-correction face values");regular_lower_pressure_node_=upload(regular_lower_pressure_node,"upload perimeter pressure-gradient lower nodes");regular_upper_pressure_node_=upload(regular_upper_pressure_node,"upload perimeter pressure-gradient upper nodes");regular_pressure_correction_=upload(regular_pressure_correction,"upload perimeter nonorthogonal pressure correction");regular_pressure_upper_weight_=upload(regular_pressure_upper_weight,"upload perimeter pressure-gradient interpolation");structured_pressure_correction_lower_=upload(structured_pressure_lower,"upload structured pressure-correction lower DOFs");structured_pressure_correction_upper_=upload(structured_pressure_upper,"upload structured pressure-correction upper DOFs");structured_pressure_correction_lower_node_=upload(structured_pressure_lower_node,"upload structured pressure-correction lower gradient nodes");structured_pressure_correction_upper_node_=upload(structured_pressure_upper_node,"upload structured pressure-correction upper gradient nodes");structured_pressure_correction_axis_=upload(structured_pressure_axis,"upload structured pressure-correction axes");structured_pressure_correction_area_=upload(structured_pressure_area,"upload structured pressure-correction areas");structured_pressure_correction_two_point_delta_=upload(structured_pressure_delta,"upload structured pressure two-point deltas");structured_pressure_correction_vector_=upload(structured_pressure_vector,"upload structured nonorthogonal pressure corrections");structured_pressure_correction_upper_weight_=upload(structured_pressure_weight,"upload structured pressure-gradient interpolation");
+ 		x_=allocate<Real>(storage_size_,"allocate composite cell momentum x");y_=allocate<Real>(storage_size_,"allocate composite cell momentum y");z_=allocate<Real>(storage_size_,"allocate composite cell momentum z");baseline_x_=allocate<Real>(storage_size_,"allocate composite cell momentum baseline x");baseline_y_=allocate<Real>(storage_size_,"allocate composite cell momentum baseline y");baseline_z_=allocate<Real>(storage_size_,"allocate composite cell momentum baseline z");max_abs_scratch_=allocate<Real>(1,"allocate composite cell velocity maximum");delta_x_=allocate<Real>(storage_size_,"allocate composite cell momentum dx");delta_y_=allocate<Real>(storage_size_,"allocate composite cell momentum dy");delta_z_=allocate<Real>(storage_size_,"allocate composite cell momentum dz");viscosity_=allocate<Real>(storage_size_,"allocate composite cell momentum viscosity");outflow_scratch_=allocate<Real>(storage_size_,"allocate composite cell outflow rates");sync_weight_=allocate<Real>(storage_size_,"allocate irregular projected-flux weights");wall_matrix_=allocate<Real>(static_cast<std::size_t>(wall_count_)*6,"allocate compact implicit composite smooth-wall matrices");volume_=upload(volume,"upload composite cell momentum volumes");active_=upload(system.active,"upload composite cell momentum active mask");cut_face_mask_=upload(system.cut_face_mask,"upload composite cell momentum cut-face mask");compact_plus_mask_=upload(compact_plus,"upload composite cell momentum compact ownership");gradient_special_mask_=upload(gradient_topology.special_mask,"upload composite cell momentum gradient special mask");flux_fit_mask_=upload(flux_fit_mask,"upload embedded flux-fit mask");gradient_special_dof_=upload(gradient_topology.special_dof,"upload composite cell momentum gradient nodes");gradient_node_index_=upload(gradient_topology.special_index,"upload composite cell momentum gradient node map");gradient_incidence_special_=upload(gradient_topology.incidence_special,"upload composite cell momentum gradient incidence nodes");gradient_incidence_neighbor_=upload(gradient_topology.incidence_neighbor,"upload composite cell momentum gradient incidence neighbours");gradient_incidence_weighted_displacement_=upload(gradient_weighted_displacement,"upload composite cell momentum gradient displacements");gradient_inverse_=upload(gradient_inverse,"upload composite cell momentum gradient inverses");gradient_rhs_=allocate<Real>(static_cast<std::size_t>(gradient_special_count_)*9,"allocate composite cell momentum gradient rhs");gradient_value_=allocate<Real>(static_cast<std::size_t>(gradient_special_count_)*9,"allocate composite cell momentum gradients");pressure_gradient_dof_=upload(system.pressure_gradient_dof,"upload momentum pressure-gradient nodes");pressure_gradient_offset_=upload(system.pressure_gradient_offset,"upload momentum pressure-gradient offsets");pressure_gradient_neighbour_=upload(system.pressure_gradient_neighbour,"upload momentum pressure-gradient neighbours");pressure_gradient_weight_=upload(pressure_gradient_weight,"upload momentum pressure-gradient weights");pressure_gradient_value_=allocate<Real>(static_cast<std::size_t>(pressure_gradient_node_count_)*3,"allocate momentum pressure gradients");regular_velocity_=allocate<Real>(regular_count_,"allocate composite cell momentum perimeter flux");regular_a_=upload(regular_a,"upload composite cell momentum perimeter lower nodes");regular_b_=upload(regular_b,"upload composite cell momentum perimeter upper nodes");regular_axis_=upload(regular_axis,"upload composite cell momentum perimeter axes");regular_area_=upload(regular_area,"upload composite cell momentum perimeter areas");regular_face_displacement_=upload(regular_face_displacement,"upload composite cell momentum perimeter reconstruction");regular_conductance_=upload(regular_conductance,"upload composite cell momentum perimeter conductances");regular_upper_weight_=upload(regular_upper_weight,"upload composite cell momentum perimeter interpolation");coarse_fine_a_=upload(coarse_fine_a,"upload composite cell momentum coarse/fine lower nodes");coarse_fine_b_=upload(coarse_fine_b,"upload composite cell momentum coarse/fine upper nodes");coarse_fine_axis_=upload(coarse_fine_axis,"upload composite cell momentum coarse/fine axes");coarse_fine_area_=upload(coarse_fine_area,"upload composite cell momentum coarse/fine areas");coarse_fine_face_displacement_=upload(coarse_fine_face_displacement,"upload composite cell momentum coarse/fine reconstruction");coarse_fine_conductance_=upload(coarse_fine_conductance,"upload composite cell momentum coarse/fine conductances");coarse_fine_upper_weight_=upload(coarse_fine_upper_weight,"upload composite cell momentum coarse/fine interpolation");coarse_fine_lower_pressure_node_=upload(coarse_fine_lower_pressure_node,"upload coarse/fine pressure-gradient lower nodes");coarse_fine_upper_pressure_node_=upload(coarse_fine_upper_pressure_node,"upload coarse/fine pressure-gradient upper nodes");coarse_fine_pressure_correction_=upload(coarse_fine_pressure_correction,"upload coarse/fine nonorthogonal pressure correction");coarse_fine_pressure_upper_weight_=upload(coarse_fine_pressure_upper_weight,"upload coarse/fine pressure-gradient interpolation");embedded_a_=upload(embedded_a,"upload composite cell momentum aperture lower nodes");embedded_b_=upload(embedded_b,"upload composite cell momentum aperture upper nodes");embedded_axis_=upload(embedded_axis,"upload composite cell momentum aperture axes");embedded_area_=upload(embedded_area,"upload composite cell momentum aperture areas");embedded_face_displacement_=upload(embedded_face_displacement,"upload composite cell momentum aperture reconstruction");embedded_conductance_=upload(embedded_conductance,"upload composite cell momentum aperture conductances");embedded_upper_weight_=upload(embedded_upper_weight,"upload composite cell momentum aperture interpolation");embedded_lower_pressure_node_=upload(embedded_lower_pressure_node,"upload aperture pressure-gradient lower nodes");embedded_upper_pressure_node_=upload(embedded_upper_pressure_node,"upload aperture pressure-gradient upper nodes");embedded_pressure_correction_=upload(embedded_pressure_correction,"upload aperture nonorthogonal pressure correction");embedded_pressure_upper_weight_=upload(embedded_pressure_upper_weight,"upload aperture pressure-gradient interpolation");surface_dof_=upload(surface_dof,"upload composite cell momentum surface nodes");surface_wall_node_=upload(surface_wall_node,"upload compact composite smooth-wall nodes");wall_dof_=upload(wall_dof,"upload compact composite smooth-wall control volumes");surface_coefficient_=upload(surface_coefficient,"upload composite cell momentum surface coefficients");surface_normal_=upload(surface_normal,"upload composite cell smooth-wall normals");surface_area_=upload(surface_area,"upload composite cell smooth-wall areas");surface_distance_=upload(surface_distance,"upload composite cell smooth-wall distances");surface_wall_coefficient_=upload(std::vector<Real>(static_cast<std::size_t>(surface_count_),Real(0)),"upload zero composite cell smooth-wall coefficients");surface_wall_force_per_density_=upload(std::vector<Real>(static_cast<std::size_t>(surface_count_)*3,Real(0)),"upload zero composite cell smooth-wall forces");pressure_closure_dof_=upload(pressure_closure_dof,"upload composite pressure closure nodes");pressure_closure_coefficient_=upload(pressure_closure_coefficient,"upload composite pressure closure coefficients");bytes_=static_cast<std::size_t>(13*storage_size_+6*wall_count_+1+10*regular_count_+9*coarse_fine_count_+9*embedded_count_+12*surface_count_+3*pressure_closure_count_+27*gradient_special_count_+3*gradient_incidence_count_)*sizeof(Real)+static_cast<std::size_t>(5*storage_size_+regular_count_+coarse_fine_count_+embedded_count_)*sizeof(unsigned char)+static_cast<std::size_t>(storage_size_+2*regular_count_+2*coarse_fine_count_+2*embedded_count_+2*surface_count_+wall_count_+pressure_closure_count_+gradient_special_count_+2*gradient_incidence_count_)*sizeof(int);bytes_+=static_cast<std::size_t>(4*coarse_fine_count_+4*embedded_count_+3*pressure_gradient_node_count_+3*system.pressure_gradient_neighbour.size())*sizeof(Real)+static_cast<std::size_t>(2*coarse_fine_count_+2*embedded_count_+system.pressure_gradient_dof.size()+system.pressure_gradient_offset.size()+system.pressure_gradient_neighbour.size())*sizeof(int);
+ 		redistribution_group_=upload(redistribution_group,"upload retained-root redistribution groups");
++        bytes_+=static_cast<std::size_t>(storage_size_)*sizeof(int)+
++            static_cast<std::size_t>(surface_count_)*3*sizeof(Real);
+ 		redistribution_volume_=upload(redistribution_volume,"upload retained-root redistribution volumes");
+ 		redistribution_x_=allocate<Real>(redistribution_group_count_,"allocate retained-root redistribution x");
+ 		redistribution_y_=allocate<Real>(redistribution_group_count_,"allocate retained-root redistribution y");
+@@ -1165,7 +1229,8 @@
+ 	{
+ 		for(void* pointer:{(void*)pressure_gradient_dof_,(void*)pressure_gradient_offset_,
+ 			(void*)pressure_gradient_neighbour_,(void*)pressure_gradient_weight_,
+-			(void*)pressure_gradient_value_,(void*)coarse_fine_lower_pressure_node_,
++			(void*)pressure_gradient_value_,(void*)pressure_gradient_node_index_,
++            (void*)surface_pressure_displacement_,(void*)coarse_fine_lower_pressure_node_,
+ 			(void*)coarse_fine_upper_pressure_node_,(void*)coarse_fine_pressure_correction_,
+ 			(void*)coarse_fine_pressure_upper_weight_,(void*)embedded_lower_pressure_node_,
+ 			(void*)embedded_upper_pressure_node_,(void*)embedded_pressure_correction_,
+@@ -1202,26 +1267,31 @@
+ 			redistribution_z_,x_,y_,z_,storage_size_);
+ 	}
+ 
+-	void DeviceCompositeCellMomentumTransport::redistribute_retained_root_state(
+-		bool include_pressure_baseline)
+-	{
+-		if(!redistribution_group_count_)return;
+-		const std::size_t bytes=static_cast<std::size_t>(redistribution_group_count_)*sizeof(Real);
+-		auto redistribute=[&](Real* x,Real* y,Real* z)
+-		{
+-			check(cudaMemset(redistribution_x_,0,bytes),"clear retained-root state x");
+-			check(cudaMemset(redistribution_y_,0,bytes),"clear retained-root state y");
+-			check(cudaMemset(redistribution_z_,0,bytes),"clear retained-root state z");
+-			accumulate_redistributed_state_kernel<<<(storage_size_+255)/256,256>>>(
+-				active_,volume_,redistribution_group_,x,y,z,redistribution_x_,redistribution_y_,
+-				redistribution_z_,storage_size_);
+-			finalize_redistributed_state_kernel<<<(storage_size_+255)/256,256>>>(
+-				active_,redistribution_group_,redistribution_volume_,redistribution_x_,redistribution_y_,
+-				redistribution_z_,x,y,z,storage_size_);
+-		};
+-		if(include_pressure_baseline)redistribute(baseline_x_,baseline_y_,baseline_z_);
+-		redistribute(x_,y_,z_);
+-	}
++    void DeviceCompositeCellMomentumTransport::save_redistribution_baseline()
++    {
++        if(!redistribution_group_count_)return;
++        const auto bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);
++        check(cudaMemcpy(baseline_x_,x_,bytes,cudaMemcpyDeviceToDevice),"save cell increment baseline x");
++        check(cudaMemcpy(baseline_y_,y_,bytes,cudaMemcpyDeviceToDevice),"save cell increment baseline y");
++        check(cudaMemcpy(baseline_z_,z_,bytes,cudaMemcpyDeviceToDevice),"save cell increment baseline z");
++    }
++
++    void DeviceCompositeCellMomentumTransport::redistribute_retained_root_increment()
++    {
++        if(!redistribution_group_count_)return;
++        const auto bytes=static_cast<std::size_t>(redistribution_group_count_)*sizeof(Real);
++        check(cudaMemset(redistribution_x_,0,bytes),"clear cell increment x");
++        check(cudaMemset(redistribution_y_,0,bytes),"clear cell increment y");
++        check(cudaMemset(redistribution_z_,0,bytes),"clear cell increment z");
++        // Redistribute only the conservative update. Averaging the complete
++        // state erased resolved gradients even for a zero-time/zero-force step.
++        accumulate_redistributed_increment_kernel<<<(storage_size_+255)/256,256>>>(
++            active_,volume_,redistribution_group_,baseline_x_,baseline_y_,baseline_z_,
++            x_,y_,z_,redistribution_x_,redistribution_y_,redistribution_z_,storage_size_);
++        finalize_redistributed_state_kernel<<<(storage_size_+255)/256,256>>>(
++            active_,redistribution_group_,redistribution_volume_,redistribution_x_,redistribution_y_,
++            redistribution_z_,x_,y_,z_,storage_size_);
++    }
+ 
+ 	void DeviceCompositeCellMomentumTransport::initialize_freestream(Real speed)
+ 	{
+@@ -1271,8 +1341,7 @@
+ 	{
+ 		if(molecular_viscosity<Real(0)||smagorinsky_cs<Real(0)||!(dt>Real(0)))throw std::invalid_argument("invalid composite cell Smagorinsky timestep");if(molecular_viscosity==Real(0)&&smagorinsky_cs==Real(0)){last_diffusion_rate_=0;last_diffusion_substeps_=1;return;}if(gradient_special_count_)check(cudaMemset(gradient_rhs_,0,static_cast<std::size_t>(gradient_special_count_)*9*sizeof(Real)),"clear composite cell momentum gradient rhs");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);compute_regular_cell_viscosity_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,gradient_special_mask_,volume_,x_,y_,z_,molecular_viscosity,smagorinsky_cs,viscosity_);}if(gradient_incidence_count_)accumulate_special_cell_gradient_kernel<<<(gradient_incidence_count_+255)/256,256>>>(gradient_incidence_special_,gradient_special_dof_,gradient_incidence_neighbor_,gradient_incidence_weighted_displacement_,x_,y_,z_,gradient_rhs_,gradient_incidence_count_);if(gradient_special_count_)solve_special_cell_viscosity_kernel<<<(gradient_special_count_+255)/256,256>>>(gradient_special_dof_,gradient_inverse_,gradient_rhs_,volume_,molecular_viscosity,smagorinsky_cs,viscosity_,gradient_special_count_);
+ 		const std::size_t state_bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);check(cudaMemset(outflow_scratch_,0,state_bytes),"clear composite cell diffusion rates");check(cudaMemset(max_abs_scratch_,0,sizeof(Real)),"clear composite cell diffusion maximum");for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);accumulate_regular_cell_diffusion_rate_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,viscosity_,outflow_scratch_);}if(regular_count_)accumulate_compact_cell_diffusion_rate_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_conductance_,viscosity_,outflow_scratch_,regular_count_);if(coarse_fine_count_)accumulate_compact_cell_diffusion_rate_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_conductance_,viscosity_,outflow_scratch_,coarse_fine_count_);if(embedded_count_)accumulate_compact_cell_diffusion_rate_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_conductance_,viscosity_,outflow_scratch_,embedded_count_);normalize_cell_outflow_rate_kernel<<<(storage_size_+255)/256,256>>>(active_,volume_,outflow_scratch_,max_abs_scratch_,storage_size_);Real maximum=0;check(cudaMemcpy(&maximum,max_abs_scratch_,sizeof(Real),cudaMemcpyDeviceToHost),"download composite cell diffusion maximum");last_diffusion_rate_=static_cast<double>(maximum);constexpr double diffusion_cfl=0.7;last_diffusion_substeps_=std::max(1,static_cast<int>(std::ceil(static_cast<double>(dt)*last_diffusion_rate_/diffusion_cfl)));const Real sub_dt=dt/Real(last_diffusion_substeps_);
+-		for(int substep=0;substep<last_diffusion_substeps_;++substep){check(cudaMemset(delta_x_,0,state_bytes),"clear composite cell Smagorinsky dx");check(cudaMemset(delta_y_,0,state_bytes),"clear composite cell Smagorinsky dy");check(cudaMemset(delta_z_,0,state_bytes),"clear composite cell Smagorinsky dz");for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);diffuse_regular_cell_momentum_variable_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_);}if(regular_count_)diffuse_compact_cell_momentum_variable_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,regular_count_);if(coarse_fine_count_)diffuse_compact_cell_momentum_variable_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,coarse_fine_count_);if(embedded_count_)diffuse_compact_cell_momentum_variable_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,embedded_count_);apply_cell_momentum_kernel<<<(storage_size_+255)/256,256>>>(active_,volume_,delta_x_,delta_y_,delta_z_,x_,y_,z_,storage_size_);}check(cudaDeviceSynchronize(),"subcycled composite cell Smagorinsky diffusion");
+-		redistribute_retained_root_state();
++		for(int substep=0;substep<last_diffusion_substeps_;++substep){check(cudaMemset(delta_x_,0,state_bytes),"clear composite cell Smagorinsky dx");check(cudaMemset(delta_y_,0,state_bytes),"clear composite cell Smagorinsky dy");check(cudaMemset(delta_z_,0,state_bytes),"clear composite cell Smagorinsky dz");for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);diffuse_regular_cell_momentum_variable_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_);}if(regular_count_)diffuse_compact_cell_momentum_variable_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,regular_count_);if(coarse_fine_count_)diffuse_compact_cell_momentum_variable_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,coarse_fine_count_);if(embedded_count_)diffuse_compact_cell_momentum_variable_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_conductance_,viscosity_,x_,y_,z_,sub_dt,delta_x_,delta_y_,delta_z_,embedded_count_);apply_cell_momentum_delta();}check(cudaDeviceSynchronize(),"subcycled composite cell Smagorinsky diffusion");
+ 	}
+ 
+ 	void DeviceCompositeCellMomentumTransport::apply_smooth_fabric_wall_model(
+@@ -1281,10 +1350,11 @@
+ 		if(!(dt>Real(0))||!(molecular_viscosity>Real(0)))throw std::invalid_argument("invalid composite cell smooth-wall timestep");
+ 		if(!surface_count_)return;
+ 		check(cudaMemset(wall_matrix_,0,static_cast<std::size_t>(wall_count_)*6*sizeof(Real)),"clear compact implicit composite cell smooth-wall matrices");
++        save_redistribution_baseline();
+ 		accumulate_smooth_wall_matrix_kernel<<<(surface_count_+255)/256,256>>>(surface_dof_,surface_wall_node_,surface_normal_,surface_area_,surface_distance_,x_,y_,z_,molecular_viscosity,wall_matrix_,surface_wall_coefficient_,surface_count_);
+ 		apply_implicit_smooth_wall_kernel<<<(wall_count_+255)/256,256>>>(wall_dof_,volume_,wall_matrix_,dt,x_,y_,z_,wall_count_);
+ 		finalize_smooth_wall_force_kernel<<<(surface_count_+255)/256,256>>>(surface_dof_,surface_normal_,x_,y_,z_,surface_wall_coefficient_,surface_wall_force_per_density_,surface_count_);
+-		redistribute_retained_root_state();
++		redistribute_retained_root_increment();
+ 		check(cudaDeviceSynchronize(),"apply compact implicit composite cell smooth-wall impulse");
+ 	}
+ 
+@@ -1294,30 +1364,61 @@
+ 		if(!(density>Real(0)))throw std::invalid_argument("invalid composite cell smooth-wall load density");host.resize(surface_count_);std::vector<Real> force(static_cast<std::size_t>(surface_count_)*3);if(!force.empty())check(cudaMemcpy(force.data(),surface_wall_force_per_density_,force.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite cell smooth-wall forces");for(int patch=0;patch<surface_count_;++patch){host[patch].source_triangle_id=surface_source_triangle_id_[patch];host[patch].source_face_id=surface_source_face_id_[patch];host[patch].centroid=surface_centroid_[patch];host[patch].force={static_cast<double>(density*force[3*patch]),static_cast<double>(density*force[3*patch+1]),static_cast<double>(density*force[3*patch+2])};}
+ 	}
+ 
+-	void DeviceCompositeCellMomentumTransport::apply_pressure_impulse(const Real* pressure,
+-		Real dt,Real density,bool include_physical_boundaries)
+-	{
+-		if(!pressure||!(dt>Real(0))||!(density>Real(0)))throw std::invalid_argument("invalid composite cell pressure impulse");check(cudaMemset(delta_x_,0,static_cast<std::size_t>(storage_size_)*sizeof(Real)),"clear composite cell pressure impulse dx");check(cudaMemset(delta_y_,0,static_cast<std::size_t>(storage_size_)*sizeof(Real)),"clear composite cell pressure impulse dy");check(cudaMemset(delta_z_,0,static_cast<std::size_t>(storage_size_)*sizeof(Real)),"clear composite cell pressure impulse dz");const Real scale=dt/density;const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);pressure_regular_cell_impulse_kernel<<<(count+255)/256,256>>>(view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,pressure,scale,system_->pressure_outlet_xmax,include_physical_boundaries,delta_x_,delta_y_,delta_z_);}if(regular_count_)pressure_compact_cell_impulse_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_axis_,regular_area_,regular_upper_weight_,pressure,scale,delta_x_,delta_y_,delta_z_,regular_count_);if(coarse_fine_count_)pressure_compact_cell_impulse_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_area_,coarse_fine_upper_weight_,pressure,scale,delta_x_,delta_y_,delta_z_,coarse_fine_count_);if(embedded_count_)pressure_compact_cell_impulse_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_area_,embedded_upper_weight_,pressure,scale,delta_x_,delta_y_,delta_z_,embedded_count_);if(surface_count_)pressure_surface_cell_impulse_kernel<<<(surface_count_+255)/256,256>>>(surface_dof_,surface_coefficient_,pressure,scale,delta_x_,delta_y_,delta_z_,surface_count_);if(include_physical_boundaries&&boundary_pressure_count_)pressure_surface_cell_impulse_kernel<<<(boundary_pressure_count_+255)/256,256>>>(boundary_pressure_dof_,boundary_pressure_coefficient_,pressure,scale,delta_x_,delta_y_,delta_z_,boundary_pressure_count_);apply_cell_momentum_kernel<<<(storage_size_+255)/256,256>>>(active_,volume_,delta_x_,delta_y_,delta_z_,x_,y_,z_,storage_size_);check(cudaDeviceSynchronize(),"composite cell pressure impulse");
+-	}
+-
+-	void DeviceCompositeCellMomentumTransport::apply_projected_pressure_gradient(const Real* pressure,
+-		Real dt,Real density)
+-	{
+-		if(!pressure||!(dt>Real(0))||!(density>Real(0)))throw std::invalid_argument("invalid composite cell pressure gradient");
+-		pressure_scale_=dt/density;pressure_correction_ready_=true;
+-		const std::size_t bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);
+-		check(cudaMemcpy(baseline_x_,x_,bytes,cudaMemcpyDeviceToDevice),"save pre-pressure cell x");
+-		check(cudaMemcpy(baseline_y_,y_,bytes,cudaMemcpyDeviceToDevice),"save pre-pressure cell y");
+-		check(cudaMemcpy(baseline_z_,z_,bytes,cudaMemcpyDeviceToDevice),"save pre-pressure cell z");
+-		// A single shared pressure traction transfers equal/opposite momentum at
+-		// each fluid face. Wall tractions use exactly the surface-load patches.
+-		// Averaging normal face corrections instead had no such reaction identity.
+-		apply_pressure_impulse(pressure,dt,density,true);
+-		redistribute_retained_root_state();
+-		record_cell_pressure_increment_kernel<<<(storage_size_+255)/256,256>>>(
+-			active_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,storage_size_);
+-		check(cudaDeviceSynchronize(),"apply conservative composite pressure traction");
+-	}
++    void DeviceCompositeCellMomentumTransport::apply_pressure_impulse(const Real* pressure,
++        Real dt,Real density,bool include_physical_boundaries)
++    {
++        if(!pressure||!(dt>Real(0))||!(density>Real(0)))
++            throw std::invalid_argument("invalid composite cell pressure impulse");
++        const auto bytes=static_cast<std::size_t>(storage_size_)*sizeof(Real);
++        check(cudaMemset(delta_x_,0,bytes),"clear cell pressure impulse x");
++        check(cudaMemset(delta_y_,0,bytes),"clear cell pressure impulse y");
++        check(cudaMemset(delta_z_,0,bytes),"clear cell pressure impulse z");
++        if(pressure_gradient_node_count_)
++            reconstruct_scalar_pressure_gradient_kernel<<<(pressure_gradient_node_count_+255)/256,256>>>(
++                pressure_gradient_dof_,pressure_gradient_offset_,pressure_gradient_neighbour_,
++                pressure_gradient_weight_,pressure,pressure_gradient_value_,pressure_gradient_node_count_);
++        const Real scale=dt/density;
++        const int bs=system_->brick_size,cells=bs*bs*bs;
++        for(int level=0;level<fields_->level_count();++level)
++        {
++            const auto view=fields_->level_view(level);const int count=view.brick_count*cells;
++            pressure_regular_cell_impulse_kernel<<<(count+255)/256,256>>>(view,
++                Real(system_->hierarchy->levels()[level].h),system_->level_offset[level],
++                active_,cut_face_mask_,compact_plus_mask_,pressure,scale,
++                system_->pressure_outlet_xmax,include_physical_boundaries,delta_x_,delta_y_,delta_z_);
++        }
++        auto internal=[&](const int* a,const int* b,const std::int8_t* axis,
++            const Real* area,const Real* weight,const Real* displacement,int count)
++        {
++            if(count)pressure_compact_cell_impulse_kernel<<<(count+255)/256,256>>>(
++                a,b,axis,area,weight,pressure,pressure_gradient_node_index_,pressure_gradient_value_,
++                displacement,scale,delta_x_,delta_y_,delta_z_,count);
++        };
++        internal(regular_a_,regular_b_,regular_axis_,regular_area_,regular_upper_weight_,regular_face_displacement_,regular_count_);
++        internal(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_area_,coarse_fine_upper_weight_,coarse_fine_face_displacement_,coarse_fine_count_);
++        internal(embedded_a_,embedded_b_,embedded_axis_,embedded_area_,embedded_upper_weight_,embedded_face_displacement_,embedded_count_);
++        if(surface_count_)pressure_reconstructed_surface_impulse_kernel<<<(surface_count_+255)/256,256>>>(
++            surface_dof_,surface_coefficient_,surface_pressure_displacement_,pressure_gradient_node_index_,
++            pressure_gradient_value_,pressure,scale,delta_x_,delta_y_,delta_z_,surface_count_);
++        if(include_physical_boundaries&&boundary_pressure_count_)
++            pressure_surface_cell_impulse_kernel<<<(boundary_pressure_count_+255)/256,256>>>(
++                boundary_pressure_dof_,boundary_pressure_coefficient_,pressure,scale,
++                delta_x_,delta_y_,delta_z_,boundary_pressure_count_);
++        apply_cell_momentum_kernel<<<(storage_size_+255)/256,256>>>(
++            active_,volume_,delta_x_,delta_y_,delta_z_,x_,y_,z_,storage_size_);
++        check(cudaDeviceSynchronize(),"composite cell pressure impulse");
++    }
++
++    void DeviceCompositeCellMomentumTransport::apply_projected_pressure_gradient(const Real* pressure,
++        Real dt,Real density)
++    {
++        if(!pressure||!(dt>Real(0))||!(density>Real(0)))
++            throw std::invalid_argument("invalid composite cell pressure gradient");
++        save_redistribution_baseline();
++        apply_pressure_impulse(pressure,dt,density,true);
++        redistribute_retained_root_increment();
++        check(cudaDeviceSynchronize(),"apply conservative composite pressure traction");
++    }
+ 
+ 	void DeviceCompositeCellMomentumTransport::reconstruct_fluxes(Real* coarse_fine_velocity,
+         Real* embedded_velocity)
+--- a/src/core/fluid/amr_advection.h
++++ b/src/core/fluid/amr_advection.h
+@@ -316,7 +316,8 @@
+ 
+ 	private:
+ 		void apply_cell_momentum_delta();
+-		void redistribute_retained_root_state(bool include_pressure_baseline = false);
++		void save_redistribution_baseline();
++        void redistribute_retained_root_increment();
+ 		const CompositeAmrPressureSystem* system_ = nullptr;
+ 		DeviceAmrFields* fields_ = nullptr;
+ 		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
+@@ -365,6 +366,7 @@
+ 			*structured_pressure_correction_upper_weight_ = nullptr;
+ 		int *surface_dof_ = nullptr, *surface_wall_node_ = nullptr, *wall_dof_ = nullptr;
+ 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
++		Real* surface_pressure_displacement_ = nullptr; // wall centroid minus cell centroid
+ 		int* pressure_closure_dof_ = nullptr;
+ 		Real* pressure_closure_coefficient_ = nullptr;
+ 		int* boundary_pressure_dof_ = nullptr;
+@@ -382,6 +384,7 @@
+ 			*gradient_inverse_ = nullptr, *gradient_rhs_ = nullptr, *gradient_value_ = nullptr;
+ 		int *pressure_gradient_dof_ = nullptr, *pressure_gradient_offset_ = nullptr,
+ 			*pressure_gradient_neighbour_ = nullptr;
++		int* pressure_gradient_node_index_ = nullptr;
+ 		Real *pressure_gradient_weight_ = nullptr, *pressure_gradient_value_ = nullptr;
+ 		std::vector<double> volume_host_;
+ 		std::vector<unsigned char> active_host_;
+--- a/src/core/fluid/amr_pressure.cpp
++++ b/src/core/fluid/amr_pressure.cpp
+@@ -98,6 +98,11 @@
+ 				if(length2(edge.nonorthogonal_correction)<=1e-24)return;const int lower=edge.direction>0?edge.coarse_dof:edge.fine_dof,upper=edge.direction>0?edge.fine_dof:edge.coarse_dof;for(int dof:{lower,upper})if(node_map.emplace(dof,static_cast<int>(node_map.size())).second)system.pressure_gradient_dof.push_back(dof);
+ 			};
+ 			for(const auto& edge:system.coarse_fine)register_connection(edge);for(const auto& edge:system.embedded)register_connection(edge);for(const auto& edge:system.regular_pressure_corrections)for(int dof:{edge.lower_dof,edge.upper_dof})if(node_map.emplace(dof,static_cast<int>(node_map.size())).second)system.pressure_gradient_dof.push_back(dof);
++			// Surface pressure must be reconstructed at the wall patch, even when
++			// its aperture connections happen to be orthogonal.
++			for(const auto& patch:system.surface_patches)for(int dof:{patch.plus_dof,patch.minus_dof})
++				if(dof>=0&&system.active[dof]&&node_map.emplace(dof,static_cast<int>(node_map.size())).second)
++					system.pressure_gradient_dof.push_back(dof);
+ 			std::vector<std::vector<PressureGradientSample>> samples(system.pressure_gradient_dof.size());auto add_sample=[&](int endpoint,int neighbour,double area)
+ 			{
+ 				auto found=node_map.find(endpoint);if(found==node_map.end()||neighbour<0||neighbour>=system.storage_size||!system.active[neighbour]||endpoint==neighbour)return;const Vec3d displacement=system.centroid[neighbour]-system.centroid[endpoint];const double distance2=length2(displacement);if(distance2>1e-24&&area>0)samples[found->second].push_back({neighbour,area/distance2});
+@@ -225,6 +230,18 @@
+ 			if(ref==invalid_fragment)return -1;if(fragment_is_regular(ref)){const int regular=regular_fragment_cell(ref);return regular>=0&&regular<static_cast<int>(map.cell_dof.size())?map.cell_dof[regular]:-1;}const int fragment=irregular_fragment_index(ref);return fragment>=0&&fragment<static_cast<int>(map.fragment_dof.size())?map.fragment_dof[fragment]:-1;
+ 		}
+ 		return dof(owner.level,owner.brick,owner.cell.x,owner.cell.y,owner.cell.z);
++	}
++
++	std::vector<Vec3d> composite_pressure_gradients_cpu(
++		const CompositeAmrPressureSystem& system,const std::vector<double>& pressure)
++	{
++		if(pressure.size()<static_cast<std::size_t>(system.storage_size))
++			throw std::invalid_argument("pressure gradient vector is too small");
++		std::vector<Vec3d> result(system.storage_size);
++		const auto compact=reconstruct_pressure_gradients(system,pressure);
++		for(std::size_t node=0;node<compact.size();++node)
++			result[system.pressure_gradient_dof[node]]=compact[node];
++		return result;
+ 	}
+ 
+ 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy, bool outlet)
+--- a/src/core/fluid/amr_pressure.h
++++ b/src/core/fluid/amr_pressure.h
+@@ -258,6 +258,11 @@
+ 		void apply_cpu(const std::vector<double>& pressure, std::vector<double>& output) const;
+ 		void diagonal_cpu(std::vector<double>& diagonal) const;
+ 	};
++
++	// Same-fluid linear reconstruction for pressure traction quadrature. Entries
++	// are indexed by pressure DOF; ordinary nodes without a WLS stencil are zero.
++	std::vector<Vec3d> composite_pressure_gradients_cpu(
++		const CompositeAmrPressureSystem& system,const std::vector<double>& pressure);
+ 
+ 	CompositeAmrPressureSystem build_composite_amr_pressure_system(const AmrHierarchy& hierarchy,
+ 		bool pressure_outlet_xmax = true);
+--- a/src/gui/paraglider_sim_worker.cpp
++++ b/src/gui/paraglider_sim_worker.cpp
+@@ -775,8 +775,14 @@
+ 		}
+ 
+ 		const Aabb3d& domain = hierarchy.domain();
+-		const double h = hierarchy.levels().front().h;
+ 		const Vec3d extent = domain.hi - domain.lo;
++		// Preserve resolved wake structure when the display budget permits it.
++		// Always sampling at level zero discarded finer AMR vortices before
++		// arrows, tracers, vorticity and recordings could display them.
++		double h = hierarchy.finest_cell_size();
++		constexpr double maximum_display_cells = 2.0 * 1024 * 1024;
++		while (std::ceil(extent.x / h) * std::ceil(extent.y / h) *
++			std::ceil(extent.z / h) > maximum_display_cells) h *= 2;
+ 		MacGrid grid;
+ 		grid.nx = std::max(1, static_cast<int>(std::llround(extent.x / h)));
+ 		grid.ny = std::max(1, static_cast<int>(std::llround(extent.y / h)));
+--- a/tools/physics_contract_probe.cpp
++++ b/tools/physics_contract_probe.cpp
+@@ -92,14 +92,16 @@
+     try
+     {
+         std::setvbuf(stdout,nullptr,_IONBF,0);
+-        bool planb=false,cropped=false,geometry_only=false,interior_brick=false,local=false,section=false,cell_momentum=false;
++        bool planb=false,cropped=false,geometry_only=false,interior_brick=false,local=false,section=false,cell_momentum=false,export_mesh=false,conditioning=false;
+         Vec3d local_origin{};
+         for(int q=1;q<argc;++q)
+         {
+             const std::string arg=argv[q];
+             if(arg=="--local-planb"&&q+3<argc){planb=local=true;local_origin.x=std::stod(argv[++q]);local_origin.y=std::stod(argv[++q]);local_origin.z=std::stod(argv[++q]);}
+             else if(arg=="--cell-momentum")cell_momentum=true;
++            else if(arg=="--conditioning")conditioning=true;
+             else if(arg=="--section-planb")planb=section=true;
++            else if(arg=="--export-planb")planb=export_mesh=true;
+             else if(arg=="--planb")planb=true;else if(arg=="--cropped")cropped=true;
+             else if(arg=="--geometry-only")geometry_only=true;
+             else if(arg=="--interior-brick")interior_brick=true;
+@@ -134,6 +136,21 @@
+             config.domain.upstream_margin,config.domain.lateral_margin,
+             config.domain.vertical_margin,config.amr.base_cell_size*config.amr.brick_size);
+         const auto wing=placed_mesh(source,config.placement);TriangleBvh bvh(wing);
++        if(export_mesh)
++        {
++            FILE* output=std::fopen("review/final-planb-placed.obj","w");
++            require(output,"could not write placed geometry diagnostic");
++            std::fprintf(output,"# Supplied PlanB placement; no extra rotation\n");
++            for(std::size_t vertex=0;vertex<wing.positions.size()/3;++vertex)
++            {
++                const auto p=wing.vertex_position_double(vertex);
++                std::fprintf(output,"v %.17g %.17g %.17g\n",p[0],p[1],p[2]);
++            }
++            for(std::size_t triangle=0;triangle<wing.triangle_count();++triangle)
++                std::fprintf(output,"f %u %u %u\n",wing.indices[3*triangle]+1,
++                    wing.indices[3*triangle+1]+1,wing.indices[3*triangle+2]+1);
++            std::fclose(output);std::puts("[contracts] exported unchanged PlanB geometry");return 0;
++        }
+         if(section)
+         {
+             const double y=0.5*(wing.bbox_min[1]+wing.bbox_max[1])+0.001;
+@@ -262,7 +279,43 @@
+         }
+         projection.upload_pressure(pressure);CompositeCellMomentumState cell_zero;
+         cell_zero.x.resize(system.storage_size,0);cell_zero.y=cell_zero.z=cell_zero.x;
+-        DeviceCompositeCellMomentumTransport cells(system,fields,config.amr.min_volume_fraction);
++        DeviceCompositeCellMomentumTransport cells(system,fields,
++            conditioning?0.25:config.amr.min_volume_fraction);
++        // The pressure solve's face derivative and the cell momentum impulse
++        // must both reproduce a linear pressure field. Testing only the former
++        // leaves the wall/face traction quadrature unchecked.
++        for(int component=0;component<3;++component)
++        {
++            std::vector<double> linear(system.storage_size,0);
++            for(int q=0;q<system.storage_size;++q)linear[q]=3+system.centroid[q][component];
++            projection.upload_pressure(linear);cells.upload_state(cell_zero);
++            cells.apply_pressure_impulse(projection.pressure(),Real(1),Real(1),true);
++            CompositeCellMomentumState after;cells.download_state(after);
++            double error=0;int worst=-1;
++            const auto& domain=core.hierarchy().domain();
++            for(int q=0;q<system.storage_size;++q)if(system.active[q])
++            {
++                const auto p=system.centroid[q];bool interior=true;
++                for(int axis=0;axis<3;++axis)
++                    interior=interior&&p[axis]>domain.lo[axis]+2*h&&p[axis]<domain.hi[axis]-2*h;
++                if(!interior)continue;
++                const double value=std::max({std::abs(double(after.x[q])+(component==0)),
++                    std::abs(double(after.y[q])+(component==1)),
++                    std::abs(double(after.z[q])+(component==2))});
++                if(value>error){error=value;worst=q;}
++            }
++            std::printf("[contracts] cell linear pressure axis=%d error=%.9g worst=%d\n",component,error,worst);
++            require(error<2e-3,"cell pressure traction is not linear exact");
++            if(!planb)
++            {
++                const auto result=compute_pressure_loads(system,linear,wing.triangle_count(),config.freestream,config.reference,0);
++                Vec3d expected{};expected[component]=-8*half.x*half.y*half.z;
++                const double body_error=norm(result.pressure_force-expected);
++                std::printf("[contracts] linear pressure body force axis=%d error=%.9g N\n",component,body_error);
++                require(body_error<1e-6,"linear surface pressure does not integrate to displaced-volume force");
++            }
++        }
++        projection.upload_pressure(pressure);
+         cells.upload_state(cell_zero);const Real dt=Real(0.001),rho=Real(config.freestream.rho);
+         cells.apply_projected_pressure_gradient(projection.pressure(),dt,rho);
+         const auto momentum=cells.momentum();
+--- a/tools/paraglider_case_probe.cpp
++++ b/tools/paraglider_case_probe.cpp
+@@ -570,7 +570,7 @@
+ 	  const AerodynamicLoads summary_loads = core.aerodynamic_loads();
+ 	  const Vec3d summary_force = summary_loads.viscous_loads_valid ? summary_loads.total_force : summary_loads.pressure_force;
+ 	  const ExternalAeroConservationStats summary_conservation = core.conservation_stats();
+-	  const double summary_cd = summary_loads.force_coefficients_valid ? summary_loads.cd : std::numeric_limits<double>::quiet_NaN(), summary_cl = summary_loads.force_coefficients_valid ? summary_loads.cl : std::numeric_limits<double>::quiet_NaN();
++	  const double summary_cd = summary_loads.force_coefficients_valid ? (summary_loads.viscous_loads_valid ? summary_loads.cd : summary_loads.cd_pressure) : std::numeric_limits<double>::quiet_NaN(), summary_cl = summary_loads.force_coefficients_valid ? (summary_loads.viscous_loads_valid ? summary_loads.cl : summary_loads.cl_pressure) : std::numeric_limits<double>::quiet_NaN();
+ 	  std::printf("[paraglider-case-summary] levels=%zu finest_h=%.9g steps=%d t=%.9g prestep_regular_max=%.9g prestep_special_max=%.9g Fx=%.9g Fy=%.9g Fz=%.9g Fpx=%.9g Fpy=%.9g Fpz=%.9g Fvx=%.9g Fvy=%.9g Fvz=%.9g Cd=%.9g Cl=%.9g div_max=%.9g div_rms=%.9g flux_net=%.9g gpu_mib=%.9g step_ms=%.9g projection_ms=%.9g pressure_iterations=%d pressure_residual=%.9g\n", core.hierarchy().levels().size(), core.hierarchy().finest_cell_size(), completed_steps, core.physical_time(), stats.max_abs_regular_velocity, stats.max_abs_special_velocity, summary_force.x, summary_force.y, summary_force.z, summary_loads.pressure_force.x, summary_loads.pressure_force.y, summary_loads.pressure_force.z, summary_loads.viscous_force.x, summary_loads.viscous_force.y, summary_loads.viscous_force.z, summary_cd, summary_cl, summary_conservation.max_abs_divergence, summary_conservation.volume_weighted_rms_divergence, summary_conservation.net_integrated_flux_error, core.gpu_bytes() / (1024.0 * 1024.0), stats.gpu_step_ms, stats.projection_ms, stats.pressure.iterations, stats.pressure.relative_residual);
+ 	  report_circulation(core, wing, config.freestream.speed, config.reference.length);
+     }
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -184,9 +184,10 @@
+ paracfd_deploy_occ_dlls(physics_contract_probe)
+ add_test(NAME production_physics_contracts COMMAND physics_contract_probe)
+ add_test(NAME production_cell_momentum COMMAND physics_contract_probe --cell-momentum)
++add_test(NAME production_conditioned_momentum COMMAND physics_contract_probe --conditioning)
+ add_test(NAME cropped_solid_geometry COMMAND physics_contract_probe --cropped --geometry-only)
+ add_test(NAME interior_brick_geometry COMMAND physics_contract_probe --interior-brick --geometry-only)
+-set_tests_properties(production_physics_contracts production_cell_momentum cropped_solid_geometry interior_brick_geometry
++set_tests_properties(production_physics_contracts production_cell_momentum production_conditioned_momentum cropped_solid_geometry interior_brick_geometry
+ 	PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+ 
+ add_executable(parity_probe tools/parity_probe.cu)
+--- /dev/null
++++ b/configs/planb_parakite_review.json
+@@ -0,0 +1,61 @@
++{
++  "step": {
++    "path": "Test-Data/PlanBParakite-Solid.step",
++    "tessellation_deflection_mm": 2.0
++  },
++  "placement": {
++    "tx": 0.0,
++    "ty": 0.0,
++    "tz": 0.0,
++    "matrix": [
++      0.0,
++      1.0,
++      0.0,
++      -1.0,
++      0.0,
++      0.0,
++      0.0,
++      0.0,
++      1.0
++    ]
++  },
++  "freestream": {
++    "speed": 10.0,
++    "rho": 1.225,
++    "nu": 1.5e-05
++  },
++  "domain": {
++    "upstream_margin": 3.0,
++    "downstream_margin": 8.0,
++    "lateral_margin": 3.0,
++    "vertical_margin": 3.0,
++    "half_wing_symmetry": false
++  },
++  "amr": {
++    "base_cell_size": 0.25,
++    "max_levels": 3,
++    "brick_size": 32,
++    "ghost_cells": 1,
++    "wing_refinement_distance": 1.0,
++    "surface_refinement_distance": 0.35,
++    "wake_length": 8.0,
++    "wake_radius": 2.0,
++    "min_volume_fraction": 0.005,
++    "min_aperture_area_fraction": 0.0001
++  },
++  "solver": {
++    "cfl": 0.7,
++    "smagorinsky_cs": 0.1,
++    "projection_tolerance": 1e-05,
++    "projection_max_iterations": 600
++  },
++  "reference": {
++    "area": 0.0,
++    "length": 0.0,
++    "moment_origin": [
++      0.0,
++      0.0,
++      0.0
++    ]
++  }
++}

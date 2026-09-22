@@ -1,4 +1,5 @@
 #include "core/aero_convergence.h"
+#include "core/aero_sweep.h"
 
 #include <cmath>
 #include <cstdio>
@@ -73,6 +74,23 @@ int main()
 	const BoundedAerodynamicMean missing_mean=bounded_aerodynamic_mean(insufficient,1.0,1.0);
 	check(!missing_mean.ready&&!missing_mean.complete&&near(missing_mean.coverage,0.0),
 		"one instantaneous load is not mislabelled as a mean");
+
+	const FixedAttitudeGlideTrim glide=solve_fixed_attitude_glide(
+		{{4.0,10.0,100.0},{6.0,10.0,100.0}},10.0,100.0);
+	const double expected_gamma=std::atan(0.1)*180.0/3.14159265358979323846;
+	check(glide.equilibrium&&near(glide.flight_path_degrees,expected_gamma,1e-10)&&
+		near(glide.glide_ratio,10.0,1e-10)&&
+		near(glide.reference_horizontal_residual,0.0,1e-10)&&
+		near(glide.reference_vertical_support,std::sqrt(10100.0),1e-10),
+		"fixed-attitude glide solves the rotated force balance, not a linearized angle");
+	check(near(glide.airspeed,10.0*std::sqrt(100.0*9.80665/std::sqrt(10100.0)),1e-10)&&
+		near(glide.sink_rate,glide.airspeed*std::sin(std::atan(0.1)),1e-10),
+		"glide equilibrium scales reference loads to weight and derives sink rate");
+	const FixedAttitudeGlideTrim no_glide=solve_fixed_attitude_glide(
+		{{0.0,20.0,100.0},{4.0,20.0,100.0}},10.0,100.0);
+	check(!no_glide.equilibrium&&near(no_glide.flight_path_degrees,4.0)&&
+		no_glide.reference_horizontal_residual>0,
+		"a trial range without force alignment cannot fabricate a flight result");
 
 	if(failures)
 	{

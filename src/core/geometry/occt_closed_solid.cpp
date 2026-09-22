@@ -19,8 +19,8 @@ namespace paracfd::core
 		{
 		public:
 			explicit PlacedClosedSolid(TopoDS_Solid solid,Aabb3d bounds,
-				ModelPlacement world_to_source_metres)
-				:solid_(std::move(solid)),bounds_(bounds),world_to_source_metres_(world_to_source_metres){}
+				ModelPlacement world_to_source_metres,std::shared_ptr<const TriangleBvh> discrete)
+				:solid_(std::move(solid)),bounds_(bounds),world_to_source_metres_(world_to_source_metres),discrete_(std::move(discrete)){}
 			const Aabb3d& bounds()const override{return bounds_;}
 			void classify_points(const Vec3d* points,std::size_t count,double world_tolerance,
 				ClosedSolidPointLocation* locations)const override
@@ -44,8 +44,23 @@ namespace paracfd::core
 					}
 				}
 			}
-		private:
-			TopoDS_Solid solid_;
+            void classify_discrete_points(const Vec3d* points,std::size_t count,
+                double world_tolerance,ClosedSolidPointLocation* locations)const override
+            {
+                if((count&&(!points||!locations))||world_tolerance<0)
+                    throw std::invalid_argument("invalid discrete-solid classification request");
+                const double tolerance=world_tolerance*world_to_source_metres_.maximum_linear_scale();
+                for(std::size_t index=0;index<count;++index)
+                {
+                    Vec3d p;world_to_source_metres_.apply(points[index].x,points[index].y,points[index].z,p.x,p.y,p.z);
+                    const auto location=discrete_->classify_closed_point(p,tolerance);
+                    locations[index]=location==ClosedMeshPointLocation::inside?ClosedSolidPointLocation::inside:
+                        (location==ClosedMeshPointLocation::outside?ClosedSolidPointLocation::outside:ClosedSolidPointLocation::boundary);
+                }
+            }
+        private:
+            std::shared_ptr<const TriangleBvh> discrete_;
+            TopoDS_Solid solid_;
 			Aabb3d bounds_{};
 			ModelPlacement world_to_source_metres_{};
 		};
@@ -53,8 +68,8 @@ namespace paracfd::core
 		class ValidatedClosedSolidSource final:public ClosedSolidSource
 		{
 		public:
-			explicit ValidatedClosedSolidSource(TopoDS_Solid solid,Aabb3d bounds)
-				:solid_(std::move(solid)),bounds_(bounds){}
+			explicit ValidatedClosedSolidSource(TopoDS_Solid solid,Aabb3d bounds,const TriMesh& mesh)
+				:solid_(std::move(solid)),bounds_(bounds),discrete_(std::make_shared<TriangleBvh>(mesh)){}
 
 			ClosedSolidGeometryPtr placed(const ModelPlacement& placement)const override
 			{
@@ -75,20 +90,23 @@ namespace paracfd::core
 					output.hi.y=std::max(output.hi.y,world.y);
 					output.hi.z=std::max(output.hi.z,world.z);
 				}
-				return std::make_shared<PlacedClosedSolid>(solid_,output,inverse);
+				return std::make_shared<PlacedClosedSolid>(solid_,output,inverse,discrete_);
 			}
 
 		private:
 			TopoDS_Solid solid_;
 			Aabb3d bounds_{};
+            std::shared_ptr<const TriangleBvh> discrete_;
 		};
 	}
 
 	ClosedSolidSourcePtr make_validated_closed_solid_source(
-		const TopoDS_Solid& source_solid,const Aabb3d& source_bounds_metres)
+		const TopoDS_Solid& source_solid,const TriMesh& source_mesh)
 	{
+        Aabb3d source_bounds_metres;
+        for(std::size_t q=0;q<source_mesh.vertex_count();++q){const auto p=source_mesh.vertex_position_double(q);source_bounds_metres.expand(Vec3d{p[0],p[1],p[2]});}
 		if(source_solid.IsNull()||!source_bounds_metres.valid())
 			throw std::invalid_argument("cannot certify empty closed-solid bounds");
-		return std::make_shared<ValidatedClosedSolidSource>(source_solid,source_bounds_metres);
+		return std::make_shared<ValidatedClosedSolidSource>(source_solid,source_bounds_metres,source_mesh);
 	}
 }

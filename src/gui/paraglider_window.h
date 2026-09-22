@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/aero_sweep.h"
 #include "core/geometry/step_import.h"
 #include "core/paraglider_config.h"
 #include "gui/paraglider_sim_worker.h"
@@ -8,6 +9,7 @@
 #include <QElapsedTimer>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -56,6 +58,8 @@ namespace paracfd::gui
 		void setAoaSweepControls(double mean_tolerance_percent,double maximum_flow_throughs,
 			double reference_area=0);
 		bool startAoaSweep(double minimum_degrees,double maximum_degrees,double step_degrees);
+		bool startTrimSearch(double minimum_degrees,double maximum_degrees,double step_degrees,
+			double all_up_mass);
 		bool aoaSweepActive()const{return aoa_sweep_active_;}
 		bool simulationRunning()const{return simulation_running_;}
 		bool simulationAutoPaused()const{return simulation_auto_paused_;}
@@ -78,9 +82,12 @@ namespace paracfd::gui
 		void normalizePlacementToDomain();
 		void rotateWing(double degrees,const paracfd::core::Vec3d& axis);
 		void toggleAoaSweep();
+		void toggleTrimSearch();
+		void beginAoaSequence(bool trim_search);
 		void startNextAoaSweepCase();
 		void finishAoaSweepCase(const ParagliderDisplaySnapshot& snapshot);
 		void cancelAoaSweep(const QString& reason=QString{});
+		void restoreAoaBaseline();
 		void updateGridReadout();
 		void updateSnapshot();
 		void applySurfaceColour();
@@ -133,9 +140,13 @@ namespace paracfd::gui
 		bool build_wall_timer_active_=false,build_seen_running_=false;
 		bool simulation_running_=false,simulation_auto_paused_=false;
 		paracfd::core::ModelPlacement aoa_sweep_baseline_;
+		double trim_baseline_incidence_degrees_=std::numeric_limits<double>::quiet_NaN();
 		std::vector<double> aoa_sweep_angles_;
+		std::vector<paracfd::core::FixedAttitudeGlideSample> trim_samples_;
 		std::size_t aoa_sweep_index_=0;
-		bool aoa_sweep_active_=false,aoa_sweep_waiting_=false,aoa_sweep_previous_auto_pause_=true;
+		bool aoa_sweep_active_=false,aoa_sweep_waiting_=false,aoa_sweep_previous_auto_pause_=true,
+			aoa_sweep_previous_conservative_=false,trim_search_active_=false,
+			trim_all_cases_converged_=true;
 
 		QPushButton *build_button_=nullptr,*play_button_=nullptr,*step_button_=nullptr;
 		QDoubleSpinBox *speed_=nullptr,*rho_=nullptr,*nu_=nullptr,*upstream_=nullptr,*downstream_=nullptr,
@@ -144,7 +155,7 @@ namespace paracfd::gui
 			*cfl_=nullptr,*smagorinsky_=nullptr,*projection_tolerance_=nullptr,
 			*reference_area_=nullptr,*reference_length_=nullptr,*tessellation_=nullptr,
 			*aoa_sweep_min_=nullptr,*aoa_sweep_max_=nullptr,*aoa_sweep_step_=nullptr,
-			*aoa_mean_tolerance_=nullptr,*aoa_max_flow_throughs_=nullptr;
+			*aoa_mean_tolerance_=nullptr,*aoa_max_flow_throughs_=nullptr,*trim_mass_=nullptr;
 		QSpinBox *levels_=nullptr,*brick_size_=nullptr,*projection_iterations_=nullptr;
 		QComboBox *field_=nullptr,*slice_axis_=nullptr,*surface_colour_=nullptr,*arrow_mode_=nullptr,*tracer_mode_=nullptr;
 		QSlider *slice_position_=nullptr,*auto_pause_sensitivity_=nullptr;
@@ -156,7 +167,7 @@ namespace paracfd::gui
 		QDoubleSpinBox *thin_y_fraction_=nullptr,*thin_y_width_=nullptr;
 		QLabel *wing_label_=nullptr,*solid_status_readout_=nullptr,*grid_readout_=nullptr,
 			*solver_readout_=nullptr,*load_readout_=nullptr;
-		QPushButton* aoa_sweep_button_=nullptr;
+		QPushButton *aoa_sweep_button_=nullptr,*trim_search_button_=nullptr;
 		QPlainTextEdit* aoa_sweep_results_=nullptr;
 
 		std::vector<std::array<float,6>> amr_boxes_,eb_boxes_;

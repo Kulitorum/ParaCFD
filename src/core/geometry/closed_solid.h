@@ -1,8 +1,8 @@
 // closed_solid.h -- OCCT-free interface to a validated aerodynamic solid.
 //
-// STEP import certifies that the model is one closed solid. The implementation retains
-// that BRep behind this interface so CFD material classification remains authoritative;
-// tessellation is an acceleration/load surface, not the definition of inside and outside.
+// STEP import certifies the closed BRep. CFD volumes and loads use its discrete
+// triangle envelope consistently; the BRep remains available for independent
+// material checks. The full envelope is retained when the display mesh is cropped.
 #pragma once
 
 #include "core/geometry/model_placement.h"
@@ -33,6 +33,11 @@ namespace paracfd::core
 		virtual const Aabb3d& bounds()const=0;
 		virtual void classify_points(const Vec3d* points,std::size_t count,
 			double world_tolerance,ClosedSolidPointLocation* locations)const=0;
+        virtual void classify_discrete_points(const Vec3d* points,std::size_t count,
+            double world_tolerance,ClosedSolidPointLocation* locations)const
+        {
+            classify_points(points,count,world_tolerance,locations);
+        }
 	};
 	using ClosedSolidGeometryPtr=std::shared_ptr<const ClosedSolidGeometry>;
 

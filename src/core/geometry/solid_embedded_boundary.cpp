@@ -141,7 +141,7 @@ namespace paracfd::core
 		{
 			Vec3d twice{};
 			for(std::size_t q=0;q<polygon.size();++q)
-				twice=twice+cross(polygon[q],polygon[(q+1)%polygon.size()]);
+				twice=twice+cross(polygon[q]-polygon.front(),polygon[(q+1)%polygon.size()]-polygon.front());
 			return twice*0.5;
 		}
 
@@ -180,7 +180,7 @@ namespace paracfd::core
 					if(std::abs(denominator)>std::numeric_limits<double>::min())
 					{
 						Vec3d crossing=previous+(current-previous)*
-							(previous_distance/denominator);
+							std::clamp(previous_distance/denominator,0.0,1.0);
 						crossing[axis]=coordinate;output.push_back(crossing);
 					}
 				}
@@ -227,7 +227,7 @@ namespace paracfd::core
 					if(std::abs(denominator)>std::numeric_limits<double>::min())
 					{
 						Vec3d crossing=previous+(current-previous)*
-							(previous_distance/denominator);
+							std::clamp(previous_distance/denominator,0.0,1.0);
 						crossing=crossing-plane.normal*plane.distance(crossing);
 						output.push_back(crossing);
 					}
@@ -262,13 +262,27 @@ namespace paracfd::core
 			Vec3d reference=std::abs(desired_normal.x)<0.8?Vec3d{1,0,0}:Vec3d{0,1,0};
 			const Vec3d u=normalized(cross(reference,desired_normal));
 			const Vec3d v=cross(desired_normal,u);
-			std::sort(unique.begin(),unique.end(),[&](Vec3d a,Vec3d b)
+			struct Point2 { double x,y; Vec3d point; };
+			std::vector<Point2> planar;planar.reserve(unique.size());
+			for(const auto& point:unique)planar.push_back({dot(point-centre,u),dot(point-centre,v),point});
+			std::sort(planar.begin(),planar.end(),[](const auto& a,const auto& b)
+				{return a.x!=b.x?a.x<b.x:a.y<b.y;});
+			auto turn=[](const Point2& a,const Point2& b,const Point2& c)
+				{return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);};
+			std::vector<Point2> hull;
+			for(const auto& point:planar)
 			{
-				const Vec3d da=a-centre,db=b-centre;
-				return std::atan2(dot(da,v),dot(da,u))<std::atan2(dot(db,v),dot(db,u));
-			});
-			if(dot(polygon_vector_area(unique),desired_normal)<0.0)
-				std::reverse(unique.begin(),unique.end());
+				while(hull.size()>1&&turn(hull[hull.size()-2],hull.back(),point)<=0)hull.pop_back();
+				hull.push_back(point);
+			}
+			const auto lower_size=hull.size();
+			for(int q=static_cast<int>(planar.size())-2;q>=0;--q)
+			{
+				while(hull.size()>lower_size&&turn(hull[hull.size()-2],hull.back(),planar[q])<=0)hull.pop_back();
+				hull.push_back(planar[q]);
+			}
+			if(!hull.empty())hull.pop_back();
+			unique.clear();for(const auto& point:hull)unique.push_back(point.point);
 			return unique;
 		}
 
@@ -306,7 +320,7 @@ namespace paracfd::core
 					Polygon clipped=clip_polygon_halfspace(face.polygon,plane,keep_minus,
 						length_tolerance);
 					const Measure measure=polygon_measure(clipped,face.normal);
-					if(measure.value>area_tolerance)
+					if(measure.value>0.0)
 						output.faces.push_back({std::move(clipped),face.normal,face.plane,
 							face.box_face});
 				}
@@ -325,18 +339,34 @@ namespace paracfd::core
 			const bool plus_valid=plus.measure.value>volume_tolerance&&
 				finite(plus.measure.centroid);
 			if(minus_valid&&plus_valid)return AtomSplitResult::split;
-			if(minus_valid==plus_valid)return AtomSplitResult::invalid;
+			if(minus_valid==plus_valid)
+			{
+				const auto parent=polyhedron_measure(source);
+				if(parent.value>volume_tolerance&&parent.value<=2*volume_tolerance&&
+					std::abs(parent.value-minus.measure.value-plus.measure.value)<=volume_tolerance)
+				{
+					suppressed_volume=std::min(minus.measure.value,plus.measure.value);
+					return AtomSplitResult::suppressed_subresolution;
+				}
+				static std::atomic<int> reported{0};
+				if(reported.fetch_add(1)<4)std::fprintf(stderr,"[solid-split] parent=%.17g minus=%.17g plus=%.17g tol=%.17g distances=[%.17g %.17g]\n",polyhedron_measure(source).value,minus.measure.value,plus.measure.value,volume_tolerance,minimum,maximum);
+				return AtomSplitResult::invalid;
+			}
 			const Measure parent=polyhedron_measure(source);
 			const double retained=minus_valid?minus.measure.value:plus.measure.value;
 			const double discarded=minus_valid?plus.measure.value:minus.measure.value;
 			const double closure=std::abs(parent.value-retained-std::max(0.0,discarded));
 			if(parent.value>volume_tolerance&&finite(parent.centroid)&&
-				std::isfinite(discarded)&&discarded>=0.0&&discarded<=volume_tolerance&&
-				closure<=std::max(64.0*volume_tolerance,1.0e-10*parent.value))
+				std::isfinite(discarded)&&discarded>=0.0&&discarded<=volume_tolerance)
 			{
+				// Neither rounded child is committed. Retaining the original atom
+				// preserves its complete boundary and volume exactly; a difference
+				// in the unused retained-child quadrature is not a volume loss.
 				suppressed_volume=std::max(0.0,discarded);
 				return AtomSplitResult::suppressed_subresolution;
 			}
+			static std::atomic<int> rejected{0};
+			if(rejected.fetch_add(1)<4)std::fprintf(stderr,"[solid-split] parent=%.17g retained=%.17g discarded=%.17g closure=%.17g tol=%.17g distances=[%.17g %.17g]\n",parent.value,retained,discarded,closure,volume_tolerance,minimum,maximum);
 			return AtomSplitResult::invalid;
 		}
 
@@ -352,12 +382,12 @@ namespace paracfd::core
 				for(std::size_t q=1;q+1<face.polygon.size();++q)
 				{
 					const Vec3d a=face.polygon[0],b=face.polygon[q],c=face.polygon[q+1];
-					const double volume=std::abs(dot(a-reference,cross(b-reference,c-reference)))/6.0;
-					if(!(volume>0.0))continue;
+					const double volume=dot(a-reference,cross(b-reference,c-reference))/6.0;
+					if(volume==0.0)continue;
 					result.value+=volume;
-					result.centroid=result.centroid+(reference+a+b+c)*(volume/4.0);
+					result.centroid=result.centroid+((a-reference)+(b-reference)+(c-reference))*(volume/4.0);
 				}
-			if(result.value>0.0)result.centroid=result.centroid/result.value;
+			if(result.value>0.0)result.centroid=reference+result.centroid/result.value;
 			return result;
 		}
 
@@ -400,7 +430,7 @@ namespace paracfd::core
 						const double denominator=previous_side-current_side;
 						if(std::abs(denominator)>std::numeric_limits<double>::min())
 							output.push_back(previous+(current-previous)*
-								(previous_side/denominator));
+								std::clamp(previous_side/denominator,0.0,1.0));
 					}
 					if(current_inside)output.push_back(current);
 					previous=current;previous_side=current_side;
@@ -578,12 +608,15 @@ namespace paracfd::core
 		const double volume_tolerance=std::max(1.0e-14*grid.h*grid.h*grid.h,
 			length_tolerance*length_tolerance*length_tolerance);
 
+        std::fprintf(stderr,"[closed-solid-eb] grid origin=[%.12g %.12g %.12g] dimensions=[%d %d %d] h=%.12g\n",grid.origin.x,grid.origin.y,grid.origin.z,grid.nx,grid.ny,grid.nz,grid.h);
 		const auto cell_build_begin=std::chrono::steady_clock::now();
 		const unsigned cell_workers=parallel_for_indices(grid.cell_count(),[&](int cell)
 		{
 			const auto coordinate=grid.cell_coord(cell);
-			const Aabb3d box=grid.cell_box(coordinate[0],coordinate[1],coordinate[2]);
-			Aabb3d query=box;const Vec3d padding{length_tolerance,length_tolerance,length_tolerance};
+			const Aabb3d world_box=grid.cell_box(coordinate[0],coordinate[1],coordinate[2]);
+			const Vec3d cell_origin=world_box.lo;
+			const Aabb3d box{{0,0,0},{grid.h,grid.h,grid.h}};
+			Aabb3d query=world_box;const Vec3d padding{length_tolerance,length_tolerance,length_tolerance};
 			query.lo=query.lo-padding;query.hi=query.hi+padding;
 			std::vector<std::uint32_t> candidates=broad_phase.query_aabb(query);
 			if(candidates.empty())return;
@@ -595,7 +628,8 @@ namespace paracfd::core
 				const Vec3d vector_normal=cross(triangle.b-triangle.a,triangle.c-triangle.a);
 				if(!(length2(vector_normal)>0.0))continue;
 				const Vec3d normal=normalized(vector_normal);
-				Polygon polygon=clip_triangle_box(triangle,box,length_tolerance);
+				Polygon polygon=clip_triangle_box(triangle,world_box,length_tolerance);
+				for(auto& point:polygon)point=point-cell_origin;
 				const Measure measure=polygon_measure(polygon,normal);
 				if(!(measure.value>area_tolerance))continue;
 				bool output_owner=true;
@@ -611,36 +645,27 @@ namespace paracfd::core
 			if(patches.empty())return;
 			surface_cell[cell]=1;
 
-			// OCCT's curvature-driven tessellation can put hundreds of slightly
-			// different triangle planes from one smooth NURBS face in a single CFD
-			// cell.  Their infinite-plane arrangement is both unnecessary and
-			// combinatorial. Represent each locally intersecting CAD face by its
-			// area-weighted tangent plane; the clipped source triangles remain the
-			// authoritative load surface.
-			std::map<std::uint32_t,std::vector<int>> patches_by_face;
+			// Partition with the same finite triangle facets used for loads. Fitting
+			// one tangent plane per CAD face produced different openings in adjacent
+			// cells and volumes that did not close against the load surface. Split
+			// only atoms actually intersected by a source polygon, avoiding the cubic
+			// arrangement of every triangle's infinite supporting plane.
+			std::vector<PlaneGroup> planes;planes.reserve(patches.size());
 			for(int patch=0;patch<static_cast<int>(patches.size());++patch)
-				patches_by_face[patches[patch].face].push_back(patch);
-			std::vector<PlaneGroup> planes;planes.reserve(patches_by_face.size());
-			for(const auto& [source_face,face_patches]:patches_by_face)
 			{
-				double area=0.0;Vec3d normal_sum{},centroid_sum{};
-				for(int patch:face_patches)
+				const auto& source=patches[patch];bool grouped=false;
+				for(auto& group:planes)
 				{
-					area+=patches[patch].area;
-					normal_sum=normal_sum+patches[patch].normal*patches[patch].area;
-					centroid_sum=centroid_sum+patches[patch].centroid*patches[patch].area;
+					if(group.source_face!=source.face||length2(group.outward_normal-source.normal)>1e-22)continue;
+					bool coplanar=true;for(const auto& point:source.polygon)
+						coplanar=coplanar&&std::abs(group.plane.distance(point))<=length_tolerance;
+					if(!coplanar)continue;
+					group.patches.push_back(patch);grouped=true;break;
 				}
-				if(!(area>area_tolerance)||!(length2(normal_sum)>0.0))continue;
-				const Vec3d outward=normalized(normal_sum);
-				const Vec3d centroid=centroid_sum/area;
-				const double outward_offset=dot(outward,centroid);
-				planes.push_back({canonical_plane(outward,outward_offset),outward,
-					outward_offset,source_face,face_patches});
-			}
-			if(planes.size()>16)
-			{
-				report(cell,"closed triangle cell intersects more than 16 distinct CAD faces",
-					std::move(candidates));return;
+				if(grouped)continue;
+				const double offset=dot(source.normal,source.centroid);
+				planes.push_back({canonical_plane(source.normal,offset),source.normal,
+					offset,source.face,{patch}});
 			}
 
 			std::vector<Atom> atoms{cube_atom(box)};
@@ -653,6 +678,24 @@ namespace paracfd::core
 				std::vector<AtomAdjacency> new_caps;
 				for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
 				{
+					bool intersects=false;
+					for(const int patch:planes[plane].patches)
+					{
+						Polygon overlap=patches[patch].polygon;
+						for(const auto& face:atoms[atom].faces)
+						{
+							overlap=clip_polygon_halfspace(overlap,
+								{face.normal,dot(face.normal,face.polygon.front())},true,length_tolerance);
+							if(overlap.size()<3)break;
+						}
+						if(polygon_measure(overlap,planes[plane].plane.normal).value>area_tolerance)
+							{intersects=true;break;}
+					}
+					if(!intersects)
+					{
+						const int unchanged=static_cast<int>(next.size());
+						next.push_back(atoms[atom]);children[atom]={unchanged,unchanged};continue;
+					}
 					Atom minus,plus;Polygon common_cap;double suppressed_volume=0.0;
 					const AtomSplitResult split=split_atom(atoms[atom],planes[plane].plane,
 						plane,length_tolerance,area_tolerance,volume_tolerance,minus,plus,
@@ -685,7 +728,7 @@ namespace paracfd::core
 						const int unchanged=static_cast<int>(next.size());
 						next.push_back(atoms[atom]);children[atom]={unchanged,unchanged};
 					}
-					if(next.size()>512){atom_overflow=true;break;}
+					if(next.size()>65536){atom_overflow=true;break;}
 				}
 				if(atom_overflow)break;
 
@@ -740,7 +783,7 @@ namespace paracfd::core
 			if(reported[cell])return;
 			if(atom_overflow)
 			{
-				report(cell,"closed triangle cell partition exceeds 512 convex atoms",
+				report(cell,"closed triangle cell partition exceeds 65536 convex atoms",
 					std::move(candidates));return;
 			}
 			for(Atom& atom:atoms)atom.measure=polyhedron_measure(atom);
@@ -751,9 +794,7 @@ namespace paracfd::core
 					std::move(candidates));return;
 			}
 
-			// Mark the two sides of the fitted face from the source mesh itself.  A
-			// centroid-only parity test can miss a very thin exterior wedge when the
-			// curved tessellation and its local tangent plane differ slightly.  The
+			// Mark the two sides of each finite source facet. The
 			// solid's oriented triangles give an unambiguous local constraint: the
 			// atom on the normal side is exterior and the opposite atom is interior.
 			std::vector<double> oriented_evidence(atoms.size(),0.0);
@@ -782,61 +823,47 @@ namespace paracfd::core
 				oriented_evidence[inside_atom]-=covered_area;
 			}
 
-			std::vector<Vec3d> atom_witnesses;atom_witnesses.reserve(atoms.size());
-			std::vector<int> classified_atoms;classified_atoms.reserve(atoms.size());
-			std::vector<ClosedSolidPointLocation> solid_locations(atoms.size(),
-				ClosedSolidPointLocation::unknown);
-			for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
-				if(std::abs(oriented_evidence[atom])<=area_tolerance)
-				{
-					classified_atoms.push_back(atom);
-					atom_witnesses.push_back(atoms[atom].measure.centroid);
-				}
-			std::vector<ClosedSolidPointLocation> classified_locations(classified_atoms.size(),
-				ClosedSolidPointLocation::unknown);
-			if(!classified_atoms.empty())solid.classify_points(atom_witnesses.data(),
-				atom_witnesses.size(),length_tolerance,classified_locations.data());
-			for(std::size_t index=0;index<classified_atoms.size();++index)
-				solid_locations[classified_atoms[index]]=classified_locations[index];
-			std::vector<unsigned char> atom_outside(atoms.size(),0);
-			for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
-			{
-				// A fitted interface represents an exact oriented CAD face locally. Its
-				// signed sides therefore define the material of adjacent approximation
-				// atoms. OCCT classifies every atom that is not incident to such an
-				// interface; it is never replaced by a triangle-ray parity guess.
-				if(oriented_evidence[atom]>area_tolerance)
-				{
-					atom_outside[atom]=1;continue;
-				}
-				if(oriented_evidence[atom]<-area_tolerance)continue;
-				const ClosedSolidPointLocation location=solid_locations[atom];
-				if(location==ClosedSolidPointLocation::unknown)
-				{
-					report(cell,"OCCT could not classify a positive-volume convex atom",candidates);
-					break;
-				}
-				if(location==ClosedSolidPointLocation::boundary)
-				{
-					// A very thin atom can fall within OCCT's boundary tolerance. Its source
-					// surface orientation is then the only signed local evidence available.
-					if(std::abs(oriented_evidence[atom])<=area_tolerance)
-					{
-						report(cell,"positive-volume convex atom lies on the OCCT boundary without signed surface evidence",candidates);
-						break;
-					}
-					atom_outside[atom]=oriented_evidence[atom]>0.0;continue;
-				}
-				atom_outside[atom]=location==ClosedSolidPointLocation::outside;
-			}
+            std::vector<unsigned char> atom_outside(atoms.size(),0);
+            for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
+            {
+                const Vec3d witness=atoms[atom].measure.centroid+cell_origin;
+                ClosedSolidPointLocation location=ClosedSolidPointLocation::unknown;
+                solid.classify_discrete_points(&witness,1,length_tolerance,&location);
+                if(location==ClosedSolidPointLocation::inside||location==ClosedSolidPointLocation::outside)
+                    atom_outside[atom]=location==ClosedSolidPointLocation::outside;
+                else if(std::abs(oriented_evidence[atom])>area_tolerance)
+                    atom_outside[atom]=oriented_evidence[atom]>0;
+                else
+                {
+                    report(cell,"positive-volume atom lacks a resolved triangle material witness",candidates);
+                    break;
+                }
+            }
 			if(reported[cell])return;
 			DisjointSet components(static_cast<int>(atoms.size()));
 			for(AtomAdjacency& adjacency:adjacencies)
 			{
-				adjacency.blocked=adjacency.source_surface||
-					atom_outside[adjacency.a]!=atom_outside[adjacency.b];
+				adjacency.blocked=atom_outside[adjacency.a]!=atom_outside[adjacency.b];
 				if(!adjacency.blocked)components.join(adjacency.a,adjacency.b);
 			}
+            if(std::getenv("PARACFD_GEOMETRY_DIAGNOSTIC"))
+            {
+                Vec3d box_area{},atom_area{},raw_area{},wall_area{};
+                for(int atom=0;atom<static_cast<int>(atoms.size());++atom)if(atom_outside[atom])
+                    for(const auto& face:atoms[atom].faces)
+                    {
+                        const Vec3d area=face.normal*polygon_measure(face.polygon,face.normal).value;
+                        atom_area=atom_area+area;if(face.box_face>=0)box_area=box_area+area;
+                    }
+                for(const auto& patch:patches)raw_area=raw_area+patch.normal*patch.area;
+                for(const auto& adjacency:adjacencies)if(adjacency.blocked)
+                {
+                    const auto normal=planes[adjacency.plane].plane.normal;
+                    wall_area=wall_area+normal*(polygon_measure(adjacency.polygon,normal).value*(atom_outside[adjacency.a]?1:-1));
+                }
+                const auto delta=box_area-raw_area;
+                if(length2(delta)>1e-20)std::fprintf(stderr,"[geometry-local] cell=[%d %d %d] atoms=%zu box-load=[%.12g %.12g %.12g] atom-closure=%.12g box-wall=%.12g\n",coordinate[0],coordinate[1],coordinate[2],atoms.size(),delta.x,delta.y,delta.z,std::sqrt(length2(atom_area)),std::sqrt(length2(box_area+wall_area)));
+            }
 			std::map<int,bool> outside_root;
 			for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
 				outside_root[components.root(atom)]=atom_outside[atom]!=0;
@@ -877,39 +904,33 @@ namespace paracfd::core
 			for(int fragment=0;fragment<static_cast<int>(local_fragment.size());++fragment)
 			{
 				FluidFragment output;output.parent_cell=cell;output.volume=volume[fragment];
-				output.centroid=moment[fragment]/volume[fragment];
+				output.centroid=cell_origin+moment[fragment]/volume[fragment];
 				output.merge_target=irregular_fragment(fragment);
 				output.pressure_dof=cell;staged->fragments.push_back(output);
 			}
-			// Attach the exact clipped load triangles through the fitted CAD-face
-			// partition that represents them.  A tiny normal offset from the exact
-			// triangle can lie on the opposite side of the fitted plane on a curved
-			// face, so plane-facet ownership is the authoritative local association.
-			for(int plane=0;plane<static_cast<int>(planes.size());++plane)
-				for(int patch_index:planes[plane].patches)
-				{
-					double best_distance=std::numeric_limits<double>::infinity();
-					FragmentRef best=invalid_fragment;
-					const Vec3d projected=patches[patch_index].centroid-
-						planes[plane].plane.normal*planes[plane].plane.distance(
-							patches[patch_index].centroid);
-					for(const AtomAdjacency& adjacency:adjacencies)
-					{
-						if(!adjacency.blocked||adjacency.plane!=plane)continue;
-						const int outside_atom=atom_outside[adjacency.a]?adjacency.a:adjacency.b;
-						const int root=components.root(outside_atom);
-						auto found=local_fragment.find(root);if(found==local_fragment.end())continue;
-						const Measure measure=polygon_measure(adjacency.polygon,
-							planes[plane].plane.normal);
-						const double distance=length2(projected-measure.centroid);
-						if(distance<best_distance)
-						{
-							best_distance=distance;
-							best=irregular_fragment(found->second);
-						}
-					}
-					patches[patch_index].plus_fragment=best;
-				}
+            // Associate each load patch by its actual overlap with the fluid
+            // boundary. A nearest facet-centroid search can choose a different
+            // disconnected fragment of the same coplanar CAD face.
+            for(int plane=0;plane<static_cast<int>(planes.size());++plane)
+                for(int patch_index:planes[plane].patches)
+                {
+                    std::map<FragmentRef,double> coverage;
+                    for(const AtomAdjacency& adjacency:adjacencies)
+                    {
+                        if(!adjacency.blocked||adjacency.plane!=plane)continue;
+                        const int outside_atom=atom_outside[adjacency.a]?adjacency.a:adjacency.b;
+                        const int root=components.root(outside_atom);
+                        auto found=local_fragment.find(root);if(found==local_fragment.end())continue;
+                        const auto overlap=intersect_coplanar_convex(patches[patch_index].polygon,
+                            adjacency.polygon,planes[plane].plane.normal,length_tolerance);
+                        coverage[irregular_fragment(found->second)]+=polygon_measure(overlap,
+                            planes[plane].plane.normal).value;
+                    }
+                    double best_area=area_tolerance;FragmentRef best=invalid_fragment;
+                    for(const auto& [fragment,area]:coverage)if(area>best_area)
+                        {best_area=area;best=fragment;}
+                    patches[patch_index].plus_fragment=best;
+                }
 			for(RawPatch& patch:patches)if(patch.plus_fragment==invalid_fragment)
 			{
 				const Vec3d probe=patch.centroid+patch.normal*(1.0e-4*grid.h);
@@ -933,14 +954,14 @@ namespace paracfd::core
 			ExactEbCellLocator locator;locator.ambiguity_tolerance=4.0*length_tolerance;
 			locator.winding_tolerance=1.0e-4;locator.fragments.resize(local_fragment.size());
 			for(int fragment=0;fragment<static_cast<int>(local_fragment.size());++fragment)
-				locator.fragments[fragment].interior_witness=atoms[witness_atom[fragment]].measure.centroid;
+				locator.fragments[fragment].interior_witness=cell_origin+atoms[witness_atom[fragment]].measure.centroid;
 			for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
 			{
 				const int root=components.root(atom);auto found=local_fragment.find(root);
 				if(found==local_fragment.end())continue;
 				EbConvexRegion region;region.halfspaces.reserve(atoms[atom].faces.size());
 				for(const AtomFace& face:atoms[atom].faces)
-					region.halfspaces.push_back({face.normal,dot(face.normal,face.polygon.front())});
+					region.halfspaces.push_back({face.normal,dot(face.normal,face.polygon.front()+cell_origin)});
 				locator.fragments[found->second].convex_regions.push_back(std::move(region));
 			}
 			auto append_boundary=[&](int atom,const Polygon& polygon,Vec3d normal)
@@ -949,7 +970,7 @@ namespace paracfd::core
 				if(found==local_fragment.end())return;
 				for(const SolidFaceTriangle& triangle:triangulate(polygon,normal))
 					locator.fragments[found->second].triangles.push_back(
-						{triangle.a,triangle.b,triangle.c});
+						{triangle.a+cell_origin,triangle.b+cell_origin,triangle.c+cell_origin});
 			};
 			for(int atom=0;atom<static_cast<int>(atoms.size());++atom)
 				if(local_fragment.contains(components.root(atom)))
@@ -975,12 +996,25 @@ namespace paracfd::core
 					const Measure measure=polygon_measure(face.polygon,face.normal);
 					if(!(measure.value>area_tolerance))continue;
 					const int axis=face.box_face/2;const bool upper=(face.box_face&1)!=0;
+					auto triangles=triangulate(face.polygon,face.normal);
+					for(auto& triangle:triangles)
+						{triangle.a=triangle.a+cell_origin;triangle.b=triangle.b+cell_origin;triangle.c=triangle.c+cell_origin;}
 					cell_apertures[cell].push_back({axis,upper,measure.value,
-						measure.centroid,fragment,triangulate(face.polygon,face.normal)});
+						measure.centroid+cell_origin,fragment,std::move(triangles)});
 				}
 			}
 			staged->locator=std::move(locator);split_cells[cell]=std::move(staged);
 		});
+		for(int cell=0;cell<grid.cell_count();++cell)
+		{
+			const auto coordinate=grid.cell_coord(cell);
+			const auto origin=grid.cell_box(coordinate[0],coordinate[1],coordinate[2]).lo;
+			for(auto& patch:cell_patches[cell])
+			{
+				patch.centroid=patch.centroid+origin;
+				for(auto& point:patch.polygon)point=point+origin;
+			}
+		}
 		for(int cell=0;cell<grid.cell_count();++cell)if(split_cells[cell])
 		{
 			EbCellTopology& topology=eb.cells[cell];
@@ -1008,9 +1042,10 @@ namespace paracfd::core
 			grid.cell_count(),cell_workers,cell_build_ms);
 		const auto flood_begin=std::chrono::steady_clock::now();
 
-		// The cut shell is already resolved. Label the remaining regular Cartesian
-		// cells by a cheap graph flood, seeding the atlas boundary and every open face
-		// of a certified exterior cut fragment. No CAD or ray query occurs here.
+		// Classify each connected regular region once. An atlas/crop boundary is
+		// not necessarily exterior: a spanwise crop can expose solid material there.
+		// The resolved cut shell separates these regions, so one authoritative
+		// material witness per region is sufficient, including enclosed interiors.
 		std::deque<int> queue;std::vector<unsigned char> flooded(
 			static_cast<std::size_t>(grid.cell_count()),0);
 		auto seed=[&](int cell)
@@ -1019,27 +1054,26 @@ namespace paracfd::core
 				flooded[cell])return;
 			flooded[cell]=1;queue.push_back(cell);
 		};
-		for(int k=0;k<grid.nz;++k)for(int j=0;j<grid.ny;++j)for(int i=0;i<grid.nx;++i)
-			if(i==0||j==0||k==0||i+1==grid.nx||j+1==grid.ny||k+1==grid.nz)
-				seed(grid.cell_index(i,j,k));
-		for(int cell=0;cell<grid.cell_count();++cell)
+		for(int start=0;start<grid.cell_count();++start)
 		{
-			if(surface_cell[cell]&&known_exterior[cell])seed(cell);
-			for(const StagedAperture& aperture:cell_apertures[cell])
-				seed(neighbour_cell(grid,cell,aperture.axis,aperture.upper));
+			if(flooded[start]||eb.cells[start].state!=EbCellState::regular)continue;
+			const Vec3d witness=grid.cell_centroid(start);
+			ClosedSolidPointLocation location=ClosedSolidPointLocation::unknown;
+			solid.classify_discrete_points(&witness,1,length_tolerance,&location);
+			if(location!=ClosedSolidPointLocation::inside&&location!=ClosedSolidPointLocation::outside)
+				throw std::runtime_error("could not classify a regular solid-domain component");
+			seed(start);
+			while(!queue.empty())
+			{
+				const int cell=queue.front();queue.pop_front();
+				const auto coordinate=grid.cell_coord(cell);
+				if(coordinate[0]>0)seed(cell-1);if(coordinate[0]+1<grid.nx)seed(cell+1);
+				if(coordinate[1]>0)seed(cell-grid.nx);if(coordinate[1]+1<grid.ny)seed(cell+grid.nx);
+				const int slab=grid.nx*grid.ny;
+				if(coordinate[2]>0)seed(cell-slab);if(coordinate[2]+1<grid.nz)seed(cell+slab);
+				if(location==ClosedSolidPointLocation::inside)eb.cells[cell].state=EbCellState::solid;
+			}
 		}
-		while(!queue.empty())
-		{
-			const int cell=queue.front();queue.pop_front();
-			const auto coordinate=grid.cell_coord(cell);
-			if(coordinate[0]>0)seed(cell-1);if(coordinate[0]+1<grid.nx)seed(cell+1);
-			if(coordinate[1]>0)seed(cell-grid.nx);if(coordinate[1]+1<grid.ny)seed(cell+grid.nx);
-			const int slab=grid.nx*grid.ny;
-			if(coordinate[2]>0)seed(cell-slab);if(coordinate[2]+1<grid.nz)seed(cell+slab);
-		}
-		for(int cell=0;cell<grid.cell_count();++cell)
-			if(eb.cells[cell].state==EbCellState::regular&&!flooded[cell])
-				eb.cells[cell].state=EbCellState::solid;
 		const auto flood_end=std::chrono::steady_clock::now();
 
 		// The tessellated solid is the load surface. Each triangle is clipped to the
@@ -1185,6 +1219,12 @@ namespace paracfd::core
 			append_connection(connection.lower_cell,connection.axis,connection.area,
 				connection.centroid,connection.lower,connection.upper);
 		const auto connections_end=std::chrono::steady_clock::now();
+		for(int cell=0;cell<grid.cell_count();++cell)
+			for(const auto& aperture:cell_apertures[cell])
+				if(neighbour_cell(grid,cell,aperture.axis,aperture.upper)<0)
+					eb.boundary_apertures.push_back({aperture.fragment,
+						static_cast<std::int8_t>(aperture.axis),static_cast<std::int8_t>(aperture.upper?1:-1),
+						aperture.area,aperture.centroid});
 
 		std::vector<int> counts(eb.fragments.size(),0);
 		for(const FragmentConnection& connection:eb.connections)

@@ -1,0 +1,22 @@
+{
+  "created": "2026-09-06T10:18:39.921821+02:00",
+  "additional_planb_pitch_degrees": 0,
+  "flow_vector_mps": [
+    10,
+    0,
+    0
+  ],
+  "flight_frame_confirmation": "pending",
+  "physical_flight_validation": "unresolved",
+  "files": {
+    "src/core/fluid/amr_advection.cu": "d0704fcb6a7fb23d2963d23eab3f974cd9353f41599d999ddd62100e6a3b4cdb",
+    "src/core/fluid/amr_advection.h": "7e5e9364291790634c3f0002b23a4203c9724a16d7bfd5104bbe6e969c18c3d5",
+    "tools/physics_contract_probe.cpp": "b859206c1213c31d7445629bc2408d462bd7f14d37a0b52b2268a955ba3899d2",
+    "configs/planb_parakite.json": "9b81b718600fff2c189ca404a4db2efdd2322fc4aab46a1bd796ae08f1860a94",
+    "Test-Data/PlanBParakite-Solid.step": "36d7a1be6c36ab6ef2c54d8744689b65e8fb61b3c20edac4f2259099acbc668a",
+    "build-paraglider-ui/Release/physics_contract_probe.exe": "0538d525590684d0d3bac83a3941422ea2e46a417f7caed1c53a5c00015522aa",
+    "build-paraglider-ui/Release/paraglider_case_probe.exe": "ac4329cf320ded8902d0ab4c837f7648f0af5acba01120b71b29cf4e84f790a7",
+    "build-paraglider-ui/Release/naca_validation_probe.exe": "a2eb8e903e72a50dcd24e86abc1c59cff70f35d21fe2d245a26ff9962416b8bb",
+    "build-paraglider-ui/Release/paracfd-gui.exe": "5ac97df2b6567afad1f5bf96e3f761916bdabf569d330b88b992a944cc7509ce"
+  }
+}

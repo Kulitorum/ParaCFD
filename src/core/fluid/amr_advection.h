@@ -257,8 +257,8 @@ namespace paracfd::core
 		const CompositeAmrPressureSystem& system, const std::vector<double>& pressure,
 		double dt, double density, CompositeCellMomentumState& state);
 	// Oriented area-vector imbalance of the raw finite-volume pressure traction.
-	// Exact control volumes are zero. Sampled/merged EB volumes use this to enforce
-	// the discrete geometric conservation law without changing the outlet reference.
+	// Closed control volumes are zero. This is a geometry diagnostic; no artificial
+	// pressure force is added to compensate for a nonclosing volume.
 	std::vector<Vec3d> composite_cell_pressure_closure_cpu(
 		const CompositeAmrPressureSystem& system);
 	void reconstruct_composite_cell_fluxes_cpu(
@@ -270,7 +270,7 @@ namespace paracfd::core
 	{
 	public:
 		DeviceCompositeCellMomentumTransport(const CompositeAmrPressureSystem& system,
-			DeviceAmrFields& fields);
+			DeviceAmrFields& fields, double minimum_momentum_volume_fraction = 0.0);
 		~DeviceCompositeCellMomentumTransport();
 		DeviceCompositeCellMomentumTransport(const DeviceCompositeCellMomentumTransport&) = delete;
 		DeviceCompositeCellMomentumTransport& operator=(const DeviceCompositeCellMomentumTransport&) = delete;
@@ -298,15 +298,10 @@ namespace paracfd::core
 		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
 			bool include_physical_boundaries = true);
 		void apply_projected_pressure_gradient(const Real* pressure, Real dt, Real density);
-		// Reconstruct normal mass-flux velocities on every open connection. Physical
+		// Reconstruct normal mass-flux velocities with limited, affine-consistent
+        // transverse corrections at cut/AMR face centroids. Physical
 		// domain boundary values remain the caller's external-BC responsibility.
 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
-		// Rhie-Chow-style reconstruction: remove the cell-averaged correction from the
-		// previous projection and restore its exact face-normal pressure correction.
-		// A projected steady state therefore reconstructs identically without retaining
-		// unrelated face-only aperture modes.
-		void reconstruct_pressure_consistent_fluxes(const Real* pressure,
-			Real* coarse_fine_velocity, Real* embedded_velocity);
 		std::array<double, 3> momentum() const;
 		int regular_compact_connection_count() const { return regular_count_; }
 		int embedded_connection_count() const { return embedded_count_; }
@@ -320,6 +315,9 @@ namespace paracfd::core
 		std::size_t bytes() const;
 
 	private:
+		void apply_cell_momentum_delta();
+		void save_redistribution_baseline();
+        void redistribute_retained_root_increment();
 		const CompositeAmrPressureSystem* system_ = nullptr;
 		DeviceAmrFields* fields_ = nullptr;
 		std::unique_ptr<DeviceAmrMacFaceMap> regular_face_map_;
@@ -327,6 +325,8 @@ namespace paracfd::core
 		Real *x_ = nullptr, *y_ = nullptr, *z_ = nullptr, *baseline_x_ = nullptr,
 			*baseline_y_ = nullptr, *baseline_z_ = nullptr, *max_abs_scratch_ = nullptr;
 		Real *delta_x_ = nullptr, *delta_y_ = nullptr, *delta_z_ = nullptr;
+		Real *redistribution_volume_ = nullptr, *redistribution_x_ = nullptr,
+			*redistribution_y_ = nullptr, *redistribution_z_ = nullptr;
 		Real *volume_ = nullptr, *regular_velocity_ = nullptr, *viscosity_ = nullptr,
 			*regular_pressure_correction_velocity_ = nullptr, *outflow_scratch_ = nullptr,
 			*sync_weight_ = nullptr, *wall_matrix_ = nullptr;
@@ -334,6 +334,7 @@ namespace paracfd::core
 			*compact_plus_mask_ = nullptr, *gradient_special_mask_ = nullptr,
 			*flux_fit_mask_ = nullptr;
 		int *embedded_a_ = nullptr, *embedded_b_ = nullptr;
+		int* redistribution_group_ = nullptr;
 		Real *embedded_area_ = nullptr, *embedded_conductance_ = nullptr;
 		Real* embedded_face_displacement_ = nullptr;
 		std::int8_t* embedded_axis_ = nullptr;
@@ -365,8 +366,12 @@ namespace paracfd::core
 			*structured_pressure_correction_upper_weight_ = nullptr;
 		int *surface_dof_ = nullptr, *surface_wall_node_ = nullptr, *wall_dof_ = nullptr;
 		Real* surface_coefficient_ = nullptr; // packed area * outward fluid-force direction
+		Real* surface_pressure_displacement_ = nullptr; // wall centroid minus cell centroid
 		int* pressure_closure_dof_ = nullptr;
 		Real* pressure_closure_coefficient_ = nullptr;
+		int* boundary_pressure_dof_ = nullptr;
+		Real* boundary_pressure_coefficient_ = nullptr;
+		int boundary_pressure_count_ = 0;
 		Real *surface_normal_ = nullptr, *surface_area_ = nullptr,
 			*surface_distance_ = nullptr, *surface_wall_coefficient_ = nullptr,
 			*surface_wall_force_per_density_ = nullptr;
@@ -379,10 +384,12 @@ namespace paracfd::core
 			*gradient_inverse_ = nullptr, *gradient_rhs_ = nullptr, *gradient_value_ = nullptr;
 		int *pressure_gradient_dof_ = nullptr, *pressure_gradient_offset_ = nullptr,
 			*pressure_gradient_neighbour_ = nullptr;
+		int* pressure_gradient_node_index_ = nullptr;
 		Real *pressure_gradient_weight_ = nullptr, *pressure_gradient_value_ = nullptr;
 		std::vector<double> volume_host_;
 		std::vector<unsigned char> active_host_;
 		int storage_size_ = 0, pressure_gradient_node_count_ = 0;
+		int redistribution_group_count_ = 0, redistribution_member_count_ = 0;
 		int embedded_count_ = 0, coarse_fine_count_ = 0, regular_count_ = 0,
 			structured_pressure_correction_count_ = 0,
 			surface_count_ = 0, wall_count_ = 0, gradient_special_count_ = 0,
@@ -393,6 +400,7 @@ namespace paracfd::core
 		int last_diffusion_substeps_ = 1;
 		Real pressure_scale_ = Real(0);
 		bool pressure_correction_ready_ = false;
+		bool nonorthogonal_projection_ = false;
 		std::size_t bytes_ = 0;
 	};
 

@@ -79,7 +79,7 @@ namespace paracfd::core
 		bool les_applied = false;
 		bool embedded_transport_applied = false;
 		bool smooth_fabric_wall_applied = false;
-		bool conservative_cell_momentum = false;
+		bool conservative_cell_momentum = true;
 	};
 	struct ExternalAeroConservationStats
 	{
@@ -100,18 +100,19 @@ namespace paracfd::core
 		std::size_t recommended_bytes = 0;
 	};
 	ExternalAeroGpuMemoryEstimate estimate_external_aero_gpu_memory(
-		const AmrHierarchy& hierarchy,bool conservative_cell_momentum=false,
-		bool full_nonorthogonal_diagnostic=false);
+		const AmrHierarchy& hierarchy,bool conservative_cell_momentum=true,
+		bool full_nonorthogonal_diagnostic=true);
 
 	struct ExternalAeroExecutionOptions
 	{
-		// The face-centred MAC solver is the validated production path. The
-		// collocated control-volume transport remains an explicit experiment.
-		bool conservative_cell_momentum = false;
+		// Conservative cell momentum is the default result path. The MAC
+        // implementation remains available for diagnostic comparisons. Numerical
+        // settling alone does not establish aerodynamic validation.
+		bool conservative_cell_momentum = true;
 		bool smooth_fabric_wall = true;
 		bool pressure_impulse = true;
-		// Authoritative placed BRep. This is required; the triangle mesh is never a
-		// fallback topology source.
+		// Validated placed solid and its complete discrete envelope. Required
+        // even when the flow/display surface has been cropped.
 		ClosedSolidGeometryPtr closed_solid;
 		// Front-end safety limit. Zero leaves memory policy to the caller (used by
 		// validation probes); the GUI supplies a device-derived production budget.

@@ -1,0 +1,353 @@
+--- a/src/core/fluid/amr_advection.cu
++++ b/src/core/fluid/amr_advection.cu
+@@ -263,9 +263,29 @@
+ 		}
+ 		__global__ void reconstruct_compact_cell_flux_kernel(const int* a,const int* b,
+ 			const std::int8_t* axis,const Real* upper_weight,const Real* x,const Real* y,
+-			const Real* z,Real* velocity,int count)
+-		{
+-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge];const Real weight=upper_weight[edge];velocity[edge]=(Real(1)-weight)*cell_component(x,y,z,a[edge],component)+weight*cell_component(x,y,z,b[edge],component);
++			const Real* z,const int* gradient_index,const Real* gradient,
++            const Real* face_displacement,Real* velocity,int count)
++		{
++			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;
++            const int component=axis[edge];const Real weight=upper_weight[edge];
++            const Real va=cell_component(x,y,z,a[edge],component),vb=cell_component(x,y,z,b[edge],component);
++            const Real* da=face_displacement+6*edge;const Real* db=da+3;
++            const Real skew[3]={(Real(1)-weight)*da[0]+weight*db[0],
++                (Real(1)-weight)*da[1]+weight*db[1],(Real(1)-weight)*da[2]+weight*db[2]};
++            Real correction[2]={Real(0),Real(0)};
++            for(int side=0;side<2;++side)
++            {
++                const int special=gradient_index[side?b[edge]:a[edge]];
++                if(special<0)continue;
++                const Real* g=gradient+9*special+3*component;
++                correction[side]=g[0]*skew[0]+g[1]*skew[1]+g[2]*skew[2];
++            }
++            // The aperture centroid is generally off the line joining cell
++            // centroids. Two-point interpolation alone loses transverse shear.
++            // Retain only the transverse correction supported by both cells.
++            // Equal gradients recover an affine field exactly; disagreement
++            // near an unresolved surface feature limits the extrapolation.
++            velocity[edge]=(Real(1)-weight)*va+weight*vb+minmod_cell(correction[0],correction[1]);
+ 		}
+ 		__global__ void reconstruct_regular_pressure_consistent_flux_kernel(DeviceAmrFieldLevelView view,
+ 			Real h,int level_offset,const unsigned char* active,const unsigned char* cut_face_mask,
+@@ -785,7 +805,37 @@
+ 		const CompositeAmrPressureSystem& system,
+ 		const std::vector<CompositeEbMomentumRegularConnection>& compact_regular)
+ 	{
+-		if(!system.hierarchy)throw std::invalid_argument("cell gradient topology requires a hierarchy");CompositeCellGradientTopology out;out.special_mask.assign(system.storage_size,0);out.compact_plus.assign(system.storage_size,0);for(int q=0;q<system.storage_size;++q)if(system.active[q]&&system.cut_face_mask[q])out.special_mask[q]=1;auto mark=[&](int q){if(q>=0&&q<system.storage_size&&system.active[q])out.special_mask[q]=1;};for(const auto& connection:compact_regular){mark(connection.lower_dof);mark(connection.upper_dof);out.compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);}for(const auto& connection:system.coarse_fine){mark(connection.coarse_dof);mark(connection.fine_dof);}for(const auto& connection:system.embedded){mark(connection.coarse_dof);mark(connection.fine_dof);}for(const auto& patch:system.surface_patches){mark(patch.plus_dof);mark(patch.minus_dof);}out.special_index.assign(system.storage_size,-1);for(int q=0;q<system.storage_size;++q)if(out.special_mask[q]){out.special_index[q]=static_cast<int>(out.special_dof.size());out.special_dof.push_back(q);}std::vector<double> normal_matrix(out.special_dof.size()*9,0);auto add_incidence=[&](int node,int neighbor,double area){const int special=out.special_index[node];if(special<0)return;const Vec3d displacement=system.centroid[neighbor]-system.centroid[node];const double distance2=length2(displacement);if(!(area>0)||!(distance2>1e-20))throw std::runtime_error("invalid cell gradient incidence geometry");const double weight=area/distance2;out.incidence_special.push_back(special);out.incidence_neighbor.push_back(neighbor);out.incidence_weighted_displacement.insert(out.incidence_weighted_displacement.end(),{weight*displacement.x,weight*displacement.y,weight*displacement.z});for(int row=0;row<3;++row)for(int column=0;column<3;++column)normal_matrix[special*9+row*3+column]+=weight*displacement[row]*displacement[column];};auto add_connection=[&](int a,int b,double area){if(a<0||b<0||a>=system.storage_size||b>=system.storage_size||a==b||!system.active[a]||!system.active[b])throw std::runtime_error("invalid cell gradient connection a="+std::to_string(a)+" b="+std::to_string(b)+" storage="+std::to_string(system.storage_size));add_incidence(a,b,area);add_incidence(b,a,area);};const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index){const AmrLevel& level=hierarchy.levels()[level_index];const int offset=system.level_offset[level_index];const double area=level.h*level.h;for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick){const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=offset+brick*cells+i+bs*(j+bs*k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if((system.cut_face_mask[a]&(1u<<axis))||(out.compact_plus[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}const int b=offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(system.active[b]&&(out.special_mask[a]||out.special_mask[b]))add_connection(a,b,area);}}}}for(const auto& connection:compact_regular)add_connection(connection.lower_dof,connection.upper_dof,connection.open_area);auto add_special=[&](const CoarseFinePressureConnection& connection){if(system.active[connection.coarse_dof]&&system.active[connection.fine_dof])add_connection(connection.coarse_dof,connection.fine_dof,connection.open_area);};for(const auto& connection:system.coarse_fine)add_special(connection);for(const auto& connection:system.embedded)add_special(connection);out.inverse.resize(out.special_dof.size()*9);for(int special=0;special<static_cast<int>(out.special_dof.size());++special)cell_symmetric_pseudoinverse_3x3(normal_matrix.data()+special*9,out.inverse.data()+special*9);return out;
++		if(!system.hierarchy)throw std::invalid_argument("cell gradient topology requires a hierarchy");CompositeCellGradientTopology out;out.special_mask.assign(system.storage_size,0);out.compact_plus.assign(system.storage_size,0);for(int q=0;q<system.storage_size;++q)if(system.active[q]&&system.cut_face_mask[q])out.special_mask[q]=1;auto mark=[&](int q){if(q>=0&&q<system.storage_size&&system.active[q])out.special_mask[q]=1;};for(const auto& connection:compact_regular){mark(connection.lower_dof);mark(connection.upper_dof);out.compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);}for(const auto& connection:system.coarse_fine){mark(connection.coarse_dof);mark(connection.fine_dof);}for(const auto& connection:system.embedded){mark(connection.coarse_dof);mark(connection.fine_dof);}for(const auto& patch:system.surface_patches){mark(patch.plus_dof);mark(patch.minus_dof);}out.special_index.assign(system.storage_size,-1);for(int q=0;q<system.storage_size;++q)if(out.special_mask[q]){out.special_index[q]=static_cast<int>(out.special_dof.size());out.special_dof.push_back(q);}std::vector<double> normal_matrix(out.special_dof.size()*9,0);auto add_incidence=[&](int node,int neighbor,double area){const int special=out.special_index[node];if(special<0)return;const Vec3d displacement=system.centroid[neighbor]-system.centroid[node];const double distance2=length2(displacement);if(!(area>0)||!(distance2>1e-20))throw std::runtime_error("invalid cell gradient incidence geometry");const double weight=area/distance2;out.incidence_special.push_back(special);out.incidence_neighbor.push_back(neighbor);out.incidence_weighted_displacement.insert(out.incidence_weighted_displacement.end(),{weight*displacement.x,weight*displacement.y,weight*displacement.z});for(int row=0;row<3;++row)for(int column=0;column<3;++column)normal_matrix[special*9+row*3+column]+=weight*displacement[row]*displacement[column];};auto add_connection=[&](int a,int b,double area){if(a<0||b<0||a>=system.storage_size||b>=system.storage_size||a==b||!system.active[a]||!system.active[b])throw std::runtime_error("invalid cell gradient connection a="+std::to_string(a)+" b="+std::to_string(b)+" storage="+std::to_string(system.storage_size));add_incidence(a,b,area);add_incidence(b,a,area);};const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index){const AmrLevel& level=hierarchy.levels()[level_index];const int offset=system.level_offset[level_index];const double area=level.h*level.h;for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick){const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=offset+brick*cells+i+bs*(j+bs*k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if((system.cut_face_mask[a]&(1u<<axis))||(out.compact_plus[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}const int b=offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(system.active[b]&&(out.special_mask[a]||out.special_mask[b]))add_connection(a,b,area);}}}}for(const auto& connection:compact_regular)add_connection(connection.lower_dof,connection.upper_dof,connection.open_area);auto add_special=[&](const CoarseFinePressureConnection& connection){if(system.active[connection.coarse_dof]&&system.active[connection.fine_dof])add_connection(connection.coarse_dof,connection.fine_dof,connection.open_area);};for(const auto& connection:system.coarse_fine)add_special(connection);for(const auto& connection:system.embedded)add_special(connection);out.inverse.resize(out.special_dof.size()*9);for(int special=0;special<static_cast<int>(out.special_dof.size());++special)cell_symmetric_pseudoinverse_3x3(normal_matrix.data()+special*9,out.inverse.data()+special*9);// Reuse the pressure topology's checked, same-fluid least-squares support.
++        // A one-ring velocity fit can be rank deficient on thin fragments even
++        // when its pseudoinverse is finite. The pressure builder expands the
++        // support until all represented directions are resolved.
++        std::vector<int> checked_node(system.storage_size,-1);
++        for(std::size_t node=0;node<system.pressure_gradient_dof.size();++node)
++            checked_node[system.pressure_gradient_dof[node]]=static_cast<int>(node);
++        std::vector<int> checked_special,checked_neighbor;
++        std::vector<double> checked_weight;
++        for(std::size_t edge=0;edge<out.incidence_special.size();++edge)
++        {
++            const int special=out.incidence_special[edge];
++            if(checked_node[out.special_dof[special]]>=0)continue;
++            checked_special.push_back(special);checked_neighbor.push_back(out.incidence_neighbor[edge]);
++            for(int axis=0;axis<3;++axis)checked_weight.push_back(out.incidence_weighted_displacement[3*edge+axis]);
++        }
++        for(int special=0;special<static_cast<int>(out.special_dof.size());++special)
++        {
++            const int node=checked_node[out.special_dof[special]];if(node<0)continue;
++            for(int row=0;row<3;++row)for(int column=0;column<3;++column)
++                out.inverse[9*special+3*row+column]=row==column?1:0;
++            for(int edge=system.pressure_gradient_offset[node];edge<system.pressure_gradient_offset[node+1];++edge)
++            {
++                checked_special.push_back(special);checked_neighbor.push_back(system.pressure_gradient_neighbour[edge]);
++                const auto w=system.pressure_gradient_weight[edge];
++                checked_weight.insert(checked_weight.end(),{w.x,w.y,w.z});
++            }
++        }
++        out.incidence_special=std::move(checked_special);out.incidence_neighbor=std::move(checked_neighbor);
++        out.incidence_weighted_displacement=std::move(checked_weight);
++        return out;
+ 	}
+ 
+ 	int composite_cell_neighbor_cpu(const CompositeAmrPressureSystem& system,
+@@ -969,7 +1019,33 @@
+ 	void reconstruct_composite_cell_fluxes_cpu(const CompositeAmrPressureSystem& system,
+ 		const CompositeCellMomentumState& state,AmrHostFields& fields,CompositeAmrFluxes& fluxes)
+ 	{
+-		if(!system.hierarchy||fields.levels().size()!=system.hierarchy->levels().size()||state.x.size()!=static_cast<std::size_t>(system.storage_size)||state.y.size()!=state.x.size()||state.z.size()!=state.x.size())throw std::invalid_argument("invalid composite cell flux reconstruction state");const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;fluxes=make_zero_composite_fluxes(system);const std::vector<CompositeEbMomentumRegularConnection> compact_regular=build_composite_eb_momentum_regular_connections(system);std::vector<unsigned char> compact_plus(system.storage_size,0);for(const auto& connection:compact_regular)compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);auto component=[&](int dof,int axis){return static_cast<double>(axis==0?state.x[dof]:(axis==1?state.y[dof]:state.z[dof]));};auto set_positive=[&](AmrHostLevelFields& value,int brick,int axis,int i,int j,int k,double face){if(axis==0)value.u[value.layout.u_index(brick,i+1,j,k)]=static_cast<Real>(face);else if(axis==1)value.v[value.layout.v_index(brick,i,j+1,k)]=static_cast<Real>(face);else value.w[value.layout.w_index(brick,i,j,k+1)]=static_cast<Real>(face);};auto set_mapped=[&](const AmrMacFaceAddress& face,double value){auto& level=fields.levels()[face.level];if(face.component==0)level.u[level.layout.u_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);else if(face.component==1)level.v[level.layout.v_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);else level.w[level.layout.w_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);};auto upper_weight=[&](int a,int b,int axis,const Vec3d& face){return composite_face_interpolation_weight(system.centroid[a],system.centroid[b],face,axis);};auto connection_value=[&](const CoarseFinePressureConnection& connection){const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,b=connection.direction>0?connection.fine_dof:connection.coarse_dof,axis=connection.axis;const double weight=upper_weight(a,b,axis,connection.face_centroid);return (1-weight)*component(a,axis)+weight*component(b,axis);};for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index){const AmrLevel& level=hierarchy.levels()[level_index];auto& values=fields.levels()[level_index];const int offset=system.level_offset[level_index];for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick){const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=offset+brick*cells+i+bs*(j+bs*k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if((system.cut_face_mask[a]&(1u<<axis))||(compact_plus[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}const int b=offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!system.active[b])continue;const double value=0.5*(component(a,axis)+component(b,axis));set_positive(values,brick,axis,i,j,k,value);if(other_brick!=brick){int lower[3]={c[0],c[1],c[2]};lower[axis]=-1;set_positive(values,other_brick,axis,lower[0],lower[1],lower[2],value);}}}}}for(const auto& connection:compact_regular){const AmrLevel& level=hierarchy.levels()[connection.face.level];const BrickMetadata& record=level.bricks[connection.face.brick];const int axis=connection.face.component;const Vec3d face=face_centre(record,level.h,axis,connection.face.i,connection.face.j,connection.face.k);const double weight=upper_weight(connection.lower_dof,connection.upper_dof,axis,face);set_mapped(connection.face,(1-weight)*component(connection.lower_dof,axis)+weight*component(connection.upper_dof,axis));}for(std::size_t edge=0;edge<system.coarse_fine.size();++edge)fluxes.coarse_fine_velocity[edge]=connection_value(system.coarse_fine[edge]);for(std::size_t edge=0;edge<system.embedded.size();++edge)fluxes.embedded_velocity[edge]=connection_value(system.embedded[edge]);
++		if(!system.hierarchy||fields.levels().size()!=system.hierarchy->levels().size()||state.x.size()!=static_cast<std::size_t>(system.storage_size)||state.y.size()!=state.x.size()||state.z.size()!=state.x.size())throw std::invalid_argument("invalid composite cell flux reconstruction state");const AmrHierarchy& hierarchy=*system.hierarchy;const int bs=system.brick_size,cells=bs*bs*bs;fluxes=make_zero_composite_fluxes(system);const std::vector<CompositeEbMomentumRegularConnection> compact_regular=build_composite_eb_momentum_regular_connections(system);std::vector<unsigned char> compact_plus(system.storage_size,0);for(const auto& connection:compact_regular)compact_plus[connection.lower_dof]|=static_cast<unsigned char>(1u<<connection.face.component);auto component=[&](int dof,int axis){return static_cast<double>(axis==0?state.x[dof]:(axis==1?state.y[dof]:state.z[dof]));};auto set_positive=[&](AmrHostLevelFields& value,int brick,int axis,int i,int j,int k,double face){if(axis==0)value.u[value.layout.u_index(brick,i+1,j,k)]=static_cast<Real>(face);else if(axis==1)value.v[value.layout.v_index(brick,i,j+1,k)]=static_cast<Real>(face);else value.w[value.layout.w_index(brick,i,j,k+1)]=static_cast<Real>(face);};auto set_mapped=[&](const AmrMacFaceAddress& face,double value){auto& level=fields.levels()[face.level];if(face.component==0)level.u[level.layout.u_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);else if(face.component==1)level.v[level.layout.v_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);else level.w[level.layout.w_index(face.brick,face.i,face.j,face.k)]=static_cast<Real>(value);};const auto gradients=build_composite_cell_gradient_topology(system,compact_regular);
++        std::vector<double> rhs(9*gradients.special_dof.size(),0),gradient(rhs.size(),0);
++        for(std::size_t edge=0;edge<gradients.incidence_special.size();++edge)
++        {
++            const int special=gradients.incidence_special[edge],node=gradients.special_dof[special],other=gradients.incidence_neighbor[edge];
++            for(int c=0;c<3;++c)for(int axis=0;axis<3;++axis)
++                rhs[9*special+3*c+axis]+=gradients.incidence_weighted_displacement[3*edge+axis]*(component(other,c)-component(node,c));
++        }
++        for(std::size_t q=0;q<gradients.special_dof.size();++q)
++            for(int c=0;c<3;++c)for(int row=0;row<3;++row)for(int column=0;column<3;++column)
++                gradient[9*q+3*c+row]+=gradients.inverse[9*q+3*row+column]*rhs[9*q+3*c+column];
++        auto upper_weight=[&](int a,int b,int axis,const Vec3d& face){return composite_face_interpolation_weight(system.centroid[a],system.centroid[b],face,axis);};
++        auto interpolated=[&](int a,int b,int axis,Vec3d face)
++        {
++            const double weight=upper_weight(a,b,axis,face);
++            const Vec3d skew=face-(system.centroid[a]*(1-weight)+system.centroid[b]*weight);
++            double correction[2]={0,0};
++            for(int side=0;side<2;++side)
++            {
++                const int special=gradients.special_index[side?b:a];if(special<0)continue;
++                for(int c=0;c<3;++c)correction[side]+=gradient[9*special+3*axis+c]*skew[c];
++            }
++            const double limited=correction[0]*correction[1]<=0?0:
++                std::copysign(std::min(std::abs(correction[0]),std::abs(correction[1])),correction[0]);
++            return (1-weight)*component(a,axis)+weight*component(b,axis)+limited;
++        };
++        auto connection_value=[&](const CoarseFinePressureConnection& connection){const int a=connection.direction>0?connection.coarse_dof:connection.fine_dof,b=connection.direction>0?connection.fine_dof:connection.coarse_dof,axis=connection.axis;return interpolated(a,b,axis,connection.face_centroid);};for(int level_index=0;level_index<static_cast<int>(hierarchy.levels().size());++level_index){const AmrLevel& level=hierarchy.levels()[level_index];auto& values=fields.levels()[level_index];const int offset=system.level_offset[level_index];for(int brick=0;brick<static_cast<int>(level.bricks.size());++brick){const BrickMetadata& record=level.bricks[brick];if(!record.active())continue;for(int k=0;k<bs;++k)for(int j=0;j<bs;++j)for(int i=0;i<bs;++i){const int a=offset+brick*cells+i+bs*(j+bs*k);if(!system.active[a])continue;for(int axis=0;axis<3;++axis){if((system.cut_face_mask[a]&(1u<<axis))||(compact_plus[a]&(1u<<axis)))continue;int c[3]={i,j,k},other_brick=brick;++c[axis];if(c[axis]>=bs){other_brick=record.same_level_neighbor[2*axis+1];if(other_brick<0||!level.bricks[other_brick].active())continue;c[axis]=0;}const int b=offset+other_brick*cells+c[0]+bs*(c[1]+bs*c[2]);if(!system.active[b])continue;const double value=0.5*(component(a,axis)+component(b,axis));set_positive(values,brick,axis,i,j,k,value);if(other_brick!=brick){int lower[3]={c[0],c[1],c[2]};lower[axis]=-1;set_positive(values,other_brick,axis,lower[0],lower[1],lower[2],value);}}}}}for(const auto& connection:compact_regular){const AmrLevel& level=hierarchy.levels()[connection.face.level];const BrickMetadata& record=level.bricks[connection.face.brick];const int axis=connection.face.component;const Vec3d face=face_centre(record,level.h,axis,connection.face.i,connection.face.j,connection.face.k);set_mapped(connection.face,interpolated(connection.lower_dof,connection.upper_dof,axis,face));}for(std::size_t edge=0;edge<system.coarse_fine.size();++edge)fluxes.coarse_fine_velocity[edge]=connection_value(system.coarse_fine[edge]);for(std::size_t edge=0;edge<system.embedded.size();++edge)fluxes.embedded_velocity[edge]=connection_value(system.embedded[edge]);
+ 	}
+ 
+ 	DeviceCompositeCellMomentumTransport::DeviceCompositeCellMomentumTransport(
+@@ -1244,80 +1320,40 @@
+ 	}
+ 
+ 	void DeviceCompositeCellMomentumTransport::reconstruct_fluxes(Real* coarse_fine_velocity,
+-		Real* embedded_velocity)
+-	{
+-		if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))throw std::invalid_argument("invalid composite cell momentum flux reconstruction");const int bs=system_->brick_size,cells=bs*bs*bs;for(int level=0;level<fields_->level_count();++level){const DeviceAmrFieldLevelView view=fields_->level_view(level);const int count=view.brick_count*cells;reconstruct_regular_cell_flux_kernel<<<(count+255)/256,256>>>(view,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_);}if(regular_count_){reconstruct_compact_cell_flux_kernel<<<(regular_count_+255)/256,256>>>(regular_a_,regular_b_,regular_axis_,regular_upper_weight_,x_,y_,z_,regular_velocity_,regular_count_);regular_face_map_->scatter(regular_velocity_);}if(coarse_fine_count_)reconstruct_compact_cell_flux_kernel<<<(coarse_fine_count_+255)/256,256>>>(coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_upper_weight_,x_,y_,z_,coarse_fine_velocity,coarse_fine_count_);if(embedded_count_)reconstruct_compact_cell_flux_kernel<<<(embedded_count_+255)/256,256>>>(embedded_a_,embedded_b_,embedded_axis_,embedded_upper_weight_,x_,y_,z_,embedded_velocity,embedded_count_);check(cudaDeviceSynchronize(),"reconstruct composite cell momentum fluxes");
+-	}
+-
+-	void DeviceCompositeCellMomentumTransport::restore_projected_fluxes(
+-		const Real* pressure,Real* coarse_fine_velocity,Real* embedded_velocity)
+-	{
+-		if(!pressure||!pressure_correction_ready_||
+-			(coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))
+-			throw std::invalid_argument("invalid pressure-consistent composite flux reconstruction");
+-		if(nonorthogonal_projection_&&pressure_gradient_node_count_)
+-			reconstruct_scalar_pressure_gradient_kernel<<<(pressure_gradient_node_count_+255)/256,256>>>(
+-				pressure_gradient_dof_,pressure_gradient_offset_,pressure_gradient_neighbour_,
+-				pressure_gradient_weight_,pressure,pressure_gradient_value_,pressure_gradient_node_count_);
+-		const int bs=system_->brick_size,cells=bs*bs*bs;
+-		for(int level=0;level<fields_->level_count();++level)
+-		{
+-			const DeviceAmrFieldLevelView view=fields_->level_view(level);
+-			const int count=view.brick_count*cells;
+-			const Real h=static_cast<Real>(system_->hierarchy->levels()[level].h);
+-			reconstruct_regular_pressure_consistent_flux_kernel<<<(count+255)/256,256>>>(
+-				view,h,system_->level_offset[level],active_,cut_face_mask_,compact_plus_mask_,
+-				x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,pressure,pressure_scale_);
+-		}
+-		auto nonorthogonal_compact=[&](int count,const int* a,const int* b,
+-			const std::int8_t* axis,const Real* area,const Real* conductance,
+-			const Real* weight,const Real* gradient_weight,const int* lower_node,
+-			const int* upper_node,const Real* correction,Real* velocity)
+-		{
+-			if(!count)return;
+-			if(nonorthogonal_projection_)
+-				reconstruct_nonorthogonal_pressure_consistent_flux_kernel<<<(count+255)/256,256>>>(
+-					a,b,axis,area,conductance,weight,gradient_weight,lower_node,upper_node,correction,
+-					pressure_gradient_value_,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,
+-					pressure,pressure_scale_,velocity,count);
+-			else reconstruct_compact_pressure_consistent_flux_kernel<<<(count+255)/256,256>>>(
+-				a,b,axis,area,conductance,weight,x_,y_,z_,baseline_x_,baseline_y_,baseline_z_,
+-				pressure,pressure_scale_,velocity,count);
+-		};
+-		if(regular_count_)
+-		{
+-			nonorthogonal_compact(regular_count_,regular_a_,regular_b_,regular_axis_,regular_area_,
+-				regular_conductance_,regular_upper_weight_,regular_pressure_upper_weight_,
+-				regular_lower_pressure_node_,regular_upper_pressure_node_,regular_pressure_correction_,
+-				regular_velocity_);
+-			regular_face_map_->scatter(regular_velocity_);
+-		}
+-		if(structured_pressure_correction_count_)
+-		{
+-			regular_pressure_correction_face_map_->gather(regular_pressure_correction_velocity_);
+-			add_pressure_consistent_flux_delta_kernel<<<(structured_pressure_correction_count_+255)/256,256>>>(
+-				structured_pressure_correction_lower_,structured_pressure_correction_upper_,
+-				structured_pressure_correction_two_point_delta_,
+-				structured_pressure_correction_lower_node_,structured_pressure_correction_upper_node_,
+-				structured_pressure_correction_vector_,structured_pressure_correction_upper_weight_,
+-				pressure_gradient_value_,pressure,pressure_scale_,
+-				regular_pressure_correction_velocity_,nonorthogonal_projection_,
+-				structured_pressure_correction_count_);
+-			regular_pressure_correction_face_map_->scatter(regular_pressure_correction_velocity_);
+-		}
+-		nonorthogonal_compact(coarse_fine_count_,coarse_fine_a_,coarse_fine_b_,
+-			coarse_fine_axis_,coarse_fine_area_,coarse_fine_conductance_,
+-			coarse_fine_upper_weight_,coarse_fine_pressure_upper_weight_,
+-			coarse_fine_lower_pressure_node_,
+-			coarse_fine_upper_pressure_node_,coarse_fine_pressure_correction_,
+-			coarse_fine_velocity);
+-		nonorthogonal_compact(embedded_count_,embedded_a_,embedded_b_,embedded_axis_,
+-			embedded_area_,embedded_conductance_,embedded_upper_weight_,
+-			embedded_pressure_upper_weight_,
+-			embedded_lower_pressure_node_,embedded_upper_pressure_node_,
+-			embedded_pressure_correction_,embedded_velocity);
+-		check(cudaDeviceSynchronize(),"reconstruct pressure-consistent composite cell fluxes");
+-	}
++        Real* embedded_velocity)
++    {
++        if((coarse_fine_count_&&!coarse_fine_velocity)||(embedded_count_&&!embedded_velocity))
++            throw std::invalid_argument("invalid composite cell momentum flux reconstruction");
++        if(gradient_special_count_)
++        {
++            check(cudaMemset(gradient_rhs_,0,static_cast<std::size_t>(gradient_special_count_)*9*sizeof(Real)),"clear flux reconstruction gradient rhs");
++            if(gradient_incidence_count_)
++                accumulate_special_cell_gradient_kernel<<<(gradient_incidence_count_+255)/256,256>>>(
++                    gradient_incidence_special_,gradient_special_dof_,gradient_incidence_neighbor_,
++                    gradient_incidence_weighted_displacement_,x_,y_,z_,gradient_rhs_,gradient_incidence_count_);
++            solve_special_cell_gradient_kernel<<<(gradient_special_count_+255)/256,256>>>(
++                gradient_inverse_,gradient_rhs_,gradient_value_,gradient_special_count_);
++        }
++        const int bs=system_->brick_size,cells=bs*bs*bs;
++        for(int level=0;level<fields_->level_count();++level)
++        {
++            const auto view=fields_->level_view(level);const int count=view.brick_count*cells;
++            reconstruct_regular_cell_flux_kernel<<<(count+255)/256,256>>>(view,system_->level_offset[level],
++                active_,cut_face_mask_,compact_plus_mask_,x_,y_,z_);
++        }
++        auto reconstruct=[&](int count,const int* a,const int* b,const std::int8_t* axis,
++            const Real* weight,const Real* displacement,Real* velocity)
++        {
++            if(count)reconstruct_compact_cell_flux_kernel<<<(count+255)/256,256>>>(
++                a,b,axis,weight,x_,y_,z_,gradient_node_index_,gradient_value_,displacement,velocity,count);
++        };
++        reconstruct(regular_count_,regular_a_,regular_b_,regular_axis_,regular_upper_weight_,regular_face_displacement_,regular_velocity_);
++        if(regular_count_)regular_face_map_->scatter(regular_velocity_);
++        reconstruct(coarse_fine_count_,coarse_fine_a_,coarse_fine_b_,coarse_fine_axis_,coarse_fine_upper_weight_,coarse_fine_face_displacement_,coarse_fine_velocity);
++        reconstruct(embedded_count_,embedded_a_,embedded_b_,embedded_axis_,embedded_upper_weight_,embedded_face_displacement_,embedded_velocity);
++        check(cudaDeviceSynchronize(),"reconstruct composite cell momentum fluxes");
++    }
++
+ 
+ 	std::array<double,3> DeviceCompositeCellMomentumTransport::momentum()const
+ 	{
+--- a/src/core/fluid/amr_advection.h
++++ b/src/core/fluid/amr_advection.h
+@@ -298,17 +298,10 @@
+ 		void apply_pressure_impulse(const Real* pressure, Real dt, Real density,
+ 			bool include_physical_boundaries = true);
+ 		void apply_projected_pressure_gradient(const Real* pressure, Real dt, Real density);
+-		// Reconstruct normal mass-flux velocities on every open connection. Physical
++		// Reconstruct normal mass-flux velocities with limited, affine-consistent
++        // transverse corrections at cut/AMR face centroids. Physical
+ 		// domain boundary values remain the caller's external-BC responsibility.
+ 		void reconstruct_fluxes(Real* coarse_fine_velocity, Real* embedded_velocity);
+-		// Rhie-Chow-style reconstruction: remove the cell-averaged correction from the
+-		// previous projection and restore its exact face-normal pressure correction.
+-		// A projected steady state therefore reconstructs identically without retaining
+-		// unrelated face-only aperture modes.
+-		// Restore the already-projected face state after a cell pressure impulse.
+-        // This is not the pressure-free predictor for a new absolute-pressure solve.
+-        void restore_projected_fluxes(const Real* pressure,
+-			Real* coarse_fine_velocity, Real* embedded_velocity);
+ 		std::array<double, 3> momentum() const;
+ 		int regular_compact_connection_count() const { return regular_count_; }
+ 		int embedded_connection_count() const { return embedded_count_; }
+--- a/tools/physics_contract_probe.cpp
++++ b/tools/physics_contract_probe.cpp
+@@ -146,7 +146,30 @@
+                 const auto lower=bvh.intersect_segment(lo,hi),upper=bvh.intersect_segment(hi,lo);
+                 if(lower.hit&&upper.hit)std::fprintf(output,"%.17g,%.17g,%.17g\n",x,lower.position.z,upper.position.z);
+             }
+-            std::fclose(output);std::puts("[contracts] wrote review/planb-neutral-section.csv");return 0;
++            std::fclose(output);
++            // Preserve overhangs/intake details for an independent section solver.
++            // Vertical lower/upper envelopes above are only a plotting diagnostic.
++            output=std::fopen("review/planb-neutral-section-segments.csv","w");
++            require(output,"could not write section segments");
++            std::fprintf(output,"x0,z0,x1,z1,face\n");
++            for(std::size_t triangle=0;triangle<wing.triangle_count();++triangle)
++            {
++                Vec3d vertex[3],hit[3];int count=0;
++                for(int c=0;c<3;++c)
++                {
++                    const auto p=wing.vertex_position_double(wing.indices[3*triangle+c]);
++                    vertex[c]={p[0],p[1],p[2]};
++                }
++                for(int c=0;c<3;++c)
++                {
++                    const Vec3d a=vertex[c],b=vertex[(c+1)%3];
++                    if((a.y<y&&b.y>=y)||(b.y<y&&a.y>=y))
++                        hit[count++]=a+(b-a)*((y-a.y)/(b.y-a.y));
++                }
++                if(count==2)std::fprintf(output,"%.17g,%.17g,%.17g,%.17g,%u\n",
++                    hit[0].x,hit[0].z,hit[1].x,hit[1].z,wing.source_face_ids[triangle]);
++            }
++            std::fclose(output);std::puts("[contracts] wrote neutral section envelopes and exact segments");return 0;
+         }
+         ExternalAeroExecutionOptions options;options.conservative_cell_momentum=cell_momentum;
+         options.closed_solid=planb?solid_source->placed(config.placement):
+@@ -249,6 +272,72 @@
+         std::printf("[contracts] pressure reaction relative error=%.9g\n",reaction_error);
+         require(reaction_error<2e-5,"pressure fluid impulse differs from surface reaction");
+ 
++        // Exercise the cell-momentum path itself. The original tiny-dt test
++        // below only exercised MAC aperture transport, even in --cell-momentum.
++        // With no flux and no pressure, any resolved velocity field must survive
++        // unchanged; small-cell stabilization must not erase its gradients.
++        CompositeCellMomentumState affine=cell_zero;
++        for(int q=0;q<system.storage_size;++q)if(system.active[q])
++        {
++            const Vec3d p=system.centroid[q]-centre;
++            affine.x[q]=Real(2+0.3*p.y-0.2*p.z);
++            affine.y[q]=Real(-0.4*p.x+0.1*p.z);
++            affine.z[q]=Real(0.2*p.x+0.3*p.y);
++        }
++        fields.upload(zero_fields);
++        projection.upload_special_fluxes(zero_flux);
++        projection.upload_pressure(std::vector<double>(system.storage_size,0));
++        auto cell_change=[&]()
++        {
++            CompositeCellMomentumState after;cells.download_state(after);double error=0;
++            for(int q=0;q<system.storage_size;++q)if(system.active[q])
++                error=std::max({error,std::abs(double(after.x[q])-affine.x[q]),
++                    std::abs(double(after.y[q])-affine.y[q]),std::abs(double(after.z[q])-affine.z[q])});
++            return error;
++        };
++        double no_op_error=0;
++        for(const char* operation:{"zero-flux transport","zero-pressure impulse","tiny-dt diffusion","tiny-dt wall"})
++        {
++            cells.upload_state(affine);
++            if(std::string(operation)=="zero-flux transport")
++                cells.step(projection.coarse_fine_velocity_device(),projection.embedded_velocity_device(),Real(1e-12),false);
++            else if(std::string(operation)=="zero-pressure impulse")
++                cells.apply_projected_pressure_gradient(projection.pressure(),Real(1e-12),rho);
++            else if(std::string(operation)=="tiny-dt diffusion")cells.diffuse(Real(1.5e-5),Real(1e-12));
++            else cells.apply_smooth_fabric_wall_model(Real(1e-12),Real(1.5e-5));
++            const double change=cell_change();no_op_error=std::max(no_op_error,change);
++            std::printf("[contracts] cell %s affine change=%.9g m/s\n",operation,change);
++        }
++        require(no_op_error<1e-5,"cell stabilization erases velocity gradients without a physical impulse");
++
++        auto expected_velocity=[&](Vec3d p)
++        {
++            p=p-centre;return Vec3d{2+0.3*p.y-0.2*p.z,-0.4*p.x+0.1*p.z,0.2*p.x+0.3*p.y};
++        };
++        cells.upload_state(affine);
++        cells.reconstruct_fluxes(projection.coarse_fine_velocity_device(),projection.embedded_velocity_device());
++        CompositeAmrFluxes reconstructed;projection.download_special_fluxes(reconstructed);
++        auto flux_error=[&](const CompositeAmrFluxes& flux)
++        {
++            double error=0;
++            auto check_edges=[&](const auto& edges,const auto& values)
++            {
++                for(std::size_t edge=0;edge<edges.size();++edge)
++                {
++                    const double exact=expected_velocity(edges[edge].face_centroid)[edges[edge].axis];
++                    require(std::isfinite(values[edge]),"nonfinite affine reconstructed flux");
++                    error=std::max(error,std::abs(values[edge]-exact));
++                }
++            };
++            check_edges(system.coarse_fine,flux.coarse_fine_velocity);
++            check_edges(system.embedded,flux.embedded_velocity);return error;
++        };
++        const double gpu_flux_error=flux_error(reconstructed);
++        reconstruct_composite_cell_fluxes_cpu(system,affine,zero_fields,reconstructed);
++        const double cpu_flux_error=flux_error(reconstructed);
++        std::printf("[contracts] affine velocity reconstruction error GPU=%.9g CPU=%.9g m/s\n",gpu_flux_error,cpu_flux_error);
++        require(std::max(gpu_flux_error,cpu_flux_error)<1e-5,"cell-to-face reconstruction destroys affine velocity");
++
+         require(core.initialize().pressure.converged,"production initialization did not converge");
+         const int evolved_steps=cell_momentum?64:8;
+         for(int stage=0;stage<2;++stage)

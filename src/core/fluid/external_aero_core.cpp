@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <vector>
 
 namespace paracfd::core
@@ -76,7 +77,7 @@ namespace paracfd::core
 		hierarchy_=AmrHierarchy::build_static(automatic_flow_domain(wing,config_.domain),
 			wing,bvh,config_.amr,config_.domain.half_wing_symmetry);
 		report_stage("AMR hierarchy");
-		const bool full_nonorthogonal=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		const bool full_nonorthogonal=true;
 		const ExternalAeroGpuMemoryEstimate memory=estimate_external_aero_gpu_memory(
 			hierarchy_,use_conservative_cell_momentum_,full_nonorthogonal);
 		std::fprintf(stderr,"[gpu-memory-plan] stored-bricks=%zu structured-cells=%zu estimate=%.2f GiB%s",
@@ -96,7 +97,7 @@ namespace paracfd::core
 		EmbeddedBoundaryBuildOptions eb_options;
 		eb_options.min_volume_fraction=config_.amr.min_volume_fraction;
 		eb_options.retain_signed_bracketed_small_roots_for_face_state=
-			!use_conservative_cell_momentum_;
+			true;
 		eb_options.min_aperture_area_fraction=config_.amr.min_aperture_area_fraction;
 		eb_options.closed_solid=std::move(options.closed_solid);
 		embedded_boundary_=build_amr_embedded_boundary_atlas(hierarchy_,wing,bvh,eb_options);
@@ -197,6 +198,23 @@ namespace paracfd::core
 		pressure_options.pressure_outlet_xmax=true;
 		pressure_system_=build_composite_amr_pressure_system(
 			hierarchy_,embedded_boundary_,pressure_options);
+        const auto closure=composite_cell_pressure_closure_cpu(pressure_system_);
+        double closure_maximum=0;
+        for(int q=0;q<pressure_system_.storage_size;++q)if(pressure_system_.active[q])
+        {
+            const double defect=std::sqrt(length2(closure[q]));
+            if(!std::isfinite(defect))throw std::runtime_error("nonfinite cut-cell area-vector closure");
+            closure_maximum=std::max(closure_maximum,defect);
+        }
+        const double closure_tolerance=1e-7*hierarchy_.finest_cell_size()*hierarchy_.finest_cell_size();
+        if(closure_maximum>closure_tolerance)
+        {
+            std::ostringstream message;message.precision(9);
+            message<<"cut-cell area vectors do not close; maximum defect="<<closure_maximum
+                <<" m2, tolerance="<<closure_tolerance<<" m2; correct geometry before stepping";
+            throw std::runtime_error(message.str());
+        }
+        std::fprintf(stderr,"[geometry-contract] maximum area-vector closure defect %.12g m2\n",closure_maximum);
 		report_stage("pressure topology");
 		(void)cuda_memory_info(cuda_baseline,nullptr);
 		fields_=std::make_unique<DeviceAmrFields>(hierarchy_);
@@ -206,7 +224,8 @@ namespace paracfd::core
 		report_stage("GPU projection setup");
 		report_cuda_memory("projection");
 		if(use_conservative_cell_momentum_)
-			cell_momentum_=std::make_unique<DeviceCompositeCellMomentumTransport>(pressure_system_,*fields_);
+			cell_momentum_=std::make_unique<DeviceCompositeCellMomentumTransport>(pressure_system_,*fields_,
+				config_.amr.min_volume_fraction);
 		else
 			advection_=std::make_unique<DeviceAmrAdvection>(hierarchy_,bvh,2.5,&pressure_system_);
 		report_stage(use_conservative_cell_momentum_?"GPU cell momentum setup":"GPU MAC advection setup");
@@ -290,13 +309,19 @@ namespace paracfd::core
 		const double cfl_rate=cell_momentum_?std::max({1e-9,std::abs(config_.freestream.speed)/h,cell_outflow_rate}):std::max({1e-9,std::abs(config_.freestream.speed)/h,mass_flux_maximum/h,embedded_cfl_rate}),dt_value=config_.solver.cfl/cfl_rate,cfl_velocity=cfl_rate*h;const Real dt=static_cast<Real>(dt_value),nu=static_cast<Real>(config_.freestream.nu),cs=static_cast<Real>(config_.solver.smagorinsky_cs),speed=static_cast<Real>(config_.freestream.speed),rho=static_cast<Real>(config_.freestream.rho);
 		const auto step_begin=std::chrono::steady_clock::now(),advection_begin=step_begin;ExternalAeroStepStats stats;
 		auto advection_end=step_begin,turbulence_end=step_begin,embedded_transport_end=step_begin;
+        // Nonincremental projection: u* = u^n + dt R(u^n), then solve for
+        // the complete new pressure and apply its impulse once. Re-inserting
+        // the previous pressure's face-minus-cell correction into I(u*) mixes
+        // an incremental predictor with an absolute-pressure solve and applies
+        // an extra pressure-dependent forcing every timestep.
 		if(cell_momentum_)
 		{
-			cell_momentum_->step(projection_->coarse_fine_velocity_device(),projection_->embedded_velocity_device(),dt,true,speed);advection_end=std::chrono::steady_clock::now();cell_momentum_->diffuse_smagorinsky(nu,cs,dt);const double diffusion_rate=cell_momentum_->last_diffusion_rate();const int diffusion_substeps=cell_momentum_->last_diffusion_substeps();turbulence_end=std::chrono::steady_clock::now();if(enable_smooth_fabric_wall_){cell_momentum_->apply_smooth_fabric_wall_model(dt,nu);smooth_fabric_wall_applied_=true;}cell_momentum_->reconstruct_pressure_consistent_fluxes(projection_->pressure(),projection_->coarse_fine_velocity_device(),projection_->embedded_velocity_device());fields_->apply_external_aero_boundaries(speed);embedded_transport_end=std::chrono::steady_clock::now();stats=project(true,dt_value,false);stats.max_diffusion_rate=diffusion_rate;stats.diffusion_substeps=diffusion_substeps;if(enable_pressure_impulse_&&stats.pressure.converged)cell_momentum_->apply_projected_pressure_gradient(projection_->pressure(),dt,rho);
+			cell_momentum_->step(projection_->coarse_fine_velocity_device(),projection_->embedded_velocity_device(),dt,true,speed);advection_end=std::chrono::steady_clock::now();cell_momentum_->diffuse_smagorinsky(nu,cs,dt);const double diffusion_rate=cell_momentum_->last_diffusion_rate();const int diffusion_substeps=cell_momentum_->last_diffusion_substeps();turbulence_end=std::chrono::steady_clock::now();if(enable_smooth_fabric_wall_){cell_momentum_->apply_smooth_fabric_wall_model(dt,nu);smooth_fabric_wall_applied_=true;}cell_momentum_->reconstruct_fluxes(projection_->coarse_fine_velocity_device(),projection_->embedded_velocity_device());fields_->apply_external_aero_boundaries(speed);embedded_transport_end=std::chrono::steady_clock::now();stats=project(true,dt_value,false);stats.max_diffusion_rate=diffusion_rate;stats.diffusion_substeps=diffusion_substeps;if(enable_pressure_impulse_&&stats.pressure.converged)cell_momentum_->apply_projected_pressure_gradient(projection_->pressure(),dt,rho);
 		}
 		else
 		{
-			advection_->advect(*fields_,dt);advection_end=std::chrono::steady_clock::now();advection_->diffuse_smagorinsky(*fields_,nu,cs,dt);turbulence_end=std::chrono::steady_clock::now();fields_->apply_external_aero_boundaries(speed);projection_->transport_embedded_apertures(dt,nu,cs,false);if(enable_smooth_fabric_wall_){projection_->apply_smooth_fabric_wall_model(dt,nu);smooth_fabric_wall_applied_=true;}embedded_transport_end=std::chrono::steady_clock::now();stats=project(true,dt_value);
+			advection_->advect(*fields_,dt);
+			advection_end=std::chrono::steady_clock::now();advection_->diffuse_smagorinsky(*fields_,nu,cs,dt);turbulence_end=std::chrono::steady_clock::now();fields_->apply_external_aero_boundaries(speed);projection_->transport_embedded_apertures(dt,nu,cs,false);if(enable_smooth_fabric_wall_){projection_->apply_smooth_fabric_wall_model(dt,nu);smooth_fabric_wall_applied_=true;}embedded_transport_end=std::chrono::steady_clock::now();stats=project(true,dt_value);
 		}
 		const auto step_end=std::chrono::steady_clock::now();
 		stats.max_abs_regular_velocity=regular_maximum;stats.max_abs_special_velocity=special_maximum;stats.max_embedded_cfl_rate=embedded_cfl_rate;stats.max_abs_velocity=std::max(regular_maximum,special_maximum);stats.cfl_velocity=cfl_velocity;stats.effective_cfl=cfl_rate*dt_value;stats.advection_ms=elapsed_ms(advection_begin,advection_end);stats.turbulence_ms=elapsed_ms(advection_end,turbulence_end);stats.embedded_transport_ms=elapsed_ms(turbulence_end,embedded_transport_end);stats.les_applied=true;stats.embedded_transport_applied=true;stats.smooth_fabric_wall_applied=smooth_fabric_wall_applied_;stats.gpu_step_ms=elapsed_ms(step_begin,step_end);if(stats.pressure.converged)physical_time_+=stats.dt;stats.physical_time=physical_time_;return stats;

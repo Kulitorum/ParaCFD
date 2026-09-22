@@ -13,6 +13,7 @@ Experiments/
 *.pvd
 *.csv
 !configs/**/*.csv
+!review/*.csv
 
 # Saved scenes / checkpoints (large binary sim snapshots — see src/gui/scene_io)
 *.scn
@@ -44,3 +45,8 @@ Thumbs.db
 Desktop.ini
 *.swp
 *~
+
+# Local Python caches and source backups recovered from old build folders
+__pycache__/
+*.py[cod]
+review/preserved-build-files/

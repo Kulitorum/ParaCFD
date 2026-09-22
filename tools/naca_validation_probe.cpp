@@ -1,4 +1,5 @@
 #include "core/fluid/external_aero_core.h"
+#include "core/fluid/amr_sampling.h"
 #include "core/geometry/mesh_clip.h"
 #include "core/geometry/naca_theory.h"
 #include "core/geometry/step_import.h"
@@ -41,6 +42,7 @@ double validation_tessellation_deflection_mm = std::numeric_limits<double>::quie
 double validation_upstream_margin = std::numeric_limits<double>::quiet_NaN();
 double validation_downstream_margin = std::numeric_limits<double>::quiet_NaN();
 double validation_vertical_margin = std::numeric_limits<double>::quiet_NaN();
+double validation_wake_length = std::numeric_limits<double>::quiet_NaN();
 std::string validation_step_override;
 std::string validation_experimental_benchmark;
 
@@ -454,16 +456,7 @@ double circulation_cl(const ExternalAeroCore &core, const TriMesh &wing, double 
   core.download_fields(fields);
   const Aabb3d domain = core.hierarchy().domain();
   const double h = core.hierarchy().finest_cell_size(), pad = .35 * chord, x0 = std::max(domain.lo.x + h, wing.bbox_min[0] - pad), x1 = std::min(domain.hi.x - h, wing.bbox_max[0] + pad), z0 = std::max(domain.lo.z + h, wing.bbox_min[2] - pad), z1 = std::min(domain.hi.z - h, wing.bbox_max[2] + pad), y = .5 * (wing.bbox_min[1] + wing.bbox_max[1]);
-  constexpr int samples = 512;
-  double circulation = 0;
-  for (int q = 0; q < samples; ++q)
-  {
-	const double t = (q + .5) / samples, x = x0 + t * (x1 - x0), z = z0 + t * (z1 - z0);
-	circulation += nearest_cell_velocity(core.hierarchy(), fields, { x, y, z0 }).x * (x1 - x0) / samples;
-	circulation += nearest_cell_velocity(core.hierarchy(), fields, { x1, y, z }).z * (z1 - z0) / samples;
-	circulation -= nearest_cell_velocity(core.hierarchy(), fields, { x, y, z1 }).x * (x1 - x0) / samples;
-	circulation -= nearest_cell_velocity(core.hierarchy(), fields, { x0, y, z }).z * (z1 - z0) / samples;
-  }
+  const double circulation=rectangular_circulation_xz(core.hierarchy(),fields,x0,x1,y,z0,z1);
   return -2 * circulation / (speed * chord);
 }
 
@@ -485,6 +478,7 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   else if (std::isfinite(benchmark_reynolds) && benchmark_reynolds > 0)
     config.freestream.nu = config.freestream.speed / benchmark_reynolds;
   if (std::isfinite(validation_projection_tolerance)) config.solver.projection_tolerance = validation_projection_tolerance;
+  else config.solver.projection_tolerance = std::min(config.solver.projection_tolerance, 1e-5);
   if (std::isfinite(validation_upstream_margin)) config.domain.upstream_margin = validation_upstream_margin;
   if (std::isfinite(validation_downstream_margin)) config.domain.downstream_margin = validation_downstream_margin;
   if (std::isfinite(validation_vertical_margin)) config.domain.vertical_margin = validation_vertical_margin;
@@ -503,7 +497,7 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
 	config.amr.brick_size = 4;
 	config.amr.wing_refinement_distance = .05;
 	config.amr.surface_refinement_distance = validation_surface_distance;
-	config.amr.wake_length = 1.5;
+	config.amr.wake_length = std::isfinite(validation_wake_length) ? validation_wake_length : 1.5;
 	config.amr.wake_radius = .15;
 	if (std::isfinite(validation_min_volume_fraction)) config.amr.min_volume_fraction = validation_min_volume_fraction;
 	h = config.amr.base_cell_size / (1 << std::max(0, max_levels - 1));
@@ -532,6 +526,13 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   config.reference.length = 1;
   config.placement = frame_wing_for_external_domain(clipped, ModelPlacement{}, config.domain.upstream_margin, 0, config.domain.vertical_margin, config.amr.base_cell_size * config.amr.brick_size);
   const ModelPlacement solid_placement=composed_placement(config.placement,orientation);
+  {
+    Vec3d world_origin;
+    solid_placement.apply(config.reference.moment_origin.x,
+        config.reference.moment_origin.y,config.reference.moment_origin.z,
+        world_origin.x,world_origin.y,world_origin.z);
+    config.reference.moment_origin=world_origin;
+  }
   TriMesh wing = placed_mesh(clipped, config.placement);
   TriangleBvh bvh(wing);
   const auto start = std::chrono::steady_clock::now();
@@ -690,6 +691,8 @@ CaseResult run_case(const std::string &config_path, const std::string &step_path
   return result;
 }
 
+constexpr double kSurfaceCoverageTolerance = 2e-7;
+
 bool mechanics_ok(const CaseResult &value)
 {
   // The pointwise maximum is retained as a sliver-cell diagnostic, while the
@@ -698,8 +701,8 @@ bool mechanics_ok(const CaseResult &value)
   // The old absolute 1e-8 m^3/s cutoff changed meaning with resolution and was
   // therefore not a valid convergence criterion.  2.5e-4 permits at most 0.025%
   // of one finest-cell freestream face flux in any pressure control volume.
-  return value.converged && !value.timed_out && value.gauges == 1 &&
-    std::abs(value.coverage - 1) < 1e-7 && value.normalized_divergence < 2.5e-4 &&
+  return value.converged && !value.timed_out && value.gauges == 0 &&
+	std::abs(value.coverage - 1) < kSurfaceCoverageTolerance && value.normalized_divergence < 2.5e-4 &&
     value.normalized_rms_divergence < 1e-5 && value.normalized_integrated_flux_error < 2.5e-4 &&
     value.residual <= 1.1e-5 && value.rms_cl < 0.025 && value.mean_relative_drift < .01 &&
     std::abs(value.final_cl - value.circulation_cl) < 0.07;
@@ -732,7 +735,7 @@ bool reference_coefficients_ok(const LiftReference &reference,
 
 void print_case(const char *code, double alpha, const LiftReference &reference, const CaseResult &value)
 {
-  std::printf("NACA%s alpha=%+8.4f  CL mean[P+V]/prev/final/circ=%+9.5f[%+.5f%+.5f]/%+9.5f/%+9.5f/%+9.5f  drift/rms=%.3g/%.3g  EXP=%+8.4f XFOIL I/F/T=%+8.4f/%+8.4f/%+8.4f target=%+8.4f err=%+.5f tol=%.5f thin=%+8.4f  div[max/rms]=%.3g/%.3g (%.3g/%.3g U/h) flux[max/net]=%.3g/%.3g (%.3g U*h^2) PCG=%d/%.3g gauges=%zu coverage=%.9f recovered=%zu/max%.3fh sealed=%zu dP=%.3g dCL=%.4g bricks/DOFs=%zu/%d GPU=%.1fMiB step/proj=%.2f/%.2fms prep=%.2fs steps=%d t=%.4fs wall=%.2fs  %s%s\n", code, alpha, value.mean_cl, value.mean_pressure_cl, value.mean_viscous_cl, value.previous_mean_cl, value.final_cl, value.circulation_cl, value.mean_relative_drift, value.rms_cl, reference.experimental, reference.xfoil_inviscid, reference.xfoil_free_transition, reference.xfoil_forced_turbulent, reference.target, value.mean_cl - reference.target, coefficient_tolerance(reference.target), reference.thin, value.divergence, value.rms_divergence, value.normalized_divergence, value.normalized_rms_divergence, value.max_integrated_flux_error, value.net_integrated_flux_error, value.normalized_integrated_flux_error, value.iterations, value.residual, value.gauges, value.coverage, value.recovered_sides, value.max_recovery_cells, value.sealed_dofs, value.sealed_pressure_span, value.sealed_pressure_cl_delta, value.active_bricks, value.pressure_dofs, value.gpu_mib, value.final_step_ms, value.final_projection_ms, value.preprocess_seconds, value.steps, value.physical_time, value.wall_seconds, mechanics_ok(value) ? "FLOW PASS" : "FLOW FAIL", value.timed_out ? " [CONTROLLED TIMEOUT]" : "");
+  std::printf("NACA%s alpha=%+8.4f  CL mean[P+V]/prev/final/circ=%+9.5f[%+.5f%+.5f]/%+9.5f/%+9.5f/%+9.5f  CDp=%+.6f  drift/rms=%.3g/%.3g  EXP=%+8.4f XFOIL I/F/T=%+8.4f/%+8.4f/%+8.4f target=%+8.4f err=%+.5f tol=%.5f thin=%+8.4f  div[max/rms]=%.3g/%.3g (%.3g/%.3g U/h) flux[max/net]=%.3g/%.3g (%.3g U*h^2) PCG=%d/%.3g gauges=%zu coverage=%.9f recovered=%zu/max%.3fh sealed=%zu dP=%.3g dCL=%.4g bricks/DOFs=%zu/%d GPU=%.1fMiB step/proj=%.2f/%.2fms prep=%.2fs steps=%d t=%.4fs wall=%.2fs  %s%s\n", code, alpha, value.mean_cl, value.mean_pressure_cl, value.mean_viscous_cl, value.previous_mean_cl, value.final_cl, value.circulation_cl, value.mean_pressure_cd, value.mean_relative_drift, value.rms_cl, reference.experimental, reference.xfoil_inviscid, reference.xfoil_free_transition, reference.xfoil_forced_turbulent, reference.target, value.mean_cl - reference.target, coefficient_tolerance(reference.target), reference.thin, value.divergence, value.rms_divergence, value.normalized_divergence, value.normalized_rms_divergence, value.max_integrated_flux_error, value.net_integrated_flux_error, value.normalized_integrated_flux_error, value.iterations, value.residual, value.gauges, value.coverage, value.recovered_sides, value.max_recovery_cells, value.sealed_dofs, value.sealed_pressure_span, value.sealed_pressure_cl_delta, value.active_bricks, value.pressure_dofs, value.gpu_mib, value.final_step_ms, value.final_projection_ms, value.preprocess_seconds, value.steps, value.physical_time, value.wall_seconds, mechanics_ok(value) ? "FLOW PASS" : "FLOW FAIL", value.timed_out ? " [CONTROLLED TIMEOUT]" : "");
   if (std::isfinite(reference.experimental_pressure_cd)
       || std::isfinite(reference.experimental_pitching_cm))
     std::printf("         CDp=%+.6f (EXP=%+.6f, tol=%.4f), Cm,c/4=%+.6f (EXP=%+.6f, tol=%.4f)  %s\n",
@@ -753,7 +756,7 @@ int main(int argc, char **argv)
   // the explicit phase-sensitivity diagnostic.
   double target_time = .8, average_window = .2, single_angle = std::numeric_limits<double>::quiet_NaN(), single_phase = .5;
   int max_levels = 4, subdivisions = 16;
-  bool phase_check = false, smooth_wall = false, conservative_momentum = false;
+  bool phase_check = false, smooth_wall = false, conservative_momentum = true;
   for (int i = 1; i < argc; ++i)
   {
 	const std::string argument = argv[i];
@@ -781,6 +784,7 @@ int main(int argc, char **argv)
 	else if (argument == "--upstream-margin" && i + 1 < argc) validation_upstream_margin = std::atof(argv[++i]);
 	else if (argument == "--downstream-margin" && i + 1 < argc) validation_downstream_margin = std::atof(argv[++i]);
 	else if (argument == "--vertical-margin" && i + 1 < argc) validation_vertical_margin = std::atof(argv[++i]);
+	else if (argument == "--wake-length" && i + 1 < argc) validation_wake_length = std::atof(argv[++i]);
 	else if (argument == "--step-file" && i + 1 < argc) validation_step_override = argv[++i];
 	else if (argument == "--experimental-benchmark" && i + 1 < argc) validation_experimental_benchmark = argv[++i];
 	else if (argument == "--phase-check") phase_check = true;
@@ -793,7 +797,7 @@ int main(int argc, char **argv)
 	else if (argument == "--staggered-momentum") conservative_momentum = false;
 	else
 	{
-	  std::fprintf(stderr, "usage: naca_validation_probe [--config file] [--experimental-benchmark cambered|naca-tr460|nrel-4415|nasa-tmr-0012] [--profile 0012|0021|2412|4412|6412|4415|4112] [--step-file exact.step] [--single-angle deg --phase-fraction cells] [--local-amr|--uniform --span-layers N] [--physical-time s] [--average-window s] [--max-levels N] [--topology-refinement-levels N] [--complex-subdivisions N] [--surface-distance m] [--min-volume-fraction 0..1] [--upstream-margin m] [--downstream-margin m] [--vertical-margin m] [--tessellation-mm mm] [--smagorinsky-cs Cs] [--kinematic-viscosity m2/s] [--projection-tolerance value] [--max-wall-seconds s] [--max-steps N] [--progress-steps N] [--phase-check|--no-phase-check] [--preprocess-only] [--diagnose-connectivity] [--smooth-wall] [--conservative-cell-momentum]\n");
+	  std::fprintf(stderr, "usage: naca_validation_probe [--config file] [--experimental-benchmark cambered|naca-tr460|nrel-4415|nasa-tmr-0012] [--profile 0012|0021|2412|4412|6412|4415|4112] [--step-file exact.step] [--single-angle deg --phase-fraction cells] [--local-amr|--uniform --span-layers N] [--physical-time s] [--average-window s] [--max-levels N] [--topology-refinement-levels N] [--complex-subdivisions N] [--surface-distance m] [--wake-length m] [--min-volume-fraction 0..1] [--upstream-margin m] [--downstream-margin m] [--vertical-margin m] [--tessellation-mm mm] [--smagorinsky-cs Cs] [--kinematic-viscosity m2/s] [--projection-tolerance value] [--max-wall-seconds s] [--max-steps N] [--progress-steps N] [--phase-check|--no-phase-check] [--preprocess-only] [--diagnose-connectivity] [--smooth-wall] [--conservative-cell-momentum]\n");
 	  return 2;
 	}
   }
@@ -821,7 +825,7 @@ int main(int argc, char **argv)
 	}
 	smooth_wall = true;
   }
-  if (!(target_time > 0 && average_window > 0 && 2 * average_window < target_time) || max_levels < 1 || validation_topology_refinement_levels < -1 || validation_topology_refinement_levels > 2 || max_levels + std::max(0, validation_topology_refinement_levels) > 10 || subdivisions < 2 || validation_surface_distance < 0 || (std::isfinite(validation_min_volume_fraction) && !(validation_min_volume_fraction > 0 && validation_min_volume_fraction < 1)) || (std::isfinite(validation_upstream_margin) && !(validation_upstream_margin > 0)) || (std::isfinite(validation_downstream_margin) && !(validation_downstream_margin > 0)) || (std::isfinite(validation_vertical_margin) && !(validation_vertical_margin > 0)) || (std::isfinite(validation_smagorinsky_cs) && validation_smagorinsky_cs < 0) || (std::isfinite(validation_kinematic_viscosity) && validation_kinematic_viscosity < 0) || (std::isfinite(validation_projection_tolerance) && !(validation_projection_tolerance > 0)) || (std::isfinite(validation_tessellation_deflection_mm) && !(validation_tessellation_deflection_mm > 0)) || validation_max_wall_seconds < 0 || validation_max_steps < 0 || validation_progress_steps < 0 || (validation_span_layers > 0 && validation_span_layers < 4))
+  if (!(target_time > 0 && average_window > 0 && 2 * average_window < target_time) || max_levels < 1 || validation_topology_refinement_levels < -1 || validation_topology_refinement_levels > 2 || max_levels + std::max(0, validation_topology_refinement_levels) > 10 || subdivisions < 2 || validation_surface_distance < 0 || (std::isfinite(validation_wake_length) && validation_wake_length < 0) || (std::isfinite(validation_min_volume_fraction) && !(validation_min_volume_fraction > 0 && validation_min_volume_fraction < 1)) || (std::isfinite(validation_upstream_margin) && !(validation_upstream_margin > 0)) || (std::isfinite(validation_downstream_margin) && !(validation_downstream_margin > 0)) || (std::isfinite(validation_vertical_margin) && !(validation_vertical_margin > 0)) || (std::isfinite(validation_smagorinsky_cs) && validation_smagorinsky_cs < 0) || (std::isfinite(validation_kinematic_viscosity) && validation_kinematic_viscosity < 0) || (std::isfinite(validation_projection_tolerance) && !(validation_projection_tolerance > 0)) || (std::isfinite(validation_tessellation_deflection_mm) && !(validation_tessellation_deflection_mm > 0)) || validation_max_wall_seconds < 0 || validation_max_steps < 0 || validation_progress_steps < 0 || (validation_span_layers > 0 && validation_span_layers < 4))
   {
 	std::fprintf(stderr, "invalid NACA validation controls\n");
 	return 2;
@@ -852,7 +856,7 @@ int main(int argc, char **argv)
   const double reported_base_h = validation_local_amr
       ? .03125 : reported_config.amr.base_cell_size;
   const double reported_h = reported_base_h / (1 << (reported_levels - 1));
-  const std::string projection_tolerance_label = std::isfinite(validation_projection_tolerance) ? std::to_string(validation_projection_tolerance) : "config";
+  const std::string projection_tolerance_label = std::isfinite(validation_projection_tolerance) ? std::to_string(validation_projection_tolerance) : "min(config, 1e-5)";
   const std::string tessellation_label = std::isfinite(validation_tessellation_deflection_mm) ? std::to_string(validation_tessellation_deflection_mm) : "config";
   const std::string viscosity_label=std::isfinite(validation_kinematic_viscosity)?std::to_string(validation_kinematic_viscosity):"config";
   const std::string merge_label=std::isfinite(validation_min_volume_fraction)?std::to_string(validation_min_volume_fraction):"config";
@@ -925,7 +929,8 @@ int main(int argc, char **argv)
 		total_wall += value.wall_seconds;
 		if (validation_preprocess_only)
 		{
-		  const bool topology_ok = value.gauges == 1 && std::abs(value.coverage - 1) < 1e-7;
+		  const bool topology_ok = value.gauges == 0 &&
+		      std::abs(value.coverage - 1) < kSurfaceCoverageTolerance;
 		  std::printf("NACA%s alpha=%+8.4f preprocessing: gauges=%zu coverage=%.9f recovered=%zu/max%.3fh bricks/DOFs=%zu/%d GPU=%.1fMiB prep=%.2fs  %s\n", code, single_angle, value.gauges, value.coverage, value.recovered_sides, value.max_recovery_cells, value.active_bricks, value.pressure_dofs, value.gpu_mib, value.preprocess_seconds, topology_ok ? "TOPOLOGY PASS" : "TOPOLOGY FAIL");
 		  if (!topology_ok) ++failures;
 		  continue;

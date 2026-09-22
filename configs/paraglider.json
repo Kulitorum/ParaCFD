@@ -37,7 +37,7 @@
   "solver": {
     "cfl": 0.7,
     "smagorinsky_cs": 0.10,
-    "projection_tolerance": 1e-5,
+    "projection_tolerance": 5e-4,
     "projection_max_iterations": 600
   },
   "reference": {

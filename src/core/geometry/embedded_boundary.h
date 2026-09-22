@@ -125,6 +125,14 @@ namespace paracfd::core
 		FragmentRef fragment_b = invalid_fragment; // invalid at a physical boundary
 	};
 
+	struct BoundaryFaceAperture
+	{
+		FragmentRef fragment = invalid_fragment;
+		std::int8_t axis = 0, direction = 1; // outward axis normal
+		double area = 0;
+		Vec3d centroid{};
+	};
+
 	struct SurfacePatch
 	{
 		std::uint32_t source_triangle_id = 0;
@@ -159,6 +167,7 @@ namespace paracfd::core
 		std::vector<FluidFragment> fragments;
 		std::vector<FragmentConnection> connections; // only faces touching irregular topology
 		std::vector<FaceAperture> apertures;
+		std::vector<BoundaryFaceAperture> boundary_apertures;
 		std::vector<SurfacePatch> patches;
 		std::vector<ExactEbCellLocator> exact_locators;
 		std::vector<UnresolvedEbCell> unresolved;

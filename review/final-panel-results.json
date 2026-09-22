@@ -1,0 +1,110 @@
+[
+  {
+    "panels": 800,
+    "flow_degrees": -4,
+    "cl": -0.4825561563093177,
+    "cd_pressure": 3.311333674379385e-05,
+    "cl_circulation": -0.48301090094614735,
+    "source_flux": 0.0002389682935986917,
+    "residual": 2.55351295663786e-15,
+    "cp_min": -1.5374033950841466,
+    "cp_max": 0.9999938488444903,
+    "case": "NACA0012"
+  },
+  {
+    "panels": 800,
+    "flow_degrees": 0,
+    "cl": -8.511495273779562e-17,
+    "cd_pressure": 2.9471506152706387e-05,
+    "cl_circulation": 6.29367085447563e-17,
+    "source_flux": 0.00023955182981633046,
+    "residual": 1.5543122344752192e-15,
+    "cp_min": -0.4137321218879051,
+    "cp_max": 0.9991758825872391,
+    "case": "NACA0012"
+  },
+  {
+    "panels": 800,
+    "flow_degrees": 4,
+    "cl": 0.4825561563093178,
+    "cd_pressure": 3.311333674375916e-05,
+    "cl_circulation": 0.4830109009461475,
+    "source_flux": 0.0002389682935988216,
+    "residual": 4.0245584642661925e-15,
+    "cp_min": -1.5374033950841475,
+    "cp_max": 0.9999938488444903,
+    "case": "NACA0012"
+  },
+  {
+    "panels": 800,
+    "flow_degrees": 0,
+    "cl": 0.25883229133420366,
+    "cd_pressure": 2.1708497638952903e-05,
+    "cl_circulation": 0.25965756476462115,
+    "source_flux": 0.00023532891218968705,
+    "residual": 1.2212453270876722e-15,
+    "cp_min": -0.5742079045647213,
+    "cp_max": 0.9996922048707504,
+    "case": "NACA2412"
+  },
+  {
+    "panels": 800,
+    "flow_degrees": 4,
+    "cl": 0.7407556278433447,
+    "cd_pressure": -4.5673357930521574e-05,
+    "cl_circulation": 0.7420239198815403,
+    "source_flux": 0.0001538736752853906,
+    "residual": 8.7360674250192e-15,
+    "cp_min": -1.442676703355518,
+    "cp_max": 0.9998525659502565,
+    "case": "NACA2412"
+  },
+  {
+    "panels": 200,
+    "flow_degrees": 0,
+    "cl": -0.10442495304907742,
+    "cd_pressure": 0.004882850222964256,
+    "cl_circulation": -0.1046647510194289,
+    "source_flux": 0.0012909534372679068,
+    "residual": 9.992007221626409e-16,
+    "cp_min": -1.0544142184303666,
+    "cp_max": 0.998241009119647,
+    "case": "PlanB unchanged midspan, horizontal flow"
+  },
+  {
+    "panels": 400,
+    "flow_degrees": 0,
+    "cl": -0.10712441905015153,
+    "cd_pressure": 0.002519708253977316,
+    "cl_circulation": -0.1069762933850512,
+    "source_flux": 0.0005228968722559286,
+    "residual": 1.1102230246251565e-15,
+    "cp_min": -1.1277973262585572,
+    "cp_max": 0.9998638616977628,
+    "case": "PlanB unchanged midspan, horizontal flow"
+  },
+  {
+    "panels": 800,
+    "flow_degrees": 0,
+    "cl": -0.10836897461811944,
+    "cd_pressure": 0.0014727396721817135,
+    "cl_circulation": -0.10775086937591909,
+    "source_flux": 0.00016568021903516953,
+    "residual": 1.6653345369377348e-15,
+    "cp_min": -1.1656429745931742,
+    "cp_max": 0.9999466953494005,
+    "case": "PlanB unchanged midspan, horizontal flow"
+  },
+  {
+    "panels": 1600,
+    "flow_degrees": 0,
+    "cl": -0.10835100066974648,
+    "cd_pressure": 0.0007908789024981205,
+    "cl_circulation": -0.1080700005872677,
+    "source_flux": 3.94850775293058e-05,
+    "residual": 3.4416913763379853e-15,
+    "cp_min": -1.2434926129586406,
+    "cp_max": 0.9999960438713198,
+    "case": "PlanB unchanged midspan, horizontal flow"
+  }
+]

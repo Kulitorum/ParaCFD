@@ -46,6 +46,9 @@ namespace paracfd::core
 	struct AmrEmbeddedBoundaryAtlas
 	{
 		std::vector<AmrEbLevelAtlas> levels;
+		// Entire active bricks inside material need a mask even when their level
+		// has no surface atlas (e.g. a coarse brick enclosed by a large solid).
+		std::vector<std::vector<unsigned char>> solid_bricks;
 		std::size_t unresolved_count() const;
 		std::size_t owned_unresolved_count() const;
 		// Covered cells are retained as a one-cell topology halo. A rejection there

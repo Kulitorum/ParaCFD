@@ -387,14 +387,6 @@ namespace paracfd::core
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int lower=direction[edge]>0?node_a[edge]:node_b[edge],upper=direction[edge]>0?node_b[edge]:node_a[edge];const Real swept=dt*area[edge]*normal_velocity[edge],donor=swept>=Real(0)?lower:upper;for(int component=0;component<3;++component){const int source=donor*3+component,lower_slot=lower*3+component,upper_slot=upper*3+component;if(!(weight[source]>Real(0)&&weight[lower_slot]>Real(0)&&weight[upper_slot]>Real(0)))continue;const Real transfer=swept*sum[source]/weight[source];atomicAdd(momentum_delta+lower_slot,-transfer);atomicAdd(momentum_delta+upper_slot,transfer);}
 		}
-		__global__ void reconstruct_compatible_eb_kernel(const int* node_a,const int* node_b,const std::int8_t* axis,const Real* sum,const Real* weight,const Real* advected,Real* output,int count)
-		{
-			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int component=axis[edge],sa=node_a[edge]*3+component,sb=node_b[edge]*3+component;const Real wa=weight[sa],wb=weight[sb],current=advected[edge],ua=wa>Real(0)?sum[sa]/wa:current,ub=wb>Real(0)?sum[sb]/wb:current;output[edge]=Real(0.5)*(ua+ub);
-		}
-		__global__ void reconstruct_compatible_carrier_kernel(const DeviceCompositeAmrFluxLevelView* levels,const int* node,const int* level,const std::uint64_t* index,const std::int8_t* axis,const Real* sum,const Real* weight,int count)
-		{
-			const int q=blockIdx.x*blockDim.x+threadIdx.x;if(q>=count)return;const int slot=node[q]*3+axis[q];if(!(weight[slot]>Real(0)))return;Real* destination=axis[q]==0?levels[level[q]].fields.u:(axis[q]==1?levels[level[q]].fields.v:levels[level[q]].fields.w);const Real current=destination[index[q]],mean=sum[slot]/weight[slot];atomicAdd(destination+index[q],Real(0.5)*(mean-current));
-		}
 		__global__ void count_node_diffusion_neighbours_kernel(const int* node_a,const int* node_b,const Real* weight,Real* neighbour_count,int count)
 		{
 			const int edge=blockIdx.x*blockDim.x+threadIdx.x;if(edge>=count)return;const int a=node_a[edge],b=node_b[edge];for(int component=0;component<3;++component){const int sa=a*3+component,sb=b*3+component;if(weight[sa]>Real(0)&&weight[sb]>Real(0)){atomicAdd(neighbour_count+sa,Real(1));atomicAdd(neighbour_count+sb,Real(1));}}
@@ -844,12 +836,12 @@ namespace paracfd::core
 	DeviceCompositeAmrPressureSolver::DeviceCompositeAmrPressureSolver(const CompositeAmrPressureSystem& system):op_(system),n_(system.storage_size)
 	{
 		const auto solver_begin=std::chrono::steady_clock::now();
-		full_nonorthogonal_=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		full_nonorthogonal_=!system.pressure_gradient_dof.empty();
 		if(std::getenv("PARACFD_PRESSURE_TRACE"))trace_system_=&system;
 		const double diagnostic_gib=static_cast<double>(static_cast<std::size_t>(
 			2*gmres_restart_+1+2*gmres_recycle_capacity_)*n_*sizeof(PressureReal))/(1024.0*1024.0*1024.0);
-		std::fprintf(stderr,"[pressure-gpu-setup] solver begin: mode=%s; %s %.2f GiB diagnostic Krylov storage and irregular Schwarz\n",
-			full_nonorthogonal_?"full-nonorthogonal-diagnostic":"orthogonal-production",
+		std::fprintf(stderr,"[pressure-gpu-setup] solver begin: mode=%s; %s %.2f GiB Krylov storage\n",
+			full_nonorthogonal_?"corrected-FGMRES-MG":"orthogonal-PCG-MG",
 			full_nonorthogonal_?"enabling":"skipping",diagnostic_gib);
 		std::fflush(stderr);
 		if(!system.hierarchy||system.hierarchy->levels().empty()||system.preconditioner_aggregate.size()!=static_cast<std::size_t>(n_))throw std::invalid_argument("composite AMR solver geometric aggregation metadata");std::vector<double> diagonal_double;system.diagonal_cpu(diagonal_double);std::vector<PressureReal> diagonal(diagonal_double.size());for(std::size_t q=0;q<diagonal.size();++q)diagonal[q]=static_cast<PressureReal>(diagonal_double[q]);
@@ -890,7 +882,7 @@ namespace paracfd::core
 			std::fflush(stderr);
 		}
 		HostIrregularSchwarz schwarz;
-		if(full_nonorthogonal_)
+		if(std::getenv("PARACFD_PRESSURE_SCHWARZ_DIAGNOSTIC"))
 		{
 			std::fprintf(stderr,"[pressure-gpu-setup] building diagnostic irregular Schwarz factors...\n");
 			std::fflush(stderr);schwarz=build_irregular_schwarz(system);
@@ -1363,11 +1355,9 @@ namespace paracfd::core
 	AmrGpuSolveResult DeviceCompositeAmrPressureSolver::solve(PressureReal* pressure,const PressureReal* rhs,
 		double tolerance,int max_iterations,bool warm_start)
 	{
-		// Production uses the symmetric two-point finite-volume operator.  The former
-		// full non-orthogonal path nested an iterative PCG solve inside every flexible
-		// GMRES basis vector, making one projection thousands of full-grid GPU passes.
-		// Keep that path available only for diagnostics while the production solve and
-		// flux update use the same conservative orthogonal discretization.
+		// Orthogonal meshes use PCG. Cut cells and AMR use the affine-consistent
+		// corrected operator with flexible GMRES and a bounded multigrid V-cycle.
+		// The solved operator and the correction of face fluxes are identical.
 		if(!full_nonorthogonal_)
 		{
 			// The historical implementation split the configured work into one solve plus
@@ -1380,7 +1370,7 @@ namespace paracfd::core
 			const int total_budget=max_iterations>std::numeric_limits<int>::max()/5?
 				max_iterations:5*max_iterations;
 			AmrGpuSolveResult result=solve_orthogonal(
-				pressure,rhs,std::max(tolerance,1e-4),total_budget,false);
+				pressure,rhs,tolerance,total_budget,warm_start);
 			if(!(rhs2>0)||!std::isfinite(rhs2))return result;
 			op_.apply_orthogonal(pressure,Ad_);
 			check(cudaMemcpy(defect_rhs_,rhs,static_cast<std::size_t>(n_)*sizeof(PressureReal),
@@ -1535,92 +1525,10 @@ namespace paracfd::core
 			{
 				PressureReal* const v=gmres_v_+static_cast<std::size_t>(column)*n_;
 				PressureReal* const z=gmres_z_+static_cast<std::size_t>(column)*n_;
-				// The orthogonal finite-volume operator is the coercive part of the full
-				// non-orthogonal system.  Approximately invert it for each outer basis
-				// vector; retaining z_j makes this a flexible right-preconditioner even
-				// when the inner Krylov iteration takes a different path per column.
-				auto record_inner=[&](const AmrGpuSolveResult& inner)
-				{
-					++result.preconditioner_applications;
-					result.inner_iterations_total+=inner.iterations;
-					result.inner_iterations_maximum=std::max(result.inner_iterations_maximum,inner.iterations);
-					result.inner_relative_residual_maximum=std::max(
-						result.inner_relative_residual_maximum,inner.relative_residual);
-				};
-				const AmrGpuSolveResult inner=solve_orthogonal(z,v,2e-2,80,false);record_inner(inner);
+				// One V-cycle per Arnoldi vector, rather than nested 80-step PCG
+				// solves. GMRES handles the nonsymmetric non-orthogonal terms.
+				apply_preconditioner(v,z);++result.preconditioner_applications;
 				op_.apply(z,Ad_);
-				check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),
-					cudaMemcpyDeviceToDevice),"copy first-stage full-operator defect");
-				subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
-				const double source2=dot_active(v,v,active_,n_);
-				double defect2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
-				const double first_eta=source2>0?std::sqrt(defect2/source2):
-					std::numeric_limits<double>::infinity();
-				double schwarz_omega=0,schwarz_ratio=1;
-				if(schwarz_block_count_&&defect2>0&&std::isfinite(defect2))
-				{
-					apply_irregular_schwarz(defect_rhs_,correction_);op_.apply(correction_,t_);
-					const double image2=dot_active(t_,t_,active_,n_);
-					const double numerator=dot_active(defect_rhs_,t_,active_,n_);
-					if(image2>0&&std::isfinite(image2)&&std::isfinite(numerator)&&finite_real(numerator/image2))
-					{
-						schwarz_omega=numerator/image2;
-						copy_active_kernel<<<(n_+255)/256,256>>>(z,direction_,active_,n_);
-						axpy_active_kernel<<<(n_+255)/256,256>>>(direction_,correction_,static_cast<PressureReal>(schwarz_omega),active_,n_);
-						op_.apply(direction_,Ad_);
-						check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"copy Schwarz-corrected full-operator defect");
-						subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
-						const double corrected2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
-						++result.irregular_schwarz_applications;
-						schwarz_ratio=corrected2>=0&&std::isfinite(corrected2)?std::sqrt(corrected2/defect2):1;
-						result.irregular_schwarz_best_defect_ratio=std::min(result.irregular_schwarz_best_defect_ratio,schwarz_ratio);
-						if(corrected2<defect2){copy_active_kernel<<<(n_+255)/256,256>>>(direction_,z,active_,n_);defect2=corrected2;}
-						else
-						{
-							op_.apply(z,Ad_);check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),cudaMemcpyDeviceToDevice),"restore pre-Schwarz full-operator defect");subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);schwarz_omega=0;schwarz_ratio=1;
-						}
-					}
-				}
-				double defect_omega=0;
-				int second_iterations=0;double second_residual=0;
-				// A0 is an excellent inverse in regular regions, but a large non-orthogonal
-				// EB correction can make B=A0^-1 a poor full-A right preconditioner. Apply
-				// one residual-correction stage only when the measured full defect warrants
-				// it. Flexible GMRES permits this variable preconditioner. The scalar omega
-				// is the minimum-residual line search for d-A*(omega*A0^-1*d).
-				const double post_schwarz_eta=source2>0?std::sqrt(defect2/source2):std::numeric_limits<double>::infinity();
-				if(std::isfinite(post_schwarz_eta)&&post_schwarz_eta>0.25&&defect2>0)
-				{
-					PressureReal* const defect_correction=gmres_v_+static_cast<std::size_t>(column+1)*n_;
-					const AmrGpuSolveResult second=solve_orthogonal(
-						defect_correction,defect_rhs_,2e-2,80,false);record_inner(second);
-					second_iterations=second.iterations;second_residual=second.relative_residual;
-					op_.apply(defect_correction,t_);
-					const double image2=dot_active(t_,t_,active_,n_);
-					const double numerator=dot_active(defect_rhs_,t_,active_,n_);
-					if(image2>0&&std::isfinite(image2)&&std::isfinite(numerator)&&
-						finite_real(numerator/image2))defect_omega=numerator/image2;
-					if(defect_omega!=0)
-						axpy_active_kernel<<<(n_+255)/256,256>>>(z,defect_correction,
-							static_cast<PressureReal>(defect_omega),active_,n_);
-					// Flexible Arnoldi must use the true image of the vector actually
-					// stored in z. q1+omega*q2 is only the nominal image: the rounded z update
-					// can differ by pressure-vector ULPs and would violate A*z=Ad.
-					op_.apply(z,Ad_);
-					check(cudaMemcpy(defect_rhs_,v,static_cast<std::size_t>(n_)*sizeof(PressureReal),
-						cudaMemcpyDeviceToDevice),"copy corrected full-operator defect");
-					subtract_kernel<<<(n_+255)/256,256>>>(defect_rhs_,Ad_,active_,n_);
-					defect2=dot_active(defect_rhs_,defect_rhs_,active_,n_);
-				}
-				if(trace&&(column==0||column+1==cycle))
-				{
-					std::fprintf(stderr,"[pressure-gcro] restart=%d column=%d eta1/schwarz/final=%.9e/%.9e/%.9e schwarz-omega/ratio=%.9e/%.9e defect-omega=%.9e inner1=%d/%.9e inner2=%d/%.9e\n",
-						restart_index,column+1,first_eta,
-						post_schwarz_eta,
-						source2>0?std::sqrt(defect2/source2):std::numeric_limits<double>::infinity(),
-						schwarz_omega,schwarz_ratio,defect_omega,inner.iterations,inner.relative_residual,
-						second_iterations,second_residual);
-				}
 
 				// Project the true image against C and apply the identical coefficients
 				// to z against U. Therefore A*z=Ad remains true and the current flexible
@@ -1974,19 +1882,16 @@ namespace paracfd::core
 		solve_eb_gradient_kernel<<<(embedded_node_count_+255)/256,256>>>(eb_node_gradient_sum_,eb_node_gradient_inverse_,embedded_node_count_);
 		transport_eb_aperture_kernel<<<(embedded_count_+255)/256,256>>>(eb_node_a_,eb_node_b_,eb_negative_edge_,eb_positive_edge_,direction_,axis_,eb_transport_length_,special_velocity_,eb_node_axis_sum_,eb_node_axis_weight_,eb_node_gradient_sum_,dt,molecular_nu,smagorinsky_cs,eb_transport_scratch_,eb_diffusion_rate_,coarse_fine_count_,embedded_count_);
 
-		// Reconstruct a compatible fragment-centred vector state from the advected
-		// aperture/carrier velocities. The dual mass A/g uses the exact pressure-
-		// gradient factor, so this remap conserves momentum and dissipates only the
-		// pressure-null circulation that cannot represent a fragment velocity.
-		check(cudaMemset(eb_node_axis_sum_,0,node_components*sizeof(Real)),"clear compatible EB momentum sums");
-		check(cudaMemset(eb_node_axis_weight_,0,node_components*sizeof(Real)),"clear compatible EB momentum weights");
-		accumulate_eb_dual_momentum_kernel<<<(embedded_count_+255)/256,256>>>(eb_node_a_,eb_node_b_,axis_,open_area_,pressure_gradient_factor_,eb_transport_scratch_,eb_node_axis_sum_,eb_node_axis_weight_,coarse_fine_count_,embedded_count_);
-		if(embedded_carrier_count_)accumulate_conservative_carrier_kernel<<<(embedded_carrier_count_+255)/256,256>>>(levels_,eb_carrier_node_,eb_carrier_level_,eb_carrier_index_,eb_carrier_axis_,eb_carrier_mass_,eb_node_axis_sum_,eb_node_axis_weight_,embedded_carrier_count_);
-		reconstruct_compatible_eb_kernel<<<(embedded_count_+255)/256,256>>>(eb_node_a_,eb_node_b_,axis_+coarse_fine_count_,eb_node_axis_sum_,eb_node_axis_weight_,eb_transport_scratch_,eb_diffusion_scratch_,embedded_count_);
-		if(embedded_carrier_count_)reconstruct_compatible_carrier_kernel<<<(embedded_carrier_count_+255)/256,256>>>(levels_,eb_carrier_node_,eb_carrier_level_,eb_carrier_index_,eb_carrier_axis_,eb_node_axis_sum_,eb_node_axis_weight_,embedded_carrier_count_);
+		// Retain the transported face state. Replacing it by endpoint means at
+		// every step applied a finite filter even as dt approached zero, removing
+		// resolved circulation. Only timestep-scaled physical increments belong
+		// here; the pairwise diffusion below gathers frozen inputs before scattering.
+		check(cudaMemcpy(eb_diffusion_scratch_,eb_transport_scratch_,
+			static_cast<std::size_t>(embedded_count_)*sizeof(Real),cudaMemcpyDeviceToDevice),
+			"retain transported EB face velocities");
 
 		// Apply molecular/LES diffusion as conservative pairwise fragment momentum
-		// exchange after the compatible reconstruction.
+		// exchange after transport.
 		check(cudaMemset(eb_node_axis_sum_,0,node_components*sizeof(Real)),"clear conservative EB momentum sums");
 		check(cudaMemset(eb_node_axis_weight_,0,node_components*sizeof(Real)),"clear conservative EB momentum weights");
 		check(cudaMemset(eb_node_diffusion_sum_,0,node_components*sizeof(Real)),"clear conservative EB momentum deltas");
@@ -2132,7 +2037,7 @@ namespace paracfd::core
 		if(!(rho>Real(0))||!(dt>Real(0)))
 			throw std::invalid_argument("composite projection correction rho/dt");
 		const PressureReal scale=PressureReal(dt)/PressureReal(rho);
-		const bool full_nonorthogonal=std::getenv("PARACFD_PRESSURE_FULL_NONORTHOGONAL")!=nullptr;
+		const bool full_nonorthogonal=pressure_gradient_node_count_>0;
 		for(int level=0;level<level_count_;++level)
 		{
 			const int work=brick_counts_[level]*brick_size_*brick_size_*brick_size_;
@@ -2190,4 +2095,15 @@ namespace paracfd::core
 	}
 	void DeviceCompositeAmrProjection::download_divergence(std::vector<Real>& host)const{host.resize(storage_size_);check(cudaMemcpy(host.data(),divergence_,host.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite divergence");}
 	void DeviceCompositeAmrProjection::download_pressure(std::vector<Real>& host)const{host.resize(storage_size_);check(cudaMemcpy(host.data(),pressure_,host.size()*sizeof(Real),cudaMemcpyDeviceToHost),"download composite pressure");}
+	void DeviceCompositeAmrProjection::upload_pressure(const std::vector<double>& host)
+	{
+		if(host.size()!=static_cast<std::size_t>(storage_size_)||
+			!std::all_of(host.begin(),host.end(),[](double value){return std::isfinite(value);}))
+			throw std::invalid_argument("invalid composite pressure state");
+		const std::vector<PressureReal> values(host.begin(),host.end());
+		check(cudaMemcpy(pressure_solve_,values.data(),values.size()*sizeof(PressureReal),
+			cudaMemcpyHostToDevice),"restore composite solve pressure");
+		convert_pressure_kernel<<<(storage_size_+255)/256,256>>>(pressure_solve_,pressure_,storage_size_);
+		check(cudaDeviceSynchronize(),"restore composite pressure shadow");
+	}
 }

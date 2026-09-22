@@ -1,4 +1,11 @@
+> Numerical repair progress: [review/REPAIR_STATUS.md](review/REPAIR_STATUS.md). The supplied PlanB trim remains unchanged.
+
 # Paraglider CFD implementation plan
+
+> **6 September 2026 review:** use [COMPLETION_PLAN.md](COMPLETION_PLAN.md) for the
+> current recovery and completion sequence, and [SIMULATION_REVIEW.md](SIMULATION_REVIEW.md)
+> for reproduced numerical defects. The checklist below is historical; its completed
+> items and old validation claims do not certify the current closed-solid solver.
 
 > Current solver status: the face-centred staggered MAC path is the production
 > default. The collocated conservative-control-volume path recorded later in this

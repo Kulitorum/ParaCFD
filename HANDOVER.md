@@ -1,3 +1,5 @@
+> **Historical architecture notes:** current repair evidence and remaining limitations are in [review/REPAIR_STATUS.md](review/REPAIR_STATUS.md) and [COMPLETION_PLAN.md](COMPLETION_PLAN.md). Descriptions below of zero-thickness production geometry, a validated MAC solver, or a fixed FP32 pressure-tolerance floor predate the current closed-solid and corrected-pressure implementation.
+
 # ParaCFD handover
 
 ## 2026-08-21 reset checkpoint -- read this first

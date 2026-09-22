@@ -85,10 +85,35 @@ namespace paracfd::core
 		if(!options.closed_solid)
 			throw std::invalid_argument("AMR embedded-boundary construction requires a closed solid");
 		AmrEmbeddedBoundaryAtlas result;const int bs=hierarchy.brick_size();
+		result.solid_bricks.resize(hierarchy.levels().size());
 		for(int level=0;level<static_cast<int>(hierarchy.levels().size());++level)
 		{
 			const auto level_begin=std::chrono::steady_clock::now();
 			const AmrLevel& source=hierarchy.levels()[level];Int3 minimum{std::numeric_limits<int>::max(),std::numeric_limits<int>::max(),std::numeric_limits<int>::max()},maximum{std::numeric_limits<int>::min(),std::numeric_limits<int>::min(),std::numeric_limits<int>::min()};bool found=false;
+			auto& solid_bricks=result.solid_bricks[level];solid_bricks.assign(source.bricks.size(),0);
+			std::vector<Vec3d> material_witnesses;std::vector<int> material_bricks;
+			for(int index=0;index<static_cast<int>(source.bricks.size());++index)
+			{
+				const auto& brick=source.bricks[index];if(!brick.active())continue;
+				const double width=bs*static_cast<double>(brick.h);
+				if(!bvh.query_aabb({brick.origin,brick.origin+Vec3d{width,width,width}}).empty())continue;
+				const Vec3d witness=brick.origin+Vec3d{width/2,width/2,width/2};
+				const auto& bounds=options.closed_solid->bounds();bool outside_bounds=false;
+				for(int axis=0;axis<3;++axis)
+					outside_bounds=outside_bounds||witness[axis]<bounds.lo[axis]||witness[axis]>bounds.hi[axis];
+				if(outside_bounds)continue;
+				material_bricks.push_back(index);
+				material_witnesses.push_back(witness);
+			}
+			std::vector<ClosedSolidPointLocation> materials(material_witnesses.size());
+			if(!materials.empty())options.closed_solid->classify_discrete_points(material_witnesses.data(),
+				material_witnesses.size(),1e-11*source.h,materials.data());
+			for(std::size_t q=0;q<materials.size();++q)
+			{
+				if(materials[q]!=ClosedSolidPointLocation::inside&&materials[q]!=ClosedSolidPointLocation::outside)
+					throw std::runtime_error("could not classify an active non-surface brick");
+				solid_bricks[material_bricks[q]]=materials[q]==ClosedSolidPointLocation::inside;
+			}
 			for(const BrickMetadata& brick:source.bricks)if(brick.active())
 			{
 				const double width=bs*static_cast<double>(brick.h);const Aabb3d brick_box{brick.origin,brick.origin+Vec3d{width,width,width}};if(!brick.embedded_boundary()&&bvh.query_aabb(brick_box).empty())continue;found=true;minimum.x=std::min(minimum.x,brick.coord.x);minimum.y=std::min(minimum.y,brick.coord.y);minimum.z=std::min(minimum.z,brick.coord.z);maximum.x=std::max(maximum.x,brick.coord.x);maximum.y=std::max(maximum.y,brick.coord.y);maximum.z=std::max(maximum.z,brick.coord.z);

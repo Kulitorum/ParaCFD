@@ -177,6 +177,19 @@ paracfd_deploy_occ_dlls(naca_validation_probe)
 # --- retained solver tests ---------------------------------------------------
 enable_testing()
 
+# Direct contracts of the production cut-cell geometry, projection and momentum
+# operators. The PlanB version is available explicitly with --planb.
+add_executable(physics_contract_probe tools/physics_contract_probe.cpp)
+target_link_libraries(physics_contract_probe PRIVATE libparacfd paracfd_geometry)
+paracfd_deploy_occ_dlls(physics_contract_probe)
+add_test(NAME production_physics_contracts COMMAND physics_contract_probe)
+add_test(NAME production_cell_momentum COMMAND physics_contract_probe --cell-momentum)
+add_test(NAME production_conditioned_momentum COMMAND physics_contract_probe --conditioning)
+add_test(NAME cropped_solid_geometry COMMAND physics_contract_probe --cropped --geometry-only)
+add_test(NAME interior_brick_geometry COMMAND physics_contract_probe --interior-brick --geometry-only)
+set_tests_properties(production_physics_contracts production_cell_momentum production_conditioned_momentum cropped_solid_geometry interior_brick_geometry
+	PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 add_executable(parity_probe tools/parity_probe.cu)
 set_target_properties(parity_probe PROPERTIES
 	CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
